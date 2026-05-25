@@ -1,0 +1,209 @@
+"""Tests for the ``save_papers`` workflow handler."""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+from typing import Any
+from unittest.mock import patch
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import save_papers
+from _paper_document import _content_hash, build_paper_document
+
+from ._fakes import FakePool
+
+
+class FakeContext:
+    """Minimal workflow context exposing ``_pool`` and a recording ``log``."""
+
+    def __init__(self, pool: FakePool) -> None:
+        self._pool = pool
+        self.logs: list[tuple[str, dict[str, Any]]] = []
+
+    def log(self, event: str, **kwargs: Any) -> None:
+        self.logs.append((event, kwargs))
+
+
+class FakeS2Client:
+    """Stand-in for ``SemanticScholarClient`` used inside the handler."""
+
+    def __init__(
+        self,
+        papers_by_id: dict[str, dict[str, Any]],
+        *,
+        fail_ids: tuple[str, ...] = (),
+        raise_on: dict[str, BaseException] | None = None,
+    ) -> None:
+        self._papers = papers_by_id
+        self._fail_ids = set(fail_ids)
+        self._raise_on = raise_on or {}
+        self.close_called = False
+        self.get_paper_calls: list[str] = []
+
+    def get_paper(self, paper_id: str) -> dict[str, Any]:
+        self.get_paper_calls.append(paper_id)
+        if paper_id in self._raise_on:
+            raise self._raise_on[paper_id]
+        if paper_id in self._fail_ids:
+            raise RuntimeError(f"S2 API error for {paper_id}")
+        return self._papers[paper_id]
+
+    def close(self) -> None:
+        self.close_called = True
+
+    def __enter__(self) -> FakeS2Client:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
+
+def _paper(paper_id: str, *, title: str = "Sample Paper") -> dict[str, Any]:
+    """Minimal S2-shaped paper dict sufficient for ``build_paper_document``."""
+    return {
+        "paperId": paper_id,
+        "title": title,
+        "authors": [{"authorId": "a1", "name": "Test Author"}],
+        "year": 2024,
+        "abstract": f"Abstract for {paper_id}.",
+        "citationCount": 1,
+        "url": f"https://www.semanticscholar.org/paper/{paper_id}",
+        "openAccessPdf": None,
+        "venue": "Test Venue",
+        "externalIds": {"DOI": f"10.0/{paper_id}"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_handler_skips_when_paper_ids_empty() -> None:
+    pool = FakePool()
+    ctx = FakeContext(pool)
+
+    with patch("save_papers.SemanticScholarClient") as mock_cls:
+        result = await save_papers.handler(save_papers.Input(paper_ids=[]), ctx)
+
+    assert result == {"status": "skipped", "reason": "no_paper_ids"}
+    assert mock_cls.call_count == 0
+    assert pool.fetchval_calls == []
+    assert pool.execute_calls == []
+    assert any(event == "save_papers_skipped_empty" for event, _ in ctx.logs)
+
+
+@pytest.mark.asyncio
+async def test_handler_inserts_one_paper() -> None:
+    pool = FakePool(existing_hash=None, execute_status="INSERT 0 1")
+    ctx = FakeContext(pool)
+    fake = FakeS2Client({"abc123": _paper("abc123")})
+
+    with patch("save_papers.SemanticScholarClient") as mock_cls:
+        mock_cls.return_value = fake
+        result = await save_papers.handler(
+            save_papers.Input(paper_ids=["abc123"]),
+            ctx,
+        )
+
+    assert result["status"] == "completed"
+    assert result["papers_inserted"] == 1
+    assert result["papers_updated"] == 0
+    assert result["papers_noop"] == 0
+    assert result["papers_failed"] == 0
+    assert len(result["results"]) == 1
+    entry = result["results"][0]
+    assert entry["status"] == "inserted"
+    assert entry["document_id"] == "semantic_scholar:paper:abc123"
+    assert entry["paperId"] == "abc123"
+    assert fake.close_called is True
+
+
+@pytest.mark.asyncio
+async def test_handler_handles_partial_failure() -> None:
+    pool = FakePool(existing_hash=None, execute_status="INSERT 0 1")
+    ctx = FakeContext(pool)
+    fake = FakeS2Client(
+        {"ok1": _paper("ok1"), "ok2": _paper("ok2")},
+        fail_ids=("bad",),
+    )
+
+    with patch("save_papers.SemanticScholarClient") as mock_cls:
+        mock_cls.return_value = fake
+        result = await save_papers.handler(
+            save_papers.Input(paper_ids=["ok1", "bad", "ok2"]),
+            ctx,
+        )
+
+    assert result["status"] == "completed"
+    assert result["papers_inserted"] == 2
+    assert result["papers_failed"] == 1
+    failed = [r for r in result["results"] if r.get("status") == "failed"]
+    assert len(failed) == 1
+    assert failed[0]["paperId"] == "bad"
+    assert "S2 API error for bad" in failed[0]["error"]
+    assert fake.close_called is True
+    assert any(event == "save_papers_paper_failed" for event, _ in ctx.logs)
+
+
+@pytest.mark.asyncio
+async def test_handler_passes_query_to_metadata() -> None:
+    pool = FakePool(existing_hash=None, execute_status="INSERT 0 1")
+    ctx = FakeContext(pool)
+    fake = FakeS2Client({"x": _paper("x")})
+
+    with patch("save_papers.SemanticScholarClient") as mock_cls:
+        mock_cls.return_value = fake
+        await save_papers.handler(
+            save_papers.Input(paper_ids=["x"], query="active inference"),
+            ctx,
+        )
+
+    assert len(pool.execute_calls) == 1
+    _query, args = pool.execute_calls[0]
+    metadata_json = args[15]
+    assert isinstance(metadata_json, str)
+    assert '"query":"active inference"' in metadata_json
+
+
+@pytest.mark.asyncio
+async def test_handler_returns_noop_for_unchanged_papers() -> None:
+    paper = _paper("noop-id")
+    document = build_paper_document(paper)
+    # save_papers calls upsert_document without a parent_document_id kwarg, so
+    # the persisted hash combines the intrinsic content_hash with None.
+    persisted_hash = _content_hash(document["content_hash"], None)
+    pool = FakePool(existing_hash=persisted_hash)
+    ctx = FakeContext(pool)
+    fake = FakeS2Client({"noop-id": paper})
+
+    with patch("save_papers.SemanticScholarClient") as mock_cls:
+        mock_cls.return_value = fake
+        result = await save_papers.handler(
+            save_papers.Input(paper_ids=["noop-id"]),
+            ctx,
+        )
+
+    assert result["papers_noop"] == 1
+    assert result["papers_inserted"] == 0
+    assert pool.execute_calls == []
+
+
+@pytest.mark.asyncio
+async def test_handler_closes_client_on_exception() -> None:
+    pool = FakePool()
+    ctx = FakeContext(pool)
+    fake = FakeS2Client(
+        {},
+        raise_on={"boom": ValueError("unexpected client failure")},
+    )
+
+    with patch("save_papers.SemanticScholarClient") as mock_cls:
+        mock_cls.return_value = fake
+        with pytest.raises(ValueError, match="unexpected client failure"):
+            await save_papers.handler(
+                save_papers.Input(paper_ids=["boom"]),
+                ctx,
+            )
+
+    assert fake.close_called is True

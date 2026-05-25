@@ -16,10 +16,28 @@ default:
 build:
     docker build -t centaur-overlay:latest .
 
-# Lint every tool against the same ruff contract upstream uses.
+# Lint every tool and workflow against the same ruff contract upstream uses.
 [group('dev')]
 lint:
     cd tools && uvx ruff check .
+    cd workflows && uvx ruff check .
+
+# Lint just the org tools (subset of `lint`).
+[group('dev')]
+lint-tools:
+    cd tools && uvx ruff check .
+
+# Lint just the org workflow handlers (subset of `lint`).
+[group('dev')]
+lint-workflows:
+    cd workflows && uvx ruff check .
+
+# Run the workflow handler test suite locally. Workflows aren't packaged —
+# uv resolves dev deps via overlay/workflows/pyproject.toml without polluting
+# the tool packages.
+[group('dev')]
+test-workflows:
+    cd workflows && uv run --python 3.11 --with pytest --with pytest-asyncio pytest tests/ -v
 
 # Smoke-test the CLI without spinning up a sandbox. Honors $SEMANTIC_SCHOLAR_API_KEY
 # from the root `.env` (auto-loaded above) but works without it (anonymous,
@@ -27,3 +45,28 @@ lint:
 [group('dev')]
 smoke-semantic-scholar query="diffusion models protein design" limit="5":
     cd tools/semantic_scholar && uv run python cli.py search {{ quote(query) }} --limit {{ limit }}
+
+# Smoke-test the deployed save_papers workflow. Posts a single paper ID to
+# /workflows/runs from inside the API pod so we can reuse $SLACKBOT_API_KEY
+# (the chart injects it; its `agent` scope grants `agent:execute`, which the
+# workflows router accepts). Default paper is the active-inference robot
+# paper used in earlier semantic-scholar smokes.
+[group('cluster')]
+smoke-save-papers paper_id="173ba8ae4582b6f9f6919aa3f813579a5349f1f9":
+    kubectl exec -n centaur-system deploy/centaur-centaur-api -- sh -c \
+      'curl -sS -X POST http://localhost:8000/workflows/runs \
+        -H "X-Api-Key: $SLACKBOT_API_KEY" \
+        -H "Content-Type: application/json" \
+        -d "{\"workflow_name\":\"save_papers\",\"input\":{\"paper_ids\":[\"{{ paper_id }}\"]}}"' \
+      | jq .
+
+# Smoke-test the deployed research_brief workflow. Same auth pattern as
+# smoke-save-papers — exec into the API pod to reuse $SLACKBOT_API_KEY.
+[group('cluster')]
+smoke-research-brief query="active inference world models" limit="3":
+    kubectl exec -n centaur-system deploy/centaur-centaur-api -- sh -c \
+      'curl -sS -X POST http://localhost:8000/workflows/runs \
+        -H "X-Api-Key: $SLACKBOT_API_KEY" \
+        -H "Content-Type: application/json" \
+        -d "{\"workflow_name\":\"research_brief\",\"input\":{\"query\":\"{{ query }}\",\"limit\":{{ limit }}}}"' \
+      | jq .

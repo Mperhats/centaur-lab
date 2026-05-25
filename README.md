@@ -14,7 +14,7 @@ The full design rationale lives in
 | Path | Purpose |
 |------|---------|
 | `.centaur/` | Git submodule pinned at a specific `paradigmxyz/centaur` SHA. The base platform. |
-| `overlay/` | Org-specific tools, skills, and a `Dockerfile` packaged into the `centaur-overlay:latest` image and mounted into the API + sandbox pods. See the [Tools](#tools-in-overlay) section below. |
+| `overlay/` | Org-specific tools, **workflows**, skills, and a `Dockerfile` packaged into the `centaur-overlay:latest` image and mounted into the API + sandbox pods. See the [Tools](#tools-in-overlay) and [Workflows](#workflows-in-overlay) sections below. |
 | `values.local.yaml` | Helm chart overlay: env-var secrets, Claude Code default, Slackbot + Slack ETL enabled, local image-pull policies, overlay image reference. |
 | `Justfile` | Thin wrapper over `.centaur/Justfile`. Only owns recipes that fill real upstream gaps — see the recipe-by-recipe `# comments` for the why. `just --list` shows everything grouped. |
 | `.env.example` | Template for the shell env vars `bootstrap-secrets` reads. |
@@ -201,6 +201,40 @@ For background on the overlay model (how the image is built, how
 `TOOL_DIRS` is assembled, how to verify discovery from the API pod), see
 [`docs/centaur/extend/overlay.md`](docs/centaur/extend/overlay.md) and
 [`docs/centaur/extend/tools.md`](docs/centaur/extend/tools.md).
+
+## Workflows (in `overlay/`)
+
+Overlay workflows are durable, checkpoint-replayable handlers shipped via
+the same `centaur-overlay:latest` image as the tools. They're auto-discovered
+on API startup from `WORKFLOW_DIRS=/app/workflows:/app/overlay/org/workflows`,
+so dropping a new file in `overlay/workflows/` and rebuilding the image is
+all that's needed to register one.
+
+| Workflow | Purpose |
+|----------|---------|
+| [`overlay/workflows/save_papers.py`](overlay/workflows/save_papers.py) | Upsert one or more Semantic Scholar paper IDs into `company_context_documents` as `source_type="paper"` rows; idempotent on content hash. |
+| [`overlay/workflows/research_brief.py`](overlay/workflows/research_brief.py) | Search Semantic Scholar, render a Markdown lit-review brief, and upsert the brief plus each underlying paper as parent/child rows in `company_context_documents`. |
+
+### Triggering workflows
+
+From a Slack-driven agent in the sandbox, use the documented `call workflow run` shape:
+
+```
+call workflow run '{"workflow_name":"save_papers","input":{"paper_ids":["..."]}}'
+call workflow run '{"workflow_name":"research_brief","input":{"query":"...","limit":5}}'
+```
+
+From the host (against the live cluster), the overlay Justfile wraps the
+same POST against the in-pod API:
+
+```bash
+just overlay::smoke-save-papers <paper_id>
+just overlay::smoke-research-brief "<query>"
+```
+
+Both workflows write to `company_context_documents`, which is BM25-indexed
+via paradedb and has a GIN index on `metadata` — so persisted papers and
+briefs are immediately future-RAG-ready for retrieval across turns.
 
 ## What this repo intentionally does NOT contain (yet)
 
