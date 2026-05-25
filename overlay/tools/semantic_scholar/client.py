@@ -5,19 +5,263 @@ Reference: https://api.semanticscholar.org/api-docs/graph
 The Graph API is callable anonymously (heavily rate-limited) or with an
 ``x-api-key`` for higher quotas. We send the header only when the secret is
 set so anonymous calls don't accidentally hit a 401 on a stale placeholder.
+
+In addition to the live Graph API helpers (``search_papers``,
+``get_paper``, ``get_references``), this module exposes a hybrid
+``search`` method that consults already-indexed papers in
+``company_context_documents`` before topping up via the live API. The
+indexed-lane helpers below are ported from
+``.centaur/tools/productivity/company_context/client.py`` — see the
+"keep in sync" note above them.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
+import os
+import re
 import time
+from datetime import datetime
 from typing import Any
 
+import asyncpg
 import httpx
 
 from centaur_sdk import secret
 
 DEFAULT_PAPER_FIELDS = "title,authors,year,abstract,citationCount,url,openAccessPdf"
 DEFAULT_REFERENCE_FIELDS = "title,authors,year,citationCount,url"
+
+DEFAULT_HYBRID_SEARCH_LIMIT = 10
+MAX_HYBRID_SEARCH_LIMIT = 50
+
+
+# ---------------------------------------------------------------------------
+# The BM25 query helpers below are copied verbatim from
+# .centaur/tools/productivity/company_context/client.py. Keep in sync — they
+# implement the same paradedb scoring contract that the upstream Slack tool
+# relies on.
+# ---------------------------------------------------------------------------
+
+EXACT_QUERY_TITLE_BOOST = 8
+EXACT_QUERY_BODY_BOOST = 2
+TITLE_MATCH_BOOST = 4
+DEFAULT_PREVIEW_CHARS = 280
+
+_SEARCH_TERM_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/-]*")
+_STOP_WORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "but",
+    "by",
+    "for",
+    "from",
+    "how",
+    "i",
+    "if",
+    "in",
+    "into",
+    "is",
+    "it",
+    "of",
+    "on",
+    "or",
+    "our",
+    "that",
+    "the",
+    "their",
+    "there",
+    "these",
+    "they",
+    "this",
+    "to",
+    "was",
+    "we",
+    "were",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "why",
+    "will",
+    "with",
+}
+
+
+def _clamp(value: int, *, minimum: int, maximum: int) -> int:
+    """Clamp integer tool inputs to predictable output bounds."""
+    return max(minimum, min(int(value), maximum))
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    """Decode asyncpg JSON/JSONB values into a dict."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            return {}
+    return {}
+
+
+def _isoformat(value: Any) -> str | None:
+    """Serialize datetimes while leaving absent values explicit."""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return None
+
+
+def _normalize_text(value: str) -> str:
+    """Collapse whitespace so previews stay compact and readable."""
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _search_terms(query: str) -> list[str]:
+    """Extract unique content terms, falling back when filtering removes everything."""
+    seen: set[str] = set()
+    all_terms: list[str] = []
+    filtered_terms: list[str] = []
+    for match in _SEARCH_TERM_RE.finditer(query):
+        term = match.group(0).strip()
+        if len(term) < 2:
+            continue
+        key = term.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        all_terms.append(term)
+        if key not in _STOP_WORDS:
+            filtered_terms.append(term)
+    return filtered_terms or all_terms or [query]
+
+
+def _search_where_clause(term_count: int) -> str:
+    """Build a ParadeDB query that boosts exact matches and falls back to OR term matching."""
+    clauses = [
+        "("
+        f"title ||| $1::text::pdb.boost({EXACT_QUERY_TITLE_BOOST}) "
+        f"OR body ||| $1::text::pdb.boost({EXACT_QUERY_BODY_BOOST})"
+        ")"
+    ]
+    for index in range(2, term_count + 2):
+        clauses.append(
+            f"(title ||| ${index}::text::pdb.boost({TITLE_MATCH_BOOST}) OR body ||| ${index})"
+        )
+    return " OR ".join(clauses)
+
+
+def _body_preview(body: str, *, query: str, max_chars: int = DEFAULT_PREVIEW_CHARS) -> str:
+    """Build a compact preview centered on the first query-term hit when possible."""
+    normalized = _normalize_text(body)
+    if not normalized:
+        return ""
+    if len(normalized) <= max_chars:
+        return normalized
+
+    terms = _search_terms(query)
+    start = 0
+    lowered = normalized.lower()
+    for term in terms:
+        index = lowered.find(term.lower())
+        if index >= 0:
+            start = max(0, index - max_chars // 3)
+            break
+
+    end = min(len(normalized), start + max_chars)
+    snippet = normalized[start:end].strip()
+    if start > 0:
+        snippet = f"...{snippet}"
+    if end < len(normalized):
+        snippet = f"{snippet}..."
+    return snippet
+
+
+def _row_value(row: Any, key: str, default: Any = None) -> Any:
+    """Read values from asyncpg rows while tolerating sparse test doubles."""
+    try:
+        value = row[key]
+    except (KeyError, IndexError, TypeError):
+        return default
+    return default if value is None else value
+
+
+def _document_summary(row: Any) -> dict[str, Any]:
+    """Return the common metadata we expose for document records."""
+    return {
+        "document_id": str(_row_value(row, "document_id", "")),
+        "source": str(_row_value(row, "source", "")),
+        "source_type": str(_row_value(row, "source_type", "")),
+        "source_document_id": str(_row_value(row, "source_document_id", "")),
+        "source_chunk_id": str(_row_value(row, "source_chunk_id", "")),
+        "parent_document_id": str(_row_value(row, "parent_document_id", "") or "") or None,
+        "title": str(_row_value(row, "title", "")),
+        "url": str(_row_value(row, "url", "")),
+        "author_name": str(_row_value(row, "author_name", "")),
+        "access_scope": str(_row_value(row, "access_scope", "")),
+        "occurred_at": _isoformat(_row_value(row, "occurred_at")),
+        "source_updated_at": _isoformat(_row_value(row, "source_updated_at")),
+        "metadata": _as_dict(_row_value(row, "metadata", {})),
+    }
+
+
+def _resolve_database_url() -> str:
+    """Resolve DATABASE_URL the same way the upstream company_context tool does."""
+    # DATABASE_URL is owned by the API process, not an agent-facing secret;
+    # this mirrors company_context_client._resolve_database_url.
+    env_database_url = os.getenv("DATABASE_URL")  # noqa: TID251
+    return (env_database_url or secret("DATABASE_URL", default="")).strip()
+
+
+def _extract_paper_id(summary: dict[str, Any]) -> str:
+    """Pick a paperId out of an indexed-document summary."""
+    metadata_paper_id = summary.get("metadata", {}).get("paperId")
+    if metadata_paper_id:
+        return str(metadata_paper_id)
+    return str(summary.get("source_document_id") or "")
+
+
+def _cutoff_year_from_rows(rows: list[Any]) -> int | None:
+    """Compute the most recent ``metadata.year`` across the indexed rows."""
+    best: int | None = None
+    for row in rows:
+        metadata = _as_dict(_row_value(row, "metadata", {}))
+        raw_year = metadata.get("year")
+        if raw_year is None:
+            continue
+        try:
+            year_int = int(raw_year)
+        except (TypeError, ValueError):
+            continue
+        if best is None or year_int > best:
+            best = year_int
+    return best
+
+
+def _live_paper_result(paper: dict[str, Any]) -> dict[str, Any]:
+    """Project a Semantic Scholar paper dict into the merged search result shape."""
+    return {
+        "paperId": str(paper.get("paperId") or ""),
+        "title": paper.get("title"),
+        "year": paper.get("year"),
+        "authors": paper.get("authors") or [],
+        "abstract": paper.get("abstract"),
+        "url": paper.get("url"),
+        "citationCount": paper.get("citationCount"),
+        "openAccessPdf": paper.get("openAccessPdf"),
+        "lane": "live",
+        "result_type": "paper",
+        "score": None,
+    }
 
 
 class SemanticScholarClient:
@@ -153,6 +397,153 @@ class SemanticScholarClient:
             if isinstance(cited, dict):
                 out.append(cited)
         return out
+
+    def search(
+        self,
+        query: str,
+        limit: int = DEFAULT_HYBRID_SEARCH_LIMIT,
+        year_from: int | None = None,
+    ) -> dict:
+        """Hybrid indexed-first, live-after search across saved + live S2 papers.
+
+        BM25-queries ``company_context_documents`` for Semantic Scholar
+        papers already projected into the table, then tops up via the
+        live ``/paper/search`` endpoint with ``year_from`` advanced past
+        the most recent indexed year. Live results whose ``paperId``
+        already appears in the indexed slice are dropped.
+
+        Never raises — returns an ``{"status": "error", "error": ...}``
+        dict on any failure that prevents producing results.
+        """
+        normalized_query = query.strip() if query else ""
+        if not normalized_query:
+            return {"status": "error", "error": "query cannot be empty"}
+
+        database_url = _resolve_database_url()
+        if not database_url:
+            return {
+                "status": "error",
+                "error": "DATABASE_URL is required for semantic_scholar.search",
+            }
+
+        clamped_limit = _clamp(
+            limit,
+            minimum=1,
+            maximum=MAX_HYBRID_SEARCH_LIMIT,
+        )
+
+        try:
+            return asyncio.run(
+                self._search_async(
+                    query=normalized_query,
+                    limit=clamped_limit,
+                    year_from=year_from,
+                    database_url=database_url,
+                )
+            )
+        except Exception as exc:
+            return {"status": "error", "error": str(exc)}
+
+    async def _search_async(
+        self,
+        *,
+        query: str,
+        limit: int,
+        year_from: int | None,
+        database_url: str,
+    ) -> dict[str, Any]:
+        conn = await asyncpg.connect(database_url, command_timeout=30)
+        try:
+            terms = _search_terms(query)
+            search_terms = [query, *terms]
+            limit_param = len(search_terms) + 1
+            rows = await conn.fetch(
+                f"""
+                SELECT
+                    document_id,
+                    source,
+                    source_type,
+                    source_document_id,
+                    source_chunk_id,
+                    parent_document_id,
+                    title,
+                    url,
+                    author_name,
+                    access_scope,
+                    body,
+                    occurred_at,
+                    source_updated_at,
+                    metadata,
+                    paradedb.score(document_id) AS score
+                FROM company_context_documents
+                WHERE ({_search_where_clause(len(terms))})
+                  AND source = 'semantic_scholar'
+                  AND source_type = 'paper'
+                ORDER BY
+                    paradedb.score(document_id) DESC,
+                    source_updated_at DESC NULLS LAST
+                LIMIT ${limit_param}
+                """,
+                *search_terms,
+                limit,
+            )
+
+            indexed_results: list[dict[str, Any]] = []
+            indexed_paper_ids: set[str] = set()
+            for row in rows:
+                summary = _document_summary(row)
+                summary["score"] = float(_row_value(row, "score", 0.0) or 0.0)
+                summary["preview"] = _body_preview(
+                    str(_row_value(row, "body", "") or ""),
+                    query=query,
+                )
+                summary["lane"] = "indexed"
+                summary["result_type"] = "paper"
+                paper_id = _extract_paper_id(summary)
+                summary["paperId"] = paper_id
+                if paper_id:
+                    indexed_paper_ids.add(paper_id)
+                indexed_results.append(summary)
+
+            cutoff_year = _cutoff_year_from_rows(rows)
+            requested_floor = year_from or 0
+            indexed_floor = (cutoff_year + 1) if cutoff_year is not None else 0
+            effective_year_from_raw = max(requested_floor, indexed_floor)
+            effective_year_from = effective_year_from_raw or None
+
+            live_results: list[dict[str, Any]] = []
+            live_error: str | None = None
+            try:
+                raw_live = self.search_papers(
+                    query,
+                    limit=limit,
+                    year_from=effective_year_from,
+                )
+                for paper in raw_live:
+                    if not isinstance(paper, dict):
+                        continue
+                    paper_id = str(paper.get("paperId") or "")
+                    if paper_id and paper_id in indexed_paper_ids:
+                        continue
+                    live_results.append(_live_paper_result(paper))
+            except Exception as exc:
+                live_error = str(exc)
+
+            return {
+                "status": "ok",
+                "query": query,
+                "limit": limit,
+                "year_from": year_from,
+                "indexed_count": len(indexed_results),
+                "live_count": len(live_results),
+                "count": len(indexed_results) + len(live_results),
+                "indexed_cutoff_year": cutoff_year,
+                "live_year_from": effective_year_from,
+                "live_error": live_error,
+                "results": [*indexed_results, *live_results],
+            }
+        finally:
+            await conn.close()
 
     def close(self) -> None:
         if self._client is not None:
