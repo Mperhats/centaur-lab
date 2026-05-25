@@ -140,3 +140,103 @@ dev:
     echo "Tailing Slackbot logs. Ctrl-C stops both port-forwards; tunnel keeps running."
     echo ""
     kubectl logs -n $CENTAUR_NAMESPACE deploy/${CENTAUR_RELEASE}-centaur-slackbot --tail=20 -f
+
+# Full Slack-to-PR loop smoke test. Spawns a `lab-eng` sandbox, asks it to
+# scaffold a throwaway `probe` tool, and verifies a PR was opened against
+# Mperhats/centaur-lab. Requires repoCache + sandbox.reposPath enabled
+# (Task 2) and the lab-eng persona registered (Task 3).
+#
+# Idempotency: the recipe uses a fresh thread_key per run (timestamped),
+# so re-running is safe — each invocation opens a new PR. Clean up
+# accumulated probe PRs with `gh pr list -R Mperhats/centaur-lab --search
+# "feat(overlay): add probe tool" | awk '{print $1}' | xargs -I{} gh pr
+# close -R Mperhats/centaur-lab {} --delete-branch`.
+[group('dev')]
+slack-loop-smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    timestamp=$(date +%s)
+    thread_key="lab-loop-smoke-${timestamp}"
+    api_deploy="deploy/${CENTAUR_RELEASE}-centaur-api"
+    api_key=$(kubectl -n "$CENTAUR_NAMESPACE" get secret centaur-infra-env -o jsonpath='{.data.SLACKBOT_API_KEY}' | base64 -d)
+
+    exec_curl() {
+      kubectl -n "$CENTAUR_NAMESPACE" exec "$api_deploy" -- curl -s -H "X-Api-Key: $api_key" "$@"
+    }
+
+    echo "=== 1/4 spawn ==="
+    spawn=$(exec_curl -X POST http://localhost:8000/agent/spawn \
+      -H "Content-Type: application/json" \
+      -d "{\"thread_key\":\"${thread_key}\",\"harness\":\"lab-eng\"}")
+    printf '%s\n' "$spawn" | jq .
+    assignment_generation=$(printf '%s' "$spawn" | jq -r '.assignment_generation')
+
+    echo "=== 2/4 message ==="
+    exec_curl -X POST http://localhost:8000/agent/message \
+      -H "Content-Type: application/json" \
+      -d "{
+        \"thread_key\":\"${thread_key}\",
+        \"assignment_generation\":${assignment_generation},
+        \"role\":\"user\",
+        \"parts\":[{\"type\":\"text\",\"text\":\"Use the creating-tools skill. Scaffold a brand new tool called probe under overlay/tools/probe/. It should have one method named ping that takes no arguments and returns the string 'ok'. Validate with uvx ruff check, then commit, push, and open a PR titled 'feat(overlay): add probe tool'. Reply with only the PR URL when done.\"}]
+      }" >/dev/null
+
+    echo "=== 3/4 execute ==="
+    execute=$(exec_curl -X POST http://localhost:8000/agent/execute \
+      -H "Content-Type: application/json" \
+      -d "{
+        \"thread_key\":\"${thread_key}\",
+        \"assignment_generation\":${assignment_generation},
+        \"harness\":\"lab-eng\",
+        \"delivery\":{\"platform\":\"dev\"}
+      }")
+    printf '%s\n' "$execute" | jq .
+    execution_id=$(printf '%s' "$execute" | jq -r '.execution_id')
+
+    echo "=== 4/4 poll (timeout 300s) ==="
+    for i in $(seq 1 150); do
+      state=$(exec_curl "http://localhost:8000/agent/executions/${execution_id}")
+      status=$(printf '%s' "$state" | jq -r '.status // empty')
+      case "$status" in
+        completed)
+          echo "✓ execution completed in ~$((i * 2))s"
+          printf '%s\n' "$state" | jq '{status, result_text}'
+          break
+          ;;
+        failed|failed_permanent|cancelled)
+          echo "✗ execution ended with status=$status"
+          printf '%s\n' "$state" | jq .
+          exit 1
+          ;;
+      esac
+      sleep 2
+    done
+
+    if [ "$status" != "completed" ]; then
+      echo "✗ timed out after 300s waiting for execution ${execution_id}"
+      exec_curl "http://localhost:8000/agent/executions/${execution_id}" | jq .
+      exit 1
+    fi
+
+    echo "=== 5/4 verify PR (bonus step — agent might race ahead of GitHub indexing) ==="
+    # The agent's gh pr create returns when GitHub accepts the API call, but
+    # search indexing can lag a few seconds. Retry a few times.
+    for attempt in 1 2 3 4 5; do
+      prs=$(gh pr list -R Mperhats/centaur-lab \
+        --search "feat(overlay): add probe tool created:>=$(date -u -v-10M +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d '10 minutes ago' +'%Y-%m-%dT%H:%M:%SZ')" \
+        --json number,title,url,headRefName,createdAt --limit 5)
+      pr_count=$(printf '%s' "$prs" | jq 'length')
+      if [ "$pr_count" -ge 1 ]; then
+        echo "✓ found $pr_count matching PR(s) created in the last 10 minutes:"
+        printf '%s\n' "$prs" | jq '.'
+        exit 0
+      fi
+      echo "  attempt $attempt: no PR found yet, sleeping 5s..."
+      sleep 5
+    done
+
+    echo "✗ execution completed but no matching PR appeared on GitHub within 25s"
+    echo "  check the agent's result_text above — it may have failed at the push or gh step:"
+    exec_curl "http://localhost:8000/agent/executions/${execution_id}" | jq '.result_text'
+    exit 1
