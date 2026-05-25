@@ -6,4 +6,5 @@
 **/.env
 **/*.lock
 workflows/tests
+tools/*/tests
 Justfile

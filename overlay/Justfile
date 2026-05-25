@@ -39,6 +39,15 @@ lint-workflows:
 test-workflows:
     cd workflows && uv run --python 3.11 --with pytest --with pytest-asyncio pytest tests/ -v
 
+# Run the org tool test suites locally. Mirrors `test-workflows` — deps are
+# passed via --with rather than relying on dev-group resolution so the recipe
+# stays self-contained. asyncpg is required because the hybrid
+# `semantic_scholar.search` method imports it at module load (the cached-first
+# path queries `company_context_documents` before topping up via the live API).
+[group('dev')]
+test-tools:
+    cd tools/semantic_scholar && uv run --python 3.11 --with pytest --with pytest-asyncio --with asyncpg --with httpx --with python-dotenv pytest tests/ -v
+
 # Smoke-test the CLI without spinning up a sandbox. Honors $SEMANTIC_SCHOLAR_API_KEY
 # from the root `.env` (auto-loaded above) but works without it (anonymous,
 # heavily rate-limited).
