@@ -1,10 +1,10 @@
 # centaur-lab
 
 Local-first onboarding for [Centaur](https://github.com/paradigmxyz/centaur),
-the production control plane for shared AI agents. This repo's milestone 1
-goal is intentionally minimal: get a Claude Code agent to reply with `PONG`
-through Centaur's durable agent API, on your laptop, with no Slack, no
-overlay image, and no production GitOps.
+the production control plane for shared AI agents. The goal is a Claude Code
+agent that replies with `PONG` through Centaur's durable agent API, on your
+laptop, reachable from a real Slack workspace via a Cloudflare Tunnel —
+without an overlay image or production GitOps.
 
 The full design rationale lives in
 [`docs/superpowers/specs/2026-05-25-centaur-lab-mvp-design.md`](docs/superpowers/specs/2026-05-25-centaur-lab-mvp-design.md).
@@ -14,9 +14,10 @@ The full design rationale lives in
 | Path | Purpose |
 |------|---------|
 | `.centaur/` | Git submodule pinned at a specific `paradigmxyz/centaur` SHA. The base platform. |
-| `values.local.yaml` | The only Helm chart customization: env-var secrets, Claude Code default, Slackbot disabled. |
-| `Justfile` | Thin wrapper over `.centaur/Justfile`. `just up`, `just smoke`, `just down`. |
+| `values.local.yaml` | Helm chart customization: env-var secrets, Claude Code default, Slackbot enabled, local image-pull policies. |
+| `Justfile` | Thin wrapper over `.centaur/Justfile`. `just up`, `just smoke`, `just down`, plus `port-forward` / `tunnel` for Slack. |
 | `.env.example` | Template for the shell env vars `bootstrap-secrets` reads. |
+| `cloudflared/` | Cloudflare Tunnel routing config + per-machine setup README. |
 | `docs/centaur/` | Offline mirror of centaur.run reference docs. |
 | `docs/superpowers/` | This repo's spec and implementation plan. |
 
@@ -63,14 +64,15 @@ The full design rationale lives in
    cp .env.example .env
    ```
 
-   Fill in `ANTHROPIC_API_KEY` with a real Anthropic key. For each
+   Fill in `ANTHROPIC_API_KEY` with a real Anthropic key, and
+   `SLACK_BOT_TOKEN` / `SLACK_SIGNING_SECRET` with real values from your
+   Slack App (the Slackbot is enabled — random hex would silently break
+   webhook signature validation and bot API calls). For each
    `replace-with-random-hex` placeholder, run `openssl rand -hex 32` and
-   paste the output. The other env vars are ceremonial — required by the
-   upstream bootstrap script's preconditions but never reach the network
-   in env-mode + slackbot-disabled. The upstream script generates
-   `SANDBOX_SIGNING_KEY` and `IRON_MANAGEMENT_API_KEY` itself and persists
-   them in the existing `centaur-infra-env` Secret across subsequent
-   `just up` runs, so you don't need to set them.
+   paste the output — those are genuinely ceremonial. The upstream script
+   generates `SANDBOX_SIGNING_KEY` and `IRON_MANAGEMENT_API_KEY` itself
+   and persists them across subsequent `just up` runs, so you don't need
+   to set them.
 
 4. **Source the env so the variables are exported into your shell.**
 
@@ -106,9 +108,18 @@ just status
 kubectl get pods -n centaur-system
 ```
 
-Expected: `centaur-centaur-api`, `centaur-iron-proxy`, and Postgres pods are
-running. **There is no Slackbot pod by design** — the MVP disables Slackbot
-in `values.local.yaml`.
+Expected: `centaur-centaur-api`, `centaur-iron-proxy`, `centaur-centaur-slackbot`,
+and Postgres pods are running.
+
+To make Slack reach the Slackbot, in two separate terminals:
+
+```bash
+just port-forward   # kubectl port-forward Slackbot -> localhost:3001
+just tunnel         # cloudflared serves the public URL -> localhost:3001
+```
+
+See [`cloudflared/README.md`](cloudflared/README.md) for one-time setup
+(`cloudflared tunnel login`, `tunnel create`, DNS routing).
 
 ## Run the smoke test
 
@@ -160,7 +171,6 @@ kubectl delete namespace centaur-system
 
 | Future milestone | What it adds |
 |------------------|--------------|
-| M2: Slack | Re-enable Slackbot, add `cloudflared` tunnel, document Slack app setup. |
 | M3: Overlay | Add `overlay/` with one tool/skill/workflow + image build. |
 | M4: First real use case | Slack ETL on, plus a thin retrieval tool. |
 | M5: Production infra | `infra/` Argo CD bootstrap pinned at the same chart SHA. |
