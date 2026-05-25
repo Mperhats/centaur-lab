@@ -1,0 +1,14 @@
+[project]
+name = "lab-eng"
+description = "Eng persona pinned to Mperhats/centaur-lab — can edit the overlay and open PRs from inside a sandbox"
+version = "0.1.0"
+
+[tool.centaur]
+type = "persona"
+engine = "codex"
+prompt = "PROMPT.md"
+# Selecting this persona causes the API to set AGENT_REPO=Mperhats/centaur-lab
+# on the sandbox spawn, which makes entrypoint.sh `git clone --shared` from
+# /home/agent/github/Mperhats/centaur-lab (read-only mount, populated by the
+# repo-cache DaemonSet — see values.local.yaml::repoCache).
+default_repo = "Mperhats/centaur-lab"
