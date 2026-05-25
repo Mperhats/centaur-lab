@@ -195,7 +195,7 @@ followed by `just deploy` to pick up the new image.
 
 | Tool | Purpose |
 |------|---------|
-| [`overlay/tools/semantic_scholar`](overlay/tools/semantic_scholar) | Search papers, fetch metadata, and walk the citation graph via the [Semantic Scholar Graph API](https://api.semanticscholar.org/api-docs/graph). Usable anonymously; set `SEMANTIC_SCHOLAR_API_KEY` in `.env` for higher quota. Companion playbook in `overlay/.agents/skills/academic-research/SKILL.md`. |
+| [`overlay/tools/semantic_scholar`](overlay/tools/semantic_scholar) | Search papers, fetch metadata, and walk the citation graph via the [Semantic Scholar Graph API](https://api.semanticscholar.org/api-docs/graph). Usable anonymously; set `SEMANTIC_SCHOLAR_API_KEY` in `.env` for higher quota. The hybrid `search` method consults `company_context_documents` for cached papers before topping up via the live API — see the playbook for when to prefer it over `search_papers`. Companion playbook in `overlay/.agents/skills/academic-research/SKILL.md`. |
 
 For background on the overlay model (how the image is built, how
 `TOOL_DIRS` is assembled, how to verify discovery from the API pod), see

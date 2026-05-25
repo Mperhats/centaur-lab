@@ -12,9 +12,21 @@ literature: arXiv, NeurIPS, biology/chem journals, etc.
 
 ## When to use
 
-- "Find recent papers about X" → `semantic_scholar.search_papers(query=X, year_from=<recent year>)`
+- "Find papers about X" → `semantic_scholar.search(query=X, limit=10)` — checks `company_context_documents` first for cached papers, then tops up via the live API for anything published after the cache's cutoff year. Falls through cleanly when the cache is empty. Prefer this over `search_papers` for any query that might overlap previous research.
+- "Find papers strictly newer than my cache" / "what's been published this month" → `semantic_scholar.search_papers(query=X, year_from=<recent year>)` directly. The hybrid `search` is cache-aware, so use the raw live call only when you specifically want to ignore the cache.
 - "Summarize this paper" given a DOI / arXiv ID / S2 ID → `semantic_scholar.get_paper(paper_id=...)`
 - "What does this paper cite?" / building a related-work list → `semantic_scholar.get_references(paper_id=..., limit=20)`
+
+## Cache-aware search (`semantic_scholar.search`)
+
+The hybrid `search` method returns two ranked lanes in one response:
+
+- **`indexed` lane** — papers we already have in `company_context_documents` (saved by prior `save_papers` or `research_brief` runs). BM25-scored against your query, ranked by relevance. Each result has `score`, `preview`, `document_id`, `paperId`, and the full `metadata` row.
+- **`live` lane** — fresh results from the Semantic Scholar Graph API, filtered to `year >= max(year_from, indexed_cutoff_year + 1)` so you only see papers genuinely newer than what's cached. Deduped against the indexed lane by `paperId`.
+
+The response shape is `{status, query, limit, year_from, indexed_count, live_count, count, indexed_cutoff_year, live_year_from, live_error, results}`. The `results` array is `[*indexed, *live]` in that order. `live_error` is set (and `live_count: 0`) when the live API call fails — the indexed lane still returns successfully.
+
+If the user is doing follow-up research on a topic and the live lane returned new papers worth keeping, run `save_papers` on those `paperId`s as a follow-up. The hybrid method does not auto-persist — that's deliberate, so cheap exploratory queries don't bloat the document table. Persistence remains opt-in via `save_papers` / `research_brief`.
 
 ## Output expectations
 
@@ -38,6 +50,7 @@ results.
   user asked for a brief / lit review / writeup — use the `research_brief`
   workflow below so the brief is also persisted in `company_context_documents`
   and BM25-searchable across future turns.
+- Don't reach for `search_papers` when `search` will do. The hybrid path is strictly cheaper for any query that overlaps prior research (cached results return without an API call), and it gracefully falls through to live when the cache is empty. Use raw `search_papers` only when you specifically need to bypass the cache.
 
 ## Persisting research with workflows
 
