@@ -75,7 +75,7 @@ You are running inside a sandbox with read-only access to `~/github/Mperhats/cen
    - [ ] Reviewer invokes a sample method via `curl POST /tools/<name>/<method>`.
 
    ## To deploy
-   After merge: `just up` rebuilds the overlay image and the API hot-reloads.
+   After merge: `just up` rebuilds the overlay image and rolls the API pod (startup discovery loads the new tool).
    EOF
    )"
    ```
