@@ -58,6 +58,7 @@ bootstrap-secrets:
     patch_key GITHUB_WEBHOOK_SECRET
     patch_key GITHUB_TOKEN
     patch_key SEMANTIC_SCHOLAR_API_KEY
+    patch_key LOCAL_DEV_API_KEY
 
 [group('lifecycle')]
 [confirm("Uninstall " + CENTAUR_RELEASE + " from " + CENTAUR_NAMESPACE + "? Pass --yes to skip this prompt. ")]
