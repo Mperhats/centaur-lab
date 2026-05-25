@@ -163,7 +163,7 @@ mention it, the sandbox spawns with a writable clone of this repo and the
 
 In any Slack channel where the Centaur bot is installed:
 
-```
+```text
 @centaur --lab-eng scaffold a new overlay tool called polygon that wraps
 the Polygon.io v2 aggregates endpoint. One method: daily_close(ticker,
 date) returning the close price. Open a PR when done.
@@ -212,15 +212,19 @@ gh pr list -R Mperhats/centaur-lab --search "feat(overlay): add probe tool" \
 
 ### What the agent can and cannot edit
 
-The `lab-eng` persona is scoped to `overlay/` — new tools, new overlay
-skills, new overlay personas, new overlay workflows. It will NOT edit:
+The `lab-eng` persona is scoped to `overlay/` by default — new tools, new
+overlay skills, new overlay personas, new overlay workflows. It will NOT
+touch:
 
-- `.centaur/` (the upstream Centaur submodule, pinned at a specific SHA)
-- `values.local.yaml` (chart values — these change the cluster, not the
-  overlay image, and require human review of the deployment surface)
-- `Justfile` (deployment scripts — same reason)
+- `.centaur/` (the upstream Centaur submodule, pinned at a specific SHA — submodule bumps are a separate concern)
 
-For changes to those paths, edit by hand and `just up` normally.
+It will only touch `values.local.yaml`, `Justfile`, or `README.md` if you
+**explicitly ask it to in your message**. These change the cluster or the
+local toolchain, so default behavior is to leave them alone; an explicit
+ask in the Slack prompt overrides that default.
+
+For unprompted changes to those paths, edit by hand and `just up`
+normally.
 
 ### Prerequisites checklist
 
@@ -228,7 +232,7 @@ The Slack loop only works if **all** of these are true:
 
 - [ ] `GITHUB_TOKEN` in `.env` has `Contents: write` + `Pull requests: write` (see `.env.example` for the full scope list, and `docs/gh.md` for step-by-step token setup)
 - [ ] `repoCache.enabled: true` in `values.local.yaml` (verify with `kubectl -n centaur-system get daemonset/centaur-centaur-repo-cache`)
-- [ ] `lab-eng` persona registered (verify with `curl -H "X-Api-Key: $SLACKBOT_API_KEY" http://localhost:8000/personas | jq '.[] | select(.name == "lab-eng")'`)
+- [ ] `lab-eng` persona registered (verify with `kubectl -n centaur-system exec deploy/centaur-centaur-api -- curl -s -H "X-Api-Key: $(kubectl -n centaur-system get secret centaur-infra-env -o jsonpath='{.data.SLACKBOT_API_KEY}' | base64 -d)" http://localhost:8000/personas | jq '.[] | select(.name == "lab-eng")'`)
 - [ ] Overlay image rebuilt since the last skill or persona change (`just overlay::build`)
 
 If any of these fail, `just slack-loop-smoke` will print which one — start there before debugging through Slack.
