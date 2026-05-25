@@ -316,6 +316,34 @@ git commit -m "feat: add .env.example template for local secret bootstrapping"
 
 **Important risk to verify:** the spec flags that `api.defaultHarness` may or may not be a real chart key at the pinned SHA. The verification step explicitly checks the rendered manifests for `claude-code` and BLOCKS if the override silently no-ops.
 
+**One-time prerequisite (helm subchart deps):** `.centaur/contrib/chart/Chart.yaml` declares two subchart dependencies — `agent-sandbox` (already vendored at `.centaur/contrib/chart/charts/agent-sandbox/`) and `connect` (the 1Password Connect chart, NOT vendored). Even though our `values.local.yaml` sets `secretSource: env` and the `connect` subchart's `condition` evaluates false, `helm template` and `helm install` both require ALL declared subcharts to exist locally. Without the dep bootstrap, helm refuses to render the chart with `Error: ... missing in charts/ directory: connect`. The bootstrap is one-time per machine for the helm-repo-add and one-time per checkout for the dep build:
+
+```bash
+# Idempotent: succeeds whether the repo is new or already present.
+helm repo add 1password https://1password.github.io/connect-helm-charts 2>/dev/null \
+  || helm repo update 1password
+helm dependency build .centaur/contrib/chart
+```
+
+This writes `.centaur/contrib/chart/charts/connect-2.4.1.tgz`. That path is git-ignored by `.centaur/contrib/chart/.gitignore` (which excludes `charts/*` except `charts/agent-sandbox/`), so the submodule's tracked tree and pinned SHA do **not** move. The Task 6 README will document this prereq for operators.
+
+- [ ] **Step 0: Run the one-time helm dep bootstrap**
+
+```bash
+helm repo add 1password https://1password.github.io/connect-helm-charts 2>/dev/null \
+  || helm repo update 1password
+helm dependency build .centaur/contrib/chart
+```
+
+Verify with:
+
+```bash
+ls .centaur/contrib/chart/charts/
+git -C .centaur status --porcelain
+```
+
+Expected: `charts/` lists both `agent-sandbox` (directory) and `connect-2.4.1.tgz` (file). `git -C .centaur status` reports an empty porcelain (the new tarball is git-ignored, so the submodule's tree is still clean).
+
 - [ ] **Step 1: Define the verification command**
 
 Render the chart with `values.dev.yaml` + our `values.local.yaml` overlay using `helm template` (no live cluster needed). Then assert four things on the rendered output:
@@ -578,6 +606,8 @@ Six assertions matching the six Definition-of-Done items in the spec — each on
 ( [ -f README.md ] || { echo "FAIL: missing-file"; exit 0; }
   required_substrings=(
     "git submodule update --init --recursive"
+    "helm repo add 1password"
+    "helm dependency build .centaur/contrib/chart"
     "cp .env.example .env"
     "openssl rand -hex 32"
     "source .env"
@@ -603,6 +633,8 @@ Expected output (the existing README is the centaur.run tagline mirror; none of 
 
 ```
 FAIL: missing-text "git submodule update --init --recursive"
+FAIL: missing-text "helm repo add 1password"
+FAIL: missing-text "helm dependency build .centaur/contrib/chart"
 FAIL: missing-text "cp .env.example .env"
 FAIL: missing-text "openssl rand -hex 32"
 FAIL: missing-text "source .env"
@@ -662,7 +694,21 @@ The full design rationale lives in
    If you forget the submodule init, `just up` will fail with a missing
    `.centaur/Justfile` error.
 
-2. **Create your local `.env`.**
+2. **Bootstrap the helm chart's subchart dependencies (one-time per machine
+   for the repo add, one-time per checkout for the dep build).**
+
+   ```bash
+   helm repo add 1password https://1password.github.io/connect-helm-charts 2>/dev/null \
+     || helm repo update 1password
+   helm dependency build .centaur/contrib/chart
+   ```
+
+   The chart declares the 1Password Connect subchart in `Chart.yaml` even
+   though we don't use it (we run in env-secret mode). Helm requires it to
+   be present locally regardless. The downloaded tarball is git-ignored
+   inside the submodule, so this does not dirty the pinned SHA.
+
+3. **Create your local `.env`.**
 
    ```bash
    cp .env.example .env
@@ -674,7 +720,7 @@ The full design rationale lives in
    regenerating `SANDBOX_SIGNING_KEY` between `just up` cycles breaks
    sandbox-signed tokens (per upstream docs).
 
-3. **Source the env so the variables are exported into your shell.**
+4. **Source the env so the variables are exported into your shell.**
 
    ```bash
    source .env
