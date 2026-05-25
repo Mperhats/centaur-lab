@@ -16,10 +16,18 @@ up: bootstrap-secrets
         -f contrib/chart/values.dev.yaml \
         -f ../values.local.yaml
 
-# Create the centaur-infra-env Kubernetes Secret from your shell env.
-# Requires: source .env first.
+# Create the centaur-infra-env Kubernetes Secret from your shell env, then
+# patch in ANTHROPIC_API_KEY. The upstream bootstrap-k8s-secrets.sh hardcodes
+# which keys land in the Secret and does not include ANTHROPIC_API_KEY;
+# iron-proxy in env-mode reads it from this Secret to inject on outbound
+# calls to api.anthropic.com. Requires: source .env first.
 bootstrap-secrets:
+    #!/usr/bin/env bash
+    set -euo pipefail
     cd .centaur && just bootstrap-secrets
+    encoded=$(printf '%s' "${ANTHROPIC_API_KEY}" | base64)
+    kubectl -n "${CENTAUR_NAMESPACE:-centaur-system}" patch secret centaur-infra-env --type merge \
+      -p "{\"data\":{\"ANTHROPIC_API_KEY\":\"${encoded}\"}}"
 
 # Run the upstream smoke test (spawn -> message -> execute -> poll for PONG).
 smoke:

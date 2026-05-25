@@ -16,7 +16,7 @@ The full design rationale lives in
 | `.centaur/` | Git submodule pinned at a specific `paradigmxyz/centaur` SHA. The base platform. |
 | `values.local.yaml` | The only Helm chart customization: env-var secrets, Claude Code default, Slackbot disabled. |
 | `Justfile` | Thin wrapper over `.centaur/Justfile`. `just up`, `just smoke`, `just down`. |
-| `.env.example` | Template for the five shell env vars `bootstrap-secrets` reads. |
+| `.env.example` | Template for the shell env vars `bootstrap-secrets` reads. |
 | `docs/centaur/` | Offline mirror of centaur.run reference docs. |
 | `docs/superpowers/` | This repo's spec and implementation plan. |
 
@@ -65,9 +65,12 @@ The full design rationale lives in
 
    Fill in `ANTHROPIC_API_KEY` with a real Anthropic key. For each
    `replace-with-random-hex` placeholder, run `openssl rand -hex 32` and
-   paste the output. **Generate these once and keep them stable** —
-   regenerating `SANDBOX_SIGNING_KEY` between `just up` cycles breaks
-   sandbox-signed tokens (per upstream docs).
+   paste the output. The other env vars are ceremonial — required by the
+   upstream bootstrap script's preconditions but never reach the network
+   in env-mode + slackbot-disabled. The upstream script generates
+   `SANDBOX_SIGNING_KEY` and `IRON_MANAGEMENT_API_KEY` itself and persists
+   them in the existing `centaur-infra-env` Secret across subsequent
+   `just up` runs, so you don't need to set them.
 
 4. **Source the env so the variables are exported into your shell.**
 

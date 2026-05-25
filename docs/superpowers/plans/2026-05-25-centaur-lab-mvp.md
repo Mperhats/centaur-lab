@@ -219,16 +219,20 @@ Three assertions: file exists, has all five expected variables, every line that 
 ```bash
 ( [ -f .env.example ] || { echo FAIL: missing-file; exit 0; }
   ok=true
-  for key in ANTHROPIC_API_KEY SLACK_SIGNING_SECRET SLACKBOT_API_KEY SANDBOX_SIGNING_KEY IRON_MANAGEMENT_API_KEY CENTAUR_NAMESPACE; do
+  for key in ANTHROPIC_API_KEY OP_SERVICE_ACCOUNT_TOKEN OP_VAULT SLACK_BOT_TOKEN SLACK_SIGNING_SECRET SLACKBOT_API_KEY CENTAUR_NAMESPACE; do
     if ! grep -qE "^export ${key}=" .env.example; then
       echo "FAIL: missing-export ${key}"
       ok=false
     fi
   done
+  if grep -qE "^export (SANDBOX_SIGNING_KEY|IRON_MANAGEMENT_API_KEY)=" .env.example; then
+    echo "FAIL: stale-export (script generates these; do not list)"
+    ok=false
+  fi
   $ok && echo PASS )
 ```
 
-(Same shell-portability inlining the plan applied to Task 5's verification — `for key in $required` would not word-split under zsh.)
+(Same shell-portability inlining the plan applied to Task 5's verification — `for key in $required` would not word-split under zsh. The negative-grep guards against re-introducing the misleading `SANDBOX_SIGNING_KEY` / `IRON_MANAGEMENT_API_KEY` exports that the upstream bootstrap script silently ignores.)
 
 - [ ] **Step 2: Run the verification before creating the file to confirm it fails**
 
@@ -250,34 +254,37 @@ Create `.env.example` with exactly this content:
 # Onboarding:
 #   1. cp .env.example .env
 #   2. Replace the ANTHROPIC_API_KEY placeholder with a real Anthropic key.
-#   3. For each "replace-with-random-hex", run `openssl rand -hex 32` and paste
-#      the output. Generate ONCE per checkout and keep stable in your local
-#      .env so values survive `just up` cycles. SANDBOX_SIGNING_KEY in
-#      particular must persist across API restarts (per upstream docs).
+#   3. For each "replace-with-random-hex" placeholder, run `openssl rand -hex 32`
+#      and paste the output. These are ceremonial — required by the upstream
+#      bootstrap script's preconditions but never reach the network in
+#      env-mode + slackbot-disabled. Generate them once and keep them stable.
 #   4. source .env
 #   5. just up
 #
-# The `export` prefix matters: `just bootstrap-secrets` (delegated to
-# .centaur/Justfile) reads these via `kubectl create secret --from-literal`,
-# which only sees variables that have been exported. Bare KEY=value would not
-# satisfy it.
+# The `export` prefix matters: `just bootstrap-secrets` reads from your
+# exported shell environment, so bare KEY=value lines would not be picked up.
+#
+# NOTE: SANDBOX_SIGNING_KEY and IRON_MANAGEMENT_API_KEY do NOT appear here.
+# The upstream bootstrap-k8s-secrets.sh GENERATES them itself (random hex per
+# fresh Secret) and persists the values across subsequent `just up` runs.
 
 # Real credential — the only one you actually fill in.
+# Threaded into centaur-infra-env via `kubectl patch` after the upstream
+# bootstrap script runs (the upstream script hardcodes which keys land in the
+# Secret and does not include ANTHROPIC_API_KEY).
 export ANTHROPIC_API_KEY=sk-ant-replace-me
 
-# Required by the API at boot but unused while Slackbot is disabled.
-# Random hex is fine for milestone 1.
+# Required by the upstream bootstrap script's preconditions, even though we
+# run in env-mode and have slackbot disabled. Random hex placeholders are fine.
+export OP_SERVICE_ACCOUNT_TOKEN=replace-with-random-hex
+export OP_VAULT=replace-with-random-hex
+export SLACK_BOT_TOKEN=replace-with-random-hex
 export SLACK_SIGNING_SECRET=replace-with-random-hex
 export SLACKBOT_API_KEY=replace-with-random-hex
 
-# Required by sandbox + iron-proxy. Generate once and keep stable.
-export SANDBOX_SIGNING_KEY=replace-with-random-hex
-export IRON_MANAGEMENT_API_KEY=replace-with-random-hex
-
-# Tooling: makes `.centaur/Justfile`'s passthrough recipes
-# (`bootstrap-secrets`, `status`, `logs`, `smoke`) target the same namespace
-# our root `up`/`down` use. Upstream's default is `centaur`; we deploy into
-# `centaur-system` so the Secret would otherwise land in the wrong namespace.
+# Tooling: makes `.centaur/Justfile`'s passthrough recipes (`bootstrap-secrets`,
+# `status`, `logs`, `smoke`) target the same namespace our root `up`/`down`
+# use. Upstream's default is `centaur`; we deploy into `centaur-system`.
 export CENTAUR_NAMESPACE=centaur-system
 ```
 
@@ -523,10 +530,18 @@ up: bootstrap-secrets
         -f contrib/chart/values.dev.yaml \
         -f ../values.local.yaml
 
-# Create the centaur-infra-env Kubernetes Secret from your shell env.
-# Requires: source .env first.
+# Create the centaur-infra-env Kubernetes Secret from your shell env, then
+# patch in ANTHROPIC_API_KEY. The upstream bootstrap-k8s-secrets.sh hardcodes
+# which keys land in the Secret and does not include ANTHROPIC_API_KEY;
+# iron-proxy in env-mode reads it from this Secret to inject on outbound
+# calls to api.anthropic.com. Requires: source .env first.
 bootstrap-secrets:
+    #!/usr/bin/env bash
+    set -euo pipefail
     cd .centaur && just bootstrap-secrets
+    encoded=$(printf '%s' "${ANTHROPIC_API_KEY}" | base64)
+    kubectl -n "${CENTAUR_NAMESPACE:-centaur-system}" patch secret centaur-infra-env --type merge \
+      -p "{\"data\":{\"ANTHROPIC_API_KEY\":\"${encoded}\"}}"
 
 # Run the upstream smoke test (spawn -> message -> execute -> poll for PONG).
 smoke:
