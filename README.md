@@ -14,10 +14,10 @@ The full design rationale lives in
 | Path | Purpose |
 |------|---------|
 | `.centaur/` | Git submodule pinned at a specific `paradigmxyz/centaur` SHA. The base platform. |
-| `values.local.yaml` | Helm chart customization: env-var secrets, Claude Code default, Slackbot enabled, local image-pull policies. |
-| `Justfile` | Thin wrapper over `.centaur/Justfile`. `just up`, `just smoke`, `just down`, plus `port-forward` / `tunnel` for Slack. |
+| `values.local.yaml` | Helm chart overlay: env-var secrets, Claude Code default, Slackbot + Slack ETL enabled, local image-pull policies. |
+| `Justfile` | Thin wrapper over `.centaur/Justfile`. Only owns recipes that fill real upstream gaps — see the recipe-by-recipe `# comments` for the why. `just --list` shows everything grouped. |
 | `.env.example` | Template for the shell env vars `bootstrap-secrets` reads. |
-| `cloudflared/` | Cloudflare Tunnel routing config + per-machine setup README. |
+| `cloudflared/` | Cloudflare Tunnel routing, launchd agent template, and per-machine setup README. Tunnel auto-starts via `just cloudflared::install-service`. |
 | `docs/centaur/` | Offline mirror of centaur.run reference docs. |
 | `docs/superpowers/` | This repo's spec and implementation plan. |
 
@@ -44,8 +44,9 @@ The full design rationale lives in
    If you forget the submodule init, `just up` will fail with a missing
    `.centaur/Justfile` error.
 
-2. **Bootstrap the helm chart's subchart dependencies (one-time per machine
-   for the repo add, one-time per checkout for the dep build).**
+2. **Pull the chart's subchart tarballs.** The chart declares the 1Password
+   Connect subchart even though we run in env-secret mode; Helm still
+   requires it locally. One-time per checkout:
 
    ```bash
    helm repo add 1password https://1password.github.io/connect-helm-charts 2>/dev/null \
@@ -53,36 +54,29 @@ The full design rationale lives in
    helm dependency build .centaur/contrib/chart
    ```
 
-   The chart declares the 1Password Connect subchart in `Chart.yaml` even
-   though we don't use it (we run in env-secret mode). Helm requires it to
-   be present locally regardless. The downloaded tarball is git-ignored
-   inside the submodule, so this does not dirty the pinned SHA.
-
 3. **Create your local `.env`.**
 
    ```bash
    cp .env.example .env
    ```
 
-   Fill in `ANTHROPIC_API_KEY` with a real Anthropic key, and
-   `SLACK_BOT_TOKEN` / `SLACK_SIGNING_SECRET` with real values from your
-   Slack App (the Slackbot is enabled — random hex would silently break
-   webhook signature validation and bot API calls). For each
-   `replace-with-random-hex` placeholder, run `openssl rand -hex 32` and
-   paste the output — those are genuinely ceremonial. The upstream script
-   generates `SANDBOX_SIGNING_KEY` and `IRON_MANAGEMENT_API_KEY` itself
-   and persists them across subsequent `just up` runs, so you don't need
-   to set them.
+   Fill in the placeholders:
 
-4. **Source the env so the variables are exported into your shell.**
+   | Var | Required? | Source |
+   |-----|-----------|--------|
+   | `ANTHROPIC_API_KEY` | Yes (default harness is `claude-code`) | console.anthropic.com |
+   | `OPENAI_API_KEY` | Optional (enables `--codex` selector) | platform.openai.com |
+   | `SLACK_BOT_TOKEN` | Yes (Slackbot is enabled) | Slack App -> OAuth & Permissions -> Bot User OAuth Token |
+   | `SLACK_SIGNING_SECRET` | Yes (Slackbot is enabled) | Slack App -> Basic Information -> App Credentials |
+   | `SLACK_ETL_TOKEN` | Yes (Slack ETL is enabled) | Slack user token with `conversations.*` + `users.list` scopes |
+   | `OP_SERVICE_ACCOUNT_TOKEN` / `OP_VAULT` / `SLACKBOT_API_KEY` | Yes (ceremonial) | `openssl rand -hex 32` each |
 
-   ```bash
-   source .env
-   ```
+   The upstream script generates `SANDBOX_SIGNING_KEY` and
+   `IRON_MANAGEMENT_API_KEY` itself and persists them across subsequent
+   `just up` runs, so you don't need to set them.
 
-   The `export` prefix on each line in `.env.example` matters — `just
-   bootstrap-secrets` reads from your exported shell environment via
-   `kubectl create secret --from-literal`.
+   No `source .env` step: the Justfile sets `dotenv-load := true` (matching
+   upstream's `.centaur/Justfile`), so every recipe loads `.env` automatically.
 
 ## Boot the stack
 
@@ -103,23 +97,39 @@ This runs in order:
 Verify the pods are healthy:
 
 ```bash
-just status
-# or:
 kubectl get pods -n centaur-system
+# or, against the submodule's status recipe:
+cd .centaur && just status
 ```
 
 Expected: `centaur-centaur-api`, `centaur-iron-proxy`, `centaur-centaur-slackbot`,
 and Postgres pods are running.
 
-To make Slack reach the Slackbot, in two separate terminals:
+For Slack — and for any workflow webhook (GitHub, etc.) — to reach the
+cluster, the Cloudflare Tunnel must be live and two local ports must be
+forwarded:
+
+| Public path | Forwarded port | Backend |
+|---|---|---|
+| `/api/webhooks/slack` | `localhost:3001` | Slackbot pod |
+| everything else | `localhost:8000` | Centaur API pod (workflow webhooks, `/workflows/runs`, `/agent/*`) |
+
+The tunnel runs as a launchd user agent (`com.local-labs.centaur-tunnel`)
+installed once via `just cloudflared::install-service` — it auto-starts on
+login and restarts on crash. Both port-forwards are per-session and bundled
+with the Slackbot log tail in:
 
 ```bash
-just port-forward   # kubectl port-forward Slackbot -> localhost:3001
-just tunnel         # cloudflared serves the public URL -> localhost:3001
+just dev
 ```
 
-See [`cloudflared/README.md`](cloudflared/README.md) for one-time setup
-(`cloudflared tunnel login`, `tunnel create`, DNS routing).
+Ctrl-C `just dev` to stop the port-forwards; the tunnel keeps running.
+
+One-time per-machine setup (`brew install cloudflared`, `cloudflared tunnel
+login`, `cloudflared tunnel create centaur-dev`, DNS routing, and
+`just cloudflared::install-service`) lives in
+[`cloudflared/README.md`](cloudflared/README.md), which also documents how
+to add or reorder ingress rules.
 
 ## Run the smoke test
 
@@ -136,18 +146,15 @@ Expected (final JSON shape):
 }
 ```
 
-To confirm Claude Code (not the chart's Codex default) was the harness used:
-
-```bash
-helm get values centaur -n centaur-system | grep defaultHarness
-# expected:
-#   defaultHarness: claude-code
-```
+To exercise the Codex harness instead, mention the bot in Slack with the
+selector: `@centaur --codex reply with exactly PONG`. Requires `OPENAI_API_KEY`
+in `.env` so `bootstrap-secrets` can patch it into the Secret.
 
 ## Tear down
 
 ```bash
-just down
+just down            # prompts for confirmation (safety net)
+just --yes down      # skip the prompt; useful in scripts/CI
 ```
 
 This uninstalls the Helm release but leaves the `centaur-system` namespace
@@ -162,23 +169,26 @@ kubectl delete namespace centaur-system
 | Symptom | What to check |
 |---------|---------------|
 | `just up` fails with "Justfile not found" inside `.centaur/` | Run `git submodule update --init --recursive`. |
-| `bootstrap-secrets` complains about missing variables | Did you `source .env`? Did you fill in `ANTHROPIC_API_KEY`? |
+| `bootstrap-secrets` complains about missing variables | Did you fill in `ANTHROPIC_API_KEY` in `.env`? The Justfile auto-loads `.env` via `dotenv-load`; no `source` step needed, but the variables must actually be set. |
+| `ImagePullBackOff` on `centaur-centaur-api`, `centaur-api-proxy`, or a sandbox pod | The chart defaults locally-built `:latest` images to `pullPolicy: Always`; `values.local.yaml` overrides for `api`, `ironProxy`, `sandbox`. Re-run `just up`. |
+| Slack URL verification fails ("didn't respond with the value of the challenge parameter") | `SLACK_SIGNING_SECRET` in `.env` does not match the value in the Slack app's Basic Information page. |
 | Pods crash-loop with `OOMKilled` | Local cluster is too small. Bump CPU/memory in Docker Desktop or kind config. |
-| Smoke test never completes | `just logs api` for the API container; `kubectl get pods -n centaur-system -l centaur.ai/managed=true` for sandbox state. |
+| Smoke test never completes | `cd .centaur && just logs api` for the API container; `kubectl get pods -n centaur-system -l centaur.ai/managed=true` for sandbox state. |
+| Smoke fails with `Missing API key` | You're running upstream's `just smoke` (e.g. `cd .centaur && just smoke`). The current chart's API rejects all unauthenticated calls; our root `just smoke` injects `X-Api-Key: $SLACKBOT_API_KEY` to compensate. Always invoke from the repo root. |
 | `helm get values` does not show `defaultHarness` | The pinned base SHA may not expose the key yet — see [open question 2 in the spec](docs/superpowers/specs/2026-05-25-centaur-lab-mvp-design.md#open-questions-for-implementation). Pass `--claude` manually in the smoke prompt as a workaround. |
+| Slack ETL workflows log token errors | `SLACK_ETL_TOKEN` unset or wrong; or its Slack user lacks `conversations.*` / `users.list` scopes. See [`docs/centaur/operate/slack-etl.md`](docs/centaur/operate/slack-etl.md). |
 
 ## What this repo intentionally does NOT contain (yet)
 
 | Future milestone | What it adds |
 |------------------|--------------|
-| M3: Overlay | Add `overlay/` with one tool/skill/workflow + image build. |
-| M4: First real use case | Slack ETL on, plus a thin retrieval tool. |
-| M5: Production infra | `infra/` Argo CD bootstrap pinned at the same chart SHA. |
-| M6: CI | Path-scoped GitHub Actions for overlay/infra changes. |
-| M7: Pi Labs | Either swap default harness to `pi-mono` or wire pi.dev RPC SDK as a tool. |
+| Overlay | An `overlay/` directory with org-specific tools/workflows/skills + image build, mounted into the API + sandbox pods at `/overlay/{tools,workflows}`. See [`docs/centaur/extend/overlay.md`](docs/centaur/extend/overlay.md) and the ACME example. |
+| Production infra | `infra/` Argo CD bootstrap pinned at the same chart SHA. |
+| CI | Path-scoped GitHub Actions for overlay/infra changes. |
+| Alternative harnesses | Either swap default harness to `pi-mono` or wire pi.dev RPC SDK as a tool. |
 
-Each is one focused PR away on top of the MVP. See the spec for the full
-deferred-work table.
+Each is one focused PR away on top of the current state. See the spec for
+the full deferred-work table.
 
 ## License
 

@@ -15,13 +15,21 @@ ironProxy:
     pullPolicy: IfNotPresent
 
 api:
-  # Make `just smoke` and any future bare `@bot ...` mention use Claude Code
-  # by default (chart default would be Codex, which we have no key for).
+  # Default harness when a Slack mention has no explicit selector. Claude
+  # Code by default because Anthropic is our primary credential; override
+  # per-turn with `--codex`, `--amp`, or `--pi` once those keys are set.
   defaultHarness: claude-code
 
   # Save laptop CPU/memory; sandboxes spawn cold per turn. Acceptable for
   # smoke and early development. Re-enable in production values.
   warmPoolEnabled: false
+
+  # Enable scheduled Slack history sync (`slack_sync`, `slack_backfill`,
+  # `company_context_documents` workflows). Requires SLACK_ETL_TOKEN
+  # (a Slack USER token, distinct from SLACK_BOT_TOKEN) in .env. With it
+  # unset, the workflows will run on schedule but log token errors —
+  # set it before flipping this on. See docs/centaur/operate/slack-etl.md.
+  slackEtlEnabled: true
 
   # The chart's default for `:latest`-tagged images is Always, which makes
   # kubelet try to pull centaur-api:latest from a public registry instead of
@@ -42,7 +50,7 @@ sandbox:
 
 slackbot:
   # Slack ingress enabled. Requires real SLACK_BOT_TOKEN and
-  # SLACK_SIGNING_SECRET in .env, plus a `cloudflared` tunnel exposing the
-  # Slackbot Service at a stable public URL Slack can hit. See
-  # cloudflared/README.md and the `port-forward` / `tunnel` Justfile recipes.
+  # SLACK_SIGNING_SECRET in .env, plus a `cloudflared` tunnel + a
+  # `kubectl port-forward` exposing the Slackbot Service at a stable public
+  # URL Slack can hit. See cloudflared/README.md.
   enabled: true
