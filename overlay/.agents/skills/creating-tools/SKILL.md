@@ -1,0 +1,110 @@
+---
+name: creating-tools
+description: "Scaffold and build new tool integrations in overlay/tools/ for the centaur-lab deployment. Use when asked to create a new tool, add an API integration, or build a new client for an external service. Overrides the upstream creating-tools skill — same conventions, except scaffolds live under overlay/tools/<name>/ and the workflow ends with a PR against Mperhats/centaur-lab."
+---
+
+# Creating Tools (centaur-lab overlay)
+
+This is the centaur-lab override of the upstream `creating-tools` skill. The scaffolding conventions are identical to upstream's — what changes is **where files land** and the **delivery loop** (PR instead of direct hot-reload).
+
+## File Structure
+
+Every tool lives at `overlay/tools/<name>/` (NOT the root `tools/` — that belongs to the upstream Centaur submodule and is read-only in this repo). Each tool needs exactly these files:
+
+```
+overlay/tools/<name>/
+├── __init__.py        # Empty file
+├── .env.example       # Document required secrets (one per line: KEY=description)
+├── client.py          # API client class + _client() factory function
+├── cli.py             # Typer CLI for standalone use
+└── pyproject.toml     # Package metadata + [tool.centaur] section
+```
+
+Reference example: `overlay/tools/semantic_scholar/` is a working tool that follows this exact layout, including the `[tool.centaur] optional_secrets = [...]` block for iron-proxy credential injection.
+
+## PR Workflow (the part that's different from upstream)
+
+You are running inside a sandbox with read-only access to `~/github/Mperhats/centaur-lab` and write access via `git-branch`. Before any file changes:
+
+1. **Branch off main into a writable clone:**
+
+   ```bash
+   git-branch Mperhats/centaur-lab
+   cd ~/branches/Mperhats/centaur-lab
+   ```
+
+   If `git-branch` reports the directory already exists, you are inheriting state from a prior turn (`~/branches` is symlinked to persistent state). Run `git status` first; if dirty, `git stash` or `rm -rf ~/branches/Mperhats/centaur-lab && git-branch Mperhats/centaur-lab` to start fresh.
+
+2. **Scaffold the tool under `overlay/tools/<name>/`** following the file structure above and the upstream conventions described below.
+
+3. **Validate locally:**
+
+   ```bash
+   cd ~/branches/Mperhats/centaur-lab/overlay
+   uvx ruff check tools
+   ```
+
+4. **Commit and push** the auto-generated branch (`git-branch` already created a branch named `agent-<ts>-<rand>-<rand>` when you ran it in Step 1):
+
+   ```bash
+   git add overlay/tools/<name>/
+   git commit -m "feat(overlay): add <name> tool"
+   git push -u origin HEAD
+   ```
+
+5. **Open the PR:**
+
+   The sandbox seeds `gh` auth in the background during boot, so verify it finished before the first `gh` call:
+
+   ```bash
+   gh auth status >/dev/null 2>&1 || sleep 2
+   gh pr create --title "feat(overlay): add <name> tool" --body "$(cat <<'EOF'
+   ## Summary
+   - Adds `overlay/tools/<name>/` with client + CLI + pyproject.toml.
+   - Required secrets: <list, or "none">.
+   - Hot-reloads after merge + `just up`.
+
+   ## Test plan
+   - [ ] Reviewer runs `just overlay::lint` locally.
+   - [ ] Reviewer merges; runs `just up`; verifies `GET /tools` lists `<name>`.
+   - [ ] Reviewer invokes a sample method via `curl POST /tools/<name>/<method>`.
+   EOF
+   )"
+   ```
+
+6. **Report the PR URL back to the user.** Do not attempt to merge or deploy yourself.
+
+## Deployment (what happens after merge)
+
+Hot-reload depends on files actually appearing in the API pod's `/app/overlay/org/tools/<name>/` directory. The path looks like this:
+
+1. PR merged on GitHub.
+2. The maintainer (or CI, when wired) runs `just up` locally:
+   - `just overlay::build` rebuilds `centaur-overlay:latest` baking in the new tool.
+   - `just deploy` does `helm upgrade --install`; the API pod restarts with the new image.
+3. The chart's overlay-bootstrap initContainer copies `/overlay/tools/<name>/` into the API pod's `/app/overlay/org/tools/<name>/`.
+4. The API's plugin watcher (`PLUGIN_WATCHER_ENABLED`) registers the new tool, OR — since the pod just restarted — startup discovery picks it up.
+5. `POST /tools/<name>/<method>` now works.
+
+You do NOT need to `POST /admin/reload-tools` after a fresh deploy — startup discovery already loaded it. That endpoint is for editing files inside a long-lived pod, which is not the path we use here.
+
+## Tool Implementation (unchanged from upstream)
+
+The rest of the file follows the upstream `creating-tools` skill verbatim — read `~/.agents/skills/creating-tools/SKILL.md` (the baked-in upstream version) for the full `client.py`/`cli.py`/`pyproject.toml`/secrets resolution sections. Specifically:
+
+- `client.py` rules: no `load_dotenv()`, import `secret` from `shared.tool_sdk`, class-based, `_client()` factory at the bottom, public methods get type hints.
+- `cli.py` rules: `load_dotenv()` at the top, thin wrapper around the client, typer for the CLI, support `--json` and `--markdown` on every command.
+- `pyproject.toml`: the **`[tool.centaur] module = "client.py"`** registration is required — without it the tool manager won't discover the package. (Note: upstream still uses the older `[tool.ai-v2]` name in places; centaur-lab and current upstream both use `[tool.centaur]`. See `overlay/tools/semantic_scholar/pyproject.toml` for the canonical shape.)
+- `.env.example`: one key per line, with a short description.
+
+If you find conflicting guidance between this file and the upstream skill, this file wins for path/registration/PR concerns; the upstream skill wins for client/CLI shape.
+
+## Reference: existing overlay tool
+
+`overlay/tools/semantic_scholar/` is the closest in-repo example. It demonstrates:
+
+- The `[tool.centaur] optional_secrets = [...]` block for iron-proxy credential injection.
+- `package = false` in `[tool.uv]` so `uv` skips wheel-building.
+- A CLI that runs standalone via `uv run python cli.py …` and is also exposed as a `just overlay::smoke-semantic-scholar` recipe.
+
+Mirror that shape for any new tool unless the user explicitly wants something different.
