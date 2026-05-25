@@ -5,7 +5,12 @@ version = "0.1.0"
 
 [tool.centaur]
 type = "persona"
-engine = "codex"
+# claude-code matches the deployment-wide `api.defaultHarness` and the
+# credential currently funded (ANTHROPIC_API_KEY). The persona originally
+# specified `codex` but the local OpenAI/codex billing was capped; swap
+# back to "codex" once usage limits are sorted if you prefer it for
+# multi-file editing.
+engine = "claude-code"
 prompt = "PROMPT.md"
 # Selecting this persona causes the API to set AGENT_REPO=Mperhats/centaur-lab
 # on the sandbox spawn, which makes entrypoint.sh `git clone --shared` from
