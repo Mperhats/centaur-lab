@@ -16,13 +16,16 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from tools.semantic_scholar.client import SemanticScholarClient
+if TYPE_CHECKING:
+    from api.workflow_engine import WorkflowContext
 
 from _paper_document import build_paper_document, upsert_document
+
+from tools.semantic_scholar.client import SemanticScholarClient
 
 WORKFLOW_NAME = "save_papers"
 
@@ -35,7 +38,7 @@ class Input:
     query: str | None = None
 
 
-async def handler(inp: Input, ctx: Any) -> dict[str, Any]:
+async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     """Fetch each paper from Semantic Scholar and upsert it as a context document."""
     if not inp.paper_ids:
         ctx.log("save_papers_skipped_empty")

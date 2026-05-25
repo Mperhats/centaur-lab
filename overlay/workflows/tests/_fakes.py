@@ -60,3 +60,14 @@ class FakePool:
     async def execute(self, query: str, *args: Any) -> str:
         self.execute_calls.append((query, args))
         return self._execute_status
+
+
+class FakeContext:
+    """Minimal workflow context exposing ``_pool`` and a recording ``log``."""
+
+    def __init__(self, pool: FakePool) -> None:
+        self._pool = pool
+        self.logs: list[tuple[str, dict[str, Any]]] = []
+
+    def log(self, event: str, **kwargs: Any) -> None:
+        self.logs.append((event, kwargs))

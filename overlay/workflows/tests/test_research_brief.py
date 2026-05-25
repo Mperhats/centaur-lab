@@ -14,18 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import research_brief
 
-from ._fakes import EXECUTE_ARG_INDEX, FakePool
-
-
-class FakeContext:
-    """Minimal workflow context exposing ``_pool`` and a recording ``log``."""
-
-    def __init__(self, pool: FakePool) -> None:
-        self._pool = pool
-        self.logs: list[tuple[str, dict[str, Any]]] = []
-
-    def log(self, event: str, **kwargs: Any) -> None:
-        self.logs.append((event, kwargs))
+from ._fakes import EXECUTE_ARG_INDEX, FakeContext, FakePool
 
 
 class FakeS2Client:

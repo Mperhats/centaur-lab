@@ -14,11 +14,12 @@ import hashlib
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from tools.semantic_scholar.client import SemanticScholarClient
+if TYPE_CHECKING:
+    from api.workflow_engine import WorkflowContext
 
 from _paper_document import (
     _canonical_json,
@@ -26,6 +27,8 @@ from _paper_document import (
     build_paper_document,
     upsert_document,
 )
+
+from tools.semantic_scholar.client import SemanticScholarClient
 
 WORKFLOW_NAME = "research_brief"
 
@@ -179,7 +182,7 @@ def _build_brief_document(
     }
 
 
-async def handler(inp: Input, ctx: Any) -> dict[str, Any]:
+async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     """Run a Semantic Scholar search and persist the brief + papers."""
     if inp.query.strip() == "":
         ctx.log("research_brief_skipped_empty_query")
