@@ -152,6 +152,87 @@ To exercise the Codex harness instead, mention the bot in Slack with the
 selector: `@centaur --codex reply with exactly PONG`. Requires `OPENAI_API_KEY`
 in `.env` so `bootstrap-secrets` can patch it into the Secret.
 
+## Extend Centaur from Slack
+
+Once `just smoke` returns `PONG`, you can ask the running Centaur to extend
+itself. The `lab-eng` persona is wired to `Mperhats/centaur-lab` — when you
+mention it, the sandbox spawns with a writable clone of this repo and the
+`gh` CLI authenticated via your `GITHUB_TOKEN`.
+
+### Add a new tool from Slack
+
+In any Slack channel where the Centaur bot is installed:
+
+```
+@centaur --lab-eng scaffold a new overlay tool called polygon that wraps
+the Polygon.io v2 aggregates endpoint. One method: daily_close(ticker,
+date) returning the close price. Open a PR when done.
+```
+
+What happens:
+
+1. The Slackbot routes the message to the API, which spawns a sandbox pod with `AGENT_REPO=Mperhats/centaur-lab` and `harness=lab-eng`.
+2. The sandbox boots, clones this repo from the `repoCache` mount into its workspace, and loads the overlay `creating-tools` skill.
+3. The agent scaffolds `overlay/tools/polygon/{__init__.py, client.py, cli.py, pyproject.toml, .env.example}` following the skill's conventions.
+4. It commits, pushes the agent-generated branch (`agent-<ts>-<rand>-<rand>`), and runs `gh pr create`.
+5. It replies in the Slack thread with the PR URL.
+
+You review the PR locally, merge, then:
+
+```bash
+just up
+```
+
+`just up` rebuilds `centaur-overlay:latest` with the new tool baked in and
+restarts the API pod. Within seconds, `GET /tools` returns `polygon` and
+the agent can call it on subsequent turns.
+
+### Smoke test the loop locally
+
+The repo ships a recipe that exercises the whole loop end-to-end without
+going through Slack:
+
+```bash
+just slack-loop-smoke
+```
+
+This spawns a `lab-eng` sandbox, asks it to scaffold a throwaway `probe`
+tool, polls until the execution completes, and verifies a PR appears on
+`Mperhats/centaur-lab`. Use it after any change to `values.local.yaml`,
+the `lab-eng` persona, or the overlay `creating-tools` skill to confirm
+the loop is still intact.
+
+Clean up accumulated test PRs:
+
+```bash
+gh pr list -R Mperhats/centaur-lab --search "feat(overlay): add probe tool" \
+  --json number --jq '.[].number' \
+  | xargs -I{} gh pr close -R Mperhats/centaur-lab {} --delete-branch
+```
+
+### What the agent can and cannot edit
+
+The `lab-eng` persona is scoped to `overlay/` — new tools, new overlay
+skills, new overlay personas, new overlay workflows. It will NOT edit:
+
+- `.centaur/` (the upstream Centaur submodule, pinned at a specific SHA)
+- `values.local.yaml` (chart values — these change the cluster, not the
+  overlay image, and require human review of the deployment surface)
+- `Justfile` (deployment scripts — same reason)
+
+For changes to those paths, edit by hand and `just up` normally.
+
+### Prerequisites checklist
+
+The Slack loop only works if **all** of these are true:
+
+- [ ] `GITHUB_TOKEN` in `.env` has `Contents: write` + `Pull requests: write` (see `.env.example` for the full scope list, and `docs/gh.md` for step-by-step token setup)
+- [ ] `repoCache.enabled: true` in `values.local.yaml` (verify with `kubectl -n centaur-system get daemonset/centaur-centaur-repo-cache`)
+- [ ] `lab-eng` persona registered (verify with `curl -H "X-Api-Key: $SLACKBOT_API_KEY" http://localhost:8000/personas | jq '.[] | select(.name == "lab-eng")'`)
+- [ ] Overlay image rebuilt since the last skill or persona change (`just overlay::build`)
+
+If any of these fail, `just slack-loop-smoke` will print which one — start there before debugging through Slack.
+
 ## Tear down
 
 ```bash
