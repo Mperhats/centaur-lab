@@ -84,7 +84,7 @@ You are running inside a sandbox with read-only access to `~/github/Mperhats/cen
 
 ## Deployment (what happens after merge)
 
-Hot-reload depends on files actually appearing in the API pod's `/app/overlay/org/tools/<name>/` directory. The path looks like this:
+Tool registration depends on files actually appearing in the API pod's `/app/overlay/org/tools/<name>/` directory. The path looks like this:
 
 1. PR merged on GitHub.
 2. The maintainer (or CI, when wired) runs `just up` locally:
