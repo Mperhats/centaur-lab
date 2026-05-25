@@ -1,0 +1,22 @@
+# centaur-lab MVP — the ONLY chart customization layered on top of
+# .centaur/contrib/chart/values.dev.yaml. Keep this file minimal; every
+# additional knob is one more thing that can drift across upstream bumps.
+
+ironProxy:
+  # Resolve credentials from the centaur-infra-env Kubernetes Secret
+  # directly. No 1Password Connect or service account.
+  secretSource: env
+
+api:
+  # Make `just smoke` and any future bare `@bot ...` mention use Claude Code
+  # by default (chart default would be Codex, which we have no key for).
+  defaultHarness: claude-code
+
+  # Save laptop CPU/memory; sandboxes spawn cold per turn. Acceptable for
+  # smoke and early development. Re-enable in production values.
+  warmPoolEnabled: false
+
+slackbot:
+  # No Slack ingress in milestone 1. Drops the dependency on SLACK_BOT_TOKEN
+  # and a public webhook URL. Re-enable when M2 lands.
+  enabled: false
