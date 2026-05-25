@@ -370,7 +370,8 @@ Run from the repo root:
     echo "FAIL: claude-code-not-rendered"; exit 0
   fi
 
-  if ! echo "$rendered" | grep -E "secretSource[^A-Za-z]+env|FIREWALL_MANAGER_SECRET_SOURCE.*env" >/dev/null; then
+  if ! echo "$rendered" | grep -E -A1 'FIREWALL_MANAGER_SECRET_SOURCE' \
+       | grep -qE '^\s*value:\s*"?env"?\s*$'; then
     echo "FAIL: iron-proxy-not-env-mode"; exit 0
   fi
 
