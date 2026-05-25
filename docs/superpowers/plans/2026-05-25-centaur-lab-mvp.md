@@ -218,9 +218,8 @@ Three assertions: file exists, has all five expected variables, every line that 
 
 ```bash
 ( [ -f .env.example ] || { echo FAIL: missing-file; exit 0; }
-  required="ANTHROPIC_API_KEY SLACK_SIGNING_SECRET SLACKBOT_API_KEY SANDBOX_SIGNING_KEY IRON_MANAGEMENT_API_KEY"
   ok=true
-  for key in $required; do
+  for key in ANTHROPIC_API_KEY SLACK_SIGNING_SECRET SLACKBOT_API_KEY SANDBOX_SIGNING_KEY IRON_MANAGEMENT_API_KEY CENTAUR_NAMESPACE; do
     if ! grep -qE "^export ${key}=" .env.example; then
       echo "FAIL: missing-export ${key}"
       ok=false
@@ -228,6 +227,8 @@ Three assertions: file exists, has all five expected variables, every line that 
   done
   $ok && echo PASS )
 ```
+
+(Same shell-portability inlining the plan applied to Task 5's verification — `for key in $required` would not word-split under zsh.)
 
 - [ ] **Step 2: Run the verification before creating the file to confirm it fails**
 
@@ -272,6 +273,12 @@ export SLACKBOT_API_KEY=replace-with-random-hex
 # Required by sandbox + iron-proxy. Generate once and keep stable.
 export SANDBOX_SIGNING_KEY=replace-with-random-hex
 export IRON_MANAGEMENT_API_KEY=replace-with-random-hex
+
+# Tooling: makes `.centaur/Justfile`'s passthrough recipes
+# (`bootstrap-secrets`, `status`, `logs`, `smoke`) target the same namespace
+# our root `up`/`down` use. Upstream's default is `centaur`; we deploy into
+# `centaur-system` so the Secret would otherwise land in the wrong namespace.
+export CENTAUR_NAMESPACE=centaur-system
 ```
 
 - [ ] **Step 4: Run the verification again to confirm it passes**
