@@ -8,12 +8,17 @@ centaur := ".centaur"
 # Lives in cloudflared/Justfile so all tunnel concerns stay in one place.
 mod cloudflared 'cloudflared/Justfile'
 
+# Overlay image build/lint/CLI-smoke. Lives in overlay/Justfile so all
+# org-overlay recipes stay in one place; reachable as `just overlay::<recipe>`.
+mod overlay 'overlay/Justfile'
+
 default:
     just --list
 
 [group('lifecycle')]
 up: bootstrap-secrets
     cd {{centaur}} && just build
+    just overlay::build
     just deploy
 
 [group('lifecycle')]
@@ -52,6 +57,7 @@ bootstrap-secrets:
     patch_key SLACK_ETL_TOKEN
     patch_key GITHUB_WEBHOOK_SECRET
     patch_key GITHUB_TOKEN
+    patch_key SEMANTIC_SCHOLAR_API_KEY
 
 [group('lifecycle')]
 [confirm("Uninstall " + CENTAUR_RELEASE + " from " + CENTAUR_NAMESPACE + "? Pass --yes to skip this prompt. ")]

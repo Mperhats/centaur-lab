@@ -1,0 +1,40 @@
+[project]
+name = "semantic_scholar"
+description = "Semantic Scholar academic paper search, lookup, and citation graph"
+version = "0.1.0"
+requires-python = ">=3.11"
+# python-dotenv is only used by the standalone CLI entrypoint, but listing it
+# here keeps `uv run python cli.py ...` self-contained without --with flags.
+# centaur-sdk is intentionally NOT listed — its upstream pyproject uses
+# `packages = ["."]` which produces a flat-layout wheel that Python cannot
+# import as `centaur_sdk` from an editable install. The CLI works around
+# this by prepending `.centaur/` to sys.path; the API pod resolves the SDK
+# normally via its own editable install.
+dependencies = [
+    "httpx>=0.27.0",
+    "typer>=0.12.0",
+    "rich>=13.0.0",
+    "python-dotenv>=1.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# Tool packages are installed by Centaur's tool loader at API startup, not by
+# uv. `package = false` tells uv to skip trying to wheel-build this directory
+# (the layout doesn't match hatchling's defaults), so the CLI test path stays
+# a one-liner: `uv run python cli.py ...`.
+[tool.uv]
+package = false
+
+
+[tool.centaur]
+module = "client.py"
+# x-api-key is the documented header for the Graph API. The tool also runs
+# anonymously when the key is unset (heavily rate-limited), so the secret is
+# declared optional — iron-proxy will only inject when the placeholder is
+# actually present in the outbound request.
+optional_secrets = [
+    {type = "http", name = "SEMANTIC_SCHOLAR_API_KEY", match_headers = ["x-api-key"], hosts = ["api.semanticscholar.org"]},
+]

@@ -14,7 +14,8 @@ The full design rationale lives in
 | Path | Purpose |
 |------|---------|
 | `.centaur/` | Git submodule pinned at a specific `paradigmxyz/centaur` SHA. The base platform. |
-| `values.local.yaml` | Helm chart overlay: env-var secrets, Claude Code default, Slackbot + Slack ETL enabled, local image-pull policies. |
+| `overlay/` | Org-specific tools, skills, and a `Dockerfile` packaged into the `centaur-overlay:latest` image and mounted into the API + sandbox pods. See the [Tools](#tools-in-overlay) section below. |
+| `values.local.yaml` | Helm chart overlay: env-var secrets, Claude Code default, Slackbot + Slack ETL enabled, local image-pull policies, overlay image reference. |
 | `Justfile` | Thin wrapper over `.centaur/Justfile`. Only owns recipes that fill real upstream gaps — see the recipe-by-recipe `# comments` for the why. `just --list` shows everything grouped. |
 | `.env.example` | Template for the shell env vars `bootstrap-secrets` reads. |
 | `cloudflared/` | Cloudflare Tunnel routing, launchd agent template, and per-machine setup README. Tunnel auto-starts via `just cloudflared::install-service`. |
@@ -69,6 +70,7 @@ The full design rationale lives in
    | `SLACK_BOT_TOKEN` | Yes (Slackbot is enabled) | Slack App -> OAuth & Permissions -> Bot User OAuth Token |
    | `SLACK_SIGNING_SECRET` | Yes (Slackbot is enabled) | Slack App -> Basic Information -> App Credentials |
    | `SLACK_ETL_TOKEN` | Yes (Slack ETL is enabled) | Slack user token with `conversations.*` + `users.list` scopes |
+   | `SEMANTIC_SCHOLAR_API_KEY` | Optional (boosts quota for the `semantic_scholar` overlay tool) | [Semantic Scholar API form](https://www.semanticscholar.org/product/api#api-key-form) |
    | `OP_SERVICE_ACCOUNT_TOKEN` / `OP_VAULT` / `SLACKBOT_API_KEY` | Yes (ceremonial) | `openssl rand -hex 32` each |
 
    The upstream script generates `SANDBOX_SIGNING_KEY` and
@@ -178,11 +180,32 @@ kubectl delete namespace centaur-system
 | `helm get values` does not show `defaultHarness` | The pinned base SHA may not expose the key yet — see [open question 2 in the spec](docs/superpowers/specs/2026-05-25-centaur-lab-mvp-design.md#open-questions-for-implementation). Pass `--claude` manually in the smoke prompt as a workaround. |
 | Slack ETL workflows log token errors | `SLACK_ETL_TOKEN` unset or wrong; or its Slack user lacks `conversations.*` / `users.list` scopes. See [`docs/centaur/operate/slack-etl.md`](docs/centaur/operate/slack-etl.md). |
 
+## Tools (in `overlay/`)
+
+The `overlay/` directory is packaged into a local Docker image
+(`centaur-overlay:latest`) and mounted into the API + sandbox pods at
+`/app/overlay/org` and `/home/agent/overlay/org` respectively. The Helm
+chart adds the overlay path to `TOOL_DIRS` so the API discovers anything
+under `overlay/tools/` at startup; sandbox pods receive
+`overlay/.agents/skills/` so Claude Code loads them as workspace skills.
+
+The image is rebuilt as part of `just up` (`just overlay::build` chains in
+front of `just deploy`); rebuilding by itself is `just overlay::build`,
+followed by `just deploy` to pick up the new image.
+
+| Tool | Purpose |
+|------|---------|
+| [`overlay/tools/semantic_scholar`](overlay/tools/semantic_scholar) | Search papers, fetch metadata, and walk the citation graph via the [Semantic Scholar Graph API](https://api.semanticscholar.org/api-docs/graph). Usable anonymously; set `SEMANTIC_SCHOLAR_API_KEY` in `.env` for higher quota. Companion playbook in `overlay/.agents/skills/academic-research/SKILL.md`. |
+
+For background on the overlay model (how the image is built, how
+`TOOL_DIRS` is assembled, how to verify discovery from the API pod), see
+[`docs/centaur/extend/overlay.md`](docs/centaur/extend/overlay.md) and
+[`docs/centaur/extend/tools.md`](docs/centaur/extend/tools.md).
+
 ## What this repo intentionally does NOT contain (yet)
 
 | Future milestone | What it adds |
 |------------------|--------------|
-| Overlay | An `overlay/` directory with org-specific tools/workflows/skills + image build, mounted into the API + sandbox pods at `/overlay/{tools,workflows}`. See [`docs/centaur/extend/overlay.md`](docs/centaur/extend/overlay.md) and the ACME example. |
 | Production infra | `infra/` Argo CD bootstrap pinned at the same chart SHA. |
 | CI | Path-scoped GitHub Actions for overlay/infra changes. |
 | Alternative harnesses | Either swap default harness to `pi-mono` or wire pi.dev RPC SDK as a tool. |

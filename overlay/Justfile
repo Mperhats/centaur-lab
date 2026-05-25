@@ -1,0 +1,29 @@
+set dotenv-load := true
+
+# centaur-lab overlay — build, lint, and CLI-smoke recipes for the
+# org-specific tools/skills shipped from this directory.
+#
+# Imported from the root Justfile via `mod overlay 'overlay/Justfile'` so
+# every recipe is reachable as `just overlay::<recipe>`.
+
+default:
+    just --list
+
+# Build the overlay image with a stable :latest tag. Docker Desktop's
+# Kubernetes shares the host image cache, so a freshly-built local image is
+# immediately visible to the API initContainer (with `pullPolicy: IfNotPresent`).
+[group('image')]
+build:
+    docker build -t centaur-overlay:latest .
+
+# Lint every tool against the same ruff contract upstream uses.
+[group('dev')]
+lint:
+    cd tools && uvx ruff check .
+
+# Smoke-test the CLI without spinning up a sandbox. Honors $SEMANTIC_SCHOLAR_API_KEY
+# from the root `.env` (auto-loaded above) but works without it (anonymous,
+# heavily rate-limited).
+[group('dev')]
+smoke-semantic-scholar query="diffusion models protein design" limit="5":
+    cd tools/semantic_scholar && uv run python cli.py search {{ quote(query) }} --limit {{ limit }}

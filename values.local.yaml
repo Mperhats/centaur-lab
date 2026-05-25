@@ -54,3 +54,17 @@ slackbot:
   # `kubectl port-forward` exposing the Slackbot Service at a stable public
   # URL Slack can hit. See cloudflared/README.md.
   enabled: true
+
+overlay:
+  # Mount the local overlay/ tree into the API pod at /app/overlay/org and
+  # into sandbox pods at /home/agent/overlay/org. Built once per `just up`
+  # (chained via `just overlay::build`) into a host-local Docker image.
+  # Docker Desktop's Kubernetes shares the host image cache, so
+  # `pullPolicy: IfNotPresent` finds the local tag without a registry.
+  # Adds /app/overlay/org/tools to TOOL_DIRS so the API discovers tools
+  # like semantic_scholar; copies .agents/skills into sandbox workspaces so
+  # academic-research and friends are loaded by Claude Code.
+  image:
+    repository: centaur-overlay
+    tag: latest
+    pullPolicy: IfNotPresent
