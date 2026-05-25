@@ -7,6 +7,13 @@ ironProxy:
   # directly. No 1Password Connect or service account.
   secretSource: env
 
+  # Same imagePullPolicy fix as `api.image.pullPolicy` below — kubelet's
+  # default for `:latest` is Always, which makes it try to pull the
+  # locally-built centaur-iron-proxy:latest from a registry. Force it to
+  # use the local image.
+  image:
+    pullPolicy: IfNotPresent
+
 api:
   # Make `just smoke` and any future bare `@bot ...` mention use Claude Code
   # by default (chart default would be Codex, which we have no key for).
@@ -16,7 +23,26 @@ api:
   # smoke and early development. Re-enable in production values.
   warmPoolEnabled: false
 
+  # The chart's default for `:latest`-tagged images is Always, which makes
+  # kubelet try to pull centaur-api:latest from a public registry instead of
+  # using the locally-built image. Slackbot already has IfNotPresent set in
+  # values.dev.yaml; this matches that behavior for the API. (Same fix
+  # repeated below for ironProxy and sandbox — upstream values.dev.yaml
+  # only covers slackbot.)
+  image:
+    pullPolicy: IfNotPresent
+
+sandbox:
+  # Same image-pull fix: sandbox pods spawn per agent turn, get the same
+  # default `pullPolicy: Always`, and silently fail with "sandbox readiness
+  # timed out" after 60s because kubelet can't pull centaur-agent:latest
+  # from any registry. Without this override, every Slack mention errors out.
+  image:
+    pullPolicy: IfNotPresent
+
 slackbot:
-  # No Slack ingress in milestone 1. Drops the dependency on SLACK_BOT_TOKEN
-  # and a public webhook URL. Re-enable when M2 lands.
-  enabled: false
+  # Slack ingress enabled. Requires real SLACK_BOT_TOKEN and
+  # SLACK_SIGNING_SECRET in .env, plus a `cloudflared` tunnel exposing the
+  # Slackbot Service at a stable public URL Slack can hit. See
+  # cloudflared/README.md and the `port-forward` / `tunnel` Justfile recipes.
+  enabled: true

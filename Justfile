@@ -25,7 +25,11 @@ bootstrap-secrets:
     #!/usr/bin/env bash
     set -euo pipefail
     cd .centaur && just bootstrap-secrets
-    encoded=$(printf '%s' "${ANTHROPIC_API_KEY}" | base64)
+    # `tr -d '\n'` matters on Linux: GNU coreutils `base64` wraps at 76
+    # columns by default, which would inject a newline into the JSON value
+    # below and break `kubectl patch`. macOS base64 doesn't wrap; the
+    # `tr` is a no-op there.
+    encoded=$(printf '%s' "${ANTHROPIC_API_KEY}" | base64 | tr -d '\n')
     kubectl -n "${CENTAUR_NAMESPACE:-centaur-system}" patch secret centaur-infra-env --type merge \
       -p "{\"data\":{\"ANTHROPIC_API_KEY\":\"${encoded}\"}}"
 
@@ -46,3 +50,14 @@ logs target="api":
 # nuke option.
 down:
     helm uninstall centaur --namespace centaur-system
+
+# Forward the Slackbot Service to localhost:3001 so the Cloudflare Tunnel
+# (or any local HTTP client) can reach it. Blocks; run in its own terminal.
+port-forward:
+    kubectl port-forward -n centaur-system svc/centaur-centaur-slackbot 3001:3001
+
+# Run the Cloudflare Tunnel that exposes localhost:3001 at
+# https://centaur.local-labs.xyz. Blocks; run in its own terminal alongside
+# `just port-forward`. See cloudflared/README.md for one-time setup.
+tunnel:
+    cloudflared tunnel --config cloudflared/config.yml run centaur-dev

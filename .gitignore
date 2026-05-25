@@ -13,6 +13,10 @@ venv/
 # Node detritus
 node_modules/
 
+# Cloudflare Tunnel credentials — defensive; real ones live in ~/.cloudflared/
+cloudflared/*.json
+cloudflared/cert.pem
+
 # Editor / OS
 .idea/
 .vscode/

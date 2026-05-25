@@ -1,0 +1,19 @@
+# Cloudflare Tunnel routes for the centaur-lab dev stack.
+#
+# Run with `just tunnel`. The tunnel exposes the local Slackbot service
+# (forwarded to localhost:3001 via `just port-forward`) at a stable public
+# URL Slack can hit for Event Subscriptions.
+#
+# `credentials-file` is intentionally omitted: cloudflared resolves it
+# automatically from `~/.cloudflared/<TUNNEL-UUID>.json` after you've run
+# `cloudflared tunnel login` and `cloudflared tunnel create centaur-dev`.
+# That credentials JSON is a per-machine secret and must NEVER be committed.
+# See README.md in this directory for one-time setup steps on a fresh machine.
+
+tunnel: centaur-dev
+
+ingress:
+  - hostname: centaur.local-labs.xyz
+    service: http://localhost:3001
+  # Required catch-all — cloudflared refuses to start without it.
+  - service: http_status:404
