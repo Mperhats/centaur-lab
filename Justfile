@@ -219,17 +219,33 @@ slack-loop-smoke:
       exit 1
     fi
 
-    echo "=== 5/4 verify PR (bonus step — agent might race ahead of GitHub indexing) ==="
+    echo "=== 5/5 verify PR (gh PR search tokenizes oddly on '():' so we use in:title + branch-name fallback) ==="
     # The agent's gh pr create returns when GitHub accepts the API call, but
     # search indexing can lag a few seconds. Retry a few times.
+    cutoff=$(date -u -v-10M +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d '10 minutes ago' +'%Y-%m-%dT%H:%M:%SZ')
     for attempt in 1 2 3 4 5; do
+      # Primary: in:title + time filter. Avoids the literal "(overlay):" tokens
+      # that confuse GitHub's search and silently return [] (see slack-to-pr-loop
+      # plan, Task 5 review notes).
       prs=$(gh pr list -R Mperhats/centaur-lab \
-        --search "feat(overlay): add probe tool created:>=$(date -u -v-10M +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d '10 minutes ago' +'%Y-%m-%dT%H:%M:%SZ')" \
+        --search "in:title \"add probe tool\" created:>=${cutoff}" \
         --json number,title,url,headRefName,createdAt --limit 5)
       pr_count=$(printf '%s' "$prs" | jq 'length')
       if [ "$pr_count" -ge 1 ]; then
         echo "✓ found $pr_count matching PR(s) created in the last 10 minutes:"
         printf '%s\n' "$prs" | jq '.'
+        exit 0
+      fi
+      # Fallback: search-index lag is real even with a tight in:title query;
+      # cross-check by listing open PRs whose head branch matches the
+      # auto-generated `agent-<ts>-…` pattern.
+      branch_prs=$(gh pr list -R Mperhats/centaur-lab --state open \
+        --json number,title,url,headRefName,createdAt --limit 20 \
+        --jq "[.[] | select(.headRefName | startswith(\"agent-\")) | select(.createdAt >= \"${cutoff}\") | select(.title | contains(\"add probe tool\"))]")
+      branch_count=$(printf '%s' "$branch_prs" | jq 'length')
+      if [ "$branch_count" -ge 1 ]; then
+        echo "✓ found $branch_count matching PR(s) (via head-branch fallback):"
+        printf '%s\n' "$branch_prs" | jq '.'
         exit 0
       fi
       echo "  attempt $attempt: no PR found yet, sleeping 5s..."
