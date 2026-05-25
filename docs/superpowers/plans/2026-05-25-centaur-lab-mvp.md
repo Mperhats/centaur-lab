@@ -442,9 +442,8 @@ Three assertions: file exists, `just --list` resolves cleanly and includes the e
 ```bash
 ( [ -f Justfile ] || { echo "FAIL: missing-file"; exit 0; }
   list=$(just --list 2>/tmp/just.err) || { echo "FAIL: just-list-failed"; cat /tmp/just.err; exit 0; }
-  required="up bootstrap-secrets smoke status logs down"
   ok=true
-  for recipe in $required; do
+  for recipe in up bootstrap-secrets smoke status logs down; do
     if ! echo "$list" | grep -qE "^\s+${recipe}( |$)"; then
       echo "FAIL: missing-recipe ${recipe}"; ok=false
     fi
@@ -452,6 +451,8 @@ Three assertions: file exists, `just --list` resolves cleanly and includes the e
   just --evaluate >/dev/null 2>/tmp/just.err || { echo "FAIL: just-evaluate-failed"; cat /tmp/just.err; exit 0; }
   $ok && echo PASS )
 ```
+
+(The recipe list is inlined into the `for` to avoid relying on shell-specific word-splitting of `$required` — this script must work under both `bash` and `zsh`.)
 
 - [ ] **Step 2: Run the verification before creating the file to confirm it fails**
 
