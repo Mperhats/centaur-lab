@@ -47,6 +47,12 @@ sandbox:
   # from any registry. Without this override, every Slack mention errors out.
   image:
     pullPolicy: IfNotPresent
+  # Mount path inside each sandbox pod where the repo-cache DaemonSet's
+  # hostPath volume gets attached read-only at /home/agent/github. Setting
+  # this also makes the chart export REPOS_PATH into the API deployment so
+  # api/sandbox/kubernetes.py can validate that AGENT_REPO has a backing
+  # mount. Must match repoCache.hostPath below.
+  reposPath: /var/lib/centaur/repos
 
 slackbot:
   # Slack ingress enabled. Requires real SLACK_BOT_TOKEN and
@@ -68,3 +74,41 @@ overlay:
     repository: centaur-overlay
     tag: latest
     pullPolicy: IfNotPresent
+
+repoCache:
+  # Spin up the repo-cache DaemonSet that periodically `git fetch`s every
+  # repo listed in .repositories into .hostPath. Every sandbox pod gets
+  # that hostPath mounted read-only at ~/github/<org>/<repo>, which is the
+  # source the sandbox entrypoint uses for `git clone --shared` (cheap,
+  # CoW-style writable clone via `git-branch`). Without this enabled, any
+  # sandbox spawned with AGENT_REPO set will exit during entrypoint with
+  # "not a valid git repository".
+  enabled: true
+
+  # The DaemonSet writes here on each cluster node; sandbox pods mount the
+  # same path read-only. On Docker Desktop, /var/lib/* paths are inside
+  # the host VM's filesystem and work without any extra config. The
+  # `type: DirectoryOrCreate` in repo-cache.yaml means the path is created
+  # if missing on first start.
+  hostPath: /var/lib/centaur/repos
+
+  # Mirror only the repo the sandbox needs to edit. Each entry is fetched
+  # by the DaemonSet in a loop every syncIntervalSeconds. Add more here
+  # when you want the agent to be able to edit additional repos (e.g.,
+  # an infra repo for Argo CD bootstrap once you ship it).
+  repositories:
+    - Mperhats/centaur-lab
+
+  # 5 minutes is upstream's default; tune lower if you want PRs to see
+  # the latest main quickly after merge. Each cycle is a `git fetch`, not
+  # a full clone, so the cost is low.
+  syncIntervalSeconds: 300
+
+  # Reuse the GITHUB_TOKEN already living in centaur-infra-env (patched
+  # by bootstrap-secrets). The chart's repoCache.githubToken supports
+  # `existingSecretName + secretKey` to avoid creating a second Secret.
+  # See .centaur/contrib/chart/templates/_helpers.tpl:58-64 for the
+  # helper that resolves the secret name.
+  githubToken:
+    existingSecretName: centaur-infra-env
+    secretKey: GITHUB_TOKEN
