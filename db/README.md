@@ -10,12 +10,18 @@ cd db
 uv sync
 uv run python -m ipykernel install --user \
     --name centaur-db --display-name "centaur-db (.venv)"
+uv run nbstripout --install --attributes ../.gitattributes
 ```
 
-The `ipykernel install` registers `db/.venv` as a named Jupyter kernel that
-Cursor / VS Code can find. `notebooks/explore.ipynb` is pinned to this
-kernel, so once it's registered the notebook auto-selects the right
-interpreter on open.
+- `ipykernel install` registers `db/.venv` as a named Jupyter kernel that
+  Cursor / VS Code can find. `notebooks/explore.ipynb` is pinned to this
+  kernel, so it auto-selects the right interpreter on open.
+- `nbstripout --install` registers a git clean filter so notebook cell
+  outputs are stripped at commit time. Outputs stay visible in your
+  working copy; git only ever sees the cleaned notebooks. The
+  `.gitattributes` entry at the repo root is committed; the local git
+  filter command needs to be re-registered per clone (that's what
+  `--install` does).
 
 ## Using it
 
