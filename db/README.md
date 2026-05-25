@@ -11,17 +11,24 @@ uv sync
 uv run python -m ipykernel install --user \
     --name centaur-db --display-name "centaur-db (.venv)"
 uv run nbstripout --install --attributes ../.gitattributes
+uv tool install pre-commit
+cd .. && pre-commit install
 ```
 
 - `ipykernel install` registers `db/.venv` as a named Jupyter kernel that
   Cursor / VS Code can find. `notebooks/explore.ipynb` is pinned to this
   kernel, so it auto-selects the right interpreter on open.
-- `nbstripout --install` registers a git clean filter so notebook cell
-  outputs are stripped at commit time. Outputs stay visible in your
-  working copy; git only ever sees the cleaned notebooks. The
-  `.gitattributes` entry at the repo root is committed; the local git
-  filter command needs to be re-registered per clone (that's what
-  `--install` does).
+- `nbstripout --install` registers a git **clean filter** for `*.ipynb`
+  (path set in the committed `.gitattributes`). Notebook outputs are
+  silently stripped on every `git add` — outputs stay visible in your
+  working copy; git only ever sees the cleaned version. `--required` is
+  set, so if the filter is somehow missing on a clone, `git add` of a
+  notebook fails loudly rather than passing through unfiltered.
+- `pre-commit install` registers a git pre-commit hook (config lives in
+  the committed `.pre-commit-config.yaml`) that runs `nbstripout` over
+  every staged notebook as a **second-layer safety net** for the rare
+  case where the clean filter is bypassed. The hook fails the commit if
+  any staged notebook still contains outputs.
 
 ## Using it
 
