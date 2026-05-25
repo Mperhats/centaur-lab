@@ -94,7 +94,7 @@ Tool registration depends on files actually appearing in the API pod's `/app/ove
 4. The API's plugin watcher (`PLUGIN_WATCHER_ENABLED`) registers the new tool, OR — since the pod just restarted — startup discovery picks it up.
 5. `POST /tools/<name>/<method>` now works.
 
-You do NOT need to `POST /admin/reload-tools` after a fresh deploy — startup discovery already loaded it. That endpoint is for editing files inside a long-lived pod, which is not the path we use here.
+Startup discovery on the freshly-rolled API pod already loaded the tool — the in-process plugin-watcher path that some upstream Centaur deployments use for hot-reload is not how this stack delivers new tools. The pod restart IS the reload.
 
 ## Tool Implementation (unchanged from upstream)
 
