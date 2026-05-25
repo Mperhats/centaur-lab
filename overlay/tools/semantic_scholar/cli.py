@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 import typer
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 from rich.console import Console
 from rich.table import Table
 
@@ -33,7 +33,11 @@ if _SDK_PARENT.is_dir() and str(_SDK_PARENT) not in sys.path:
 if str(_THIS_DIR.parent) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR.parent))
 
-load_dotenv()
+# Walk up from CWD to find a `.env`. The repo convention is one root .env
+# (fed into the k8s Secret by `just bootstrap-secrets`); per-tool `.env`
+# files are not consulted by the API. Doing usecwd=True still picks up a
+# tool-local `.env` if you really want one for an isolated CLI session.
+load_dotenv(find_dotenv(usecwd=True))
 
 app = typer.Typer(name="semantic_scholar", help="Semantic Scholar Graph API CLI")
 console = Console()
