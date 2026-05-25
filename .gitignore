@@ -1,0 +1,20 @@
+# Local secrets — NEVER commit
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Python detritus (in case anything escapes the .centaur/ submodule)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Node detritus
+node_modules/
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
