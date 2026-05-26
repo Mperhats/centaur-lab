@@ -4,7 +4,8 @@
 # overlay only needs to ship static files; tool dependencies are installed
 # from each tool's pyproject.toml at API discovery time. Workflow handlers
 # are similarly static .py files; the API discovers them via WORKFLOW_DIRS
-# at startup.
+# at startup. CI publishes this image to GHCR on pushes to main (see
+# `.github/workflows/overlay.yml`).
 #
 # `centaur_lab/` ships persistence helpers (`centaur_lab.paper_document`,
 # `centaur_lab.metrics`) imported by both the semantic_scholar tool and the
