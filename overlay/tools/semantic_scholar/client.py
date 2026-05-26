@@ -244,14 +244,6 @@ def _document_summary(row: Any) -> dict[str, Any]:
     }
 
 
-def _resolve_database_url() -> str:
-    """Resolve DATABASE_URL the same way the upstream company_context tool does."""
-    # DATABASE_URL is owned by the API process, not an agent-facing secret;
-    # this mirrors company_context_client._resolve_database_url.
-    env_database_url = os.getenv("DATABASE_URL")  # noqa: TID251
-    return (env_database_url or secret("DATABASE_URL", default="")).strip()
-
-
 def _extract_paper_id(summary: dict[str, Any]) -> str:
     """Pick a paperId out of an indexed-document summary."""
     metadata_paper_id = summary.get("metadata", {}).get("paperId")
@@ -446,7 +438,12 @@ class SemanticScholarClient:
     # smooths over the common case without masking real failures.
     MAX_RETRIES = 4
 
-    def __init__(self, api_key: str | None = None, timeout: float = 30.0):
+    def __init__(
+        self,
+        api_key: str | None = None,
+        timeout: float = 30.0,
+        database_url: str | None = None,
+    ) -> None:
         # Store the constructor-injected key as-is; resolve any fallback
         # lazily at request time. Eager resolution here runs during the
         # ToolManager's _collect_methods() pass when ToolContext.secrets
@@ -454,6 +451,23 @@ class SemanticScholarClient:
         self._api_key = api_key
         self._timeout = timeout
         self._client: httpx.Client | None = None
+        # DATABASE_URL is owned by the API process, not an agent-facing
+        # secret; mirror the resolution chain upstream company_context uses
+        # so a constructor arg can override env or secret for tests.
+        env_database_url = os.getenv("DATABASE_URL")  # noqa: TID251
+        self._database_url = (
+            database_url or env_database_url or secret("DATABASE_URL", default="")
+        ).strip()
+
+    def _require_database_url(self) -> str:
+        if not self._database_url:
+            raise RuntimeError(
+                "DATABASE_URL is required for semantic_scholar database access"
+            )
+        return self._database_url
+
+    async def _connect(self) -> asyncpg.Connection:
+        return await asyncpg.connect(self._require_database_url(), command_timeout=30)
 
     def _get_api_key(self) -> str | None:
         """Get API key from instance or env var."""
@@ -687,8 +701,7 @@ class SemanticScholarClient:
         if not normalized_query:
             return {"status": "error", "error": "query cannot be empty"}
 
-        database_url = _resolve_database_url()
-        if not database_url:
+        if not self._database_url:
             return {
                 "status": "error",
                 "error": "DATABASE_URL is required for semantic_scholar.search",
@@ -706,7 +719,6 @@ class SemanticScholarClient:
                     query=normalized_query,
                     limit=clamped_limit,
                     year_from=year_from,
-                    database_url=database_url,
                 )
             )
         except Exception as exc:
@@ -718,9 +730,8 @@ class SemanticScholarClient:
         query: str,
         limit: int,
         year_from: int | None,
-        database_url: str,
     ) -> dict[str, Any]:
-        conn = await asyncpg.connect(database_url, command_timeout=30)
+        conn = await self._connect()
         try:
             terms = _search_terms(query)
             search_terms = [query, *terms]
@@ -875,8 +886,7 @@ class SemanticScholarClient:
         if limit <= 0:
             return {"status": "error", "error": RESEARCH_BRIEF_INVALID_LIMIT_ERROR}
 
-        database_url = _resolve_database_url()
-        if not database_url:
+        if not self._database_url:
             return {
                 "status": "error",
                 "error": "DATABASE_URL is required for semantic_scholar.research_brief",
@@ -894,7 +904,6 @@ class SemanticScholarClient:
                     query=query,
                     limit=clamped_limit,
                     year_from=year_from,
-                    database_url=database_url,
                 )
             )
         except Exception as exc:
@@ -906,7 +915,6 @@ class SemanticScholarClient:
         query: str,
         limit: int,
         year_from: int | None,
-        database_url: str,
     ) -> dict[str, Any]:
         # Run the (retry-prone) S2 call and the pure rendering before
         # opening a DB connection. Unlike hybrid ``search`` — which needs
@@ -929,7 +937,7 @@ class SemanticScholarClient:
         markdown = _render_brief(query, year_from, papers)
         brief_doc = _build_brief_document(query, year_from, limit, papers, markdown)
 
-        conn = await asyncpg.connect(database_url, command_timeout=30)
+        conn = await self._connect()
         try:
             brief_action = await upsert_document(conn, brief_doc)
             emit_document_metrics(brief_doc, brief_action)

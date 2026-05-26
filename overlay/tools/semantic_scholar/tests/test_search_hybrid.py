@@ -525,3 +525,70 @@ def test_search_calls_close_on_db_error_inside_async(
     assert result["status"] == "error"
     assert "boom" in result["error"]
     assert mock.close_count == 1
+
+
+# ---------------------------------------------------------------------------
+# 17. Constructor-injected database_url bypasses env + secret resolution
+# ---------------------------------------------------------------------------
+
+
+def test_search_uses_constructor_database_url_over_env_and_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``database_url`` passed to ``__init__`` wins over env + secret.
+
+    Pins the new test seam introduced for review.md A6 — callers (and
+    tests) can inject a DSN directly into the constructor instead of
+    monkeypatching env vars + ``secret(...)``. The constructor's
+    resolution chain is constructor arg → env → secret, so a non-empty
+    constructor arg must short-circuit the rest of the chain.
+    """
+    # Stack the env var and ``secret`` with deliberately-wrong values
+    # so the assertion below proves the constructor arg wins, not that
+    # the test happens to coincide with whatever env resolves to.
+    monkeypatch.setenv("DATABASE_URL", "postgres://from-env/should-not-win")
+    monkeypatch.setattr(
+        "semantic_scholar.client.secret",
+        lambda _key, default="": "postgres://from-secret/should-not-win",
+    )
+    mock = MockAsyncpgConn([])
+    connect_calls = _install_mock_conn(monkeypatch, mock)
+    _install_search_papers(monkeypatch, [])
+
+    client = SemanticScholarClient(
+        api_key="",
+        database_url="postgres://from-constructor/db",
+    )
+    result = client.search("hello")
+
+    assert result["status"] == "ok"
+    assert len(connect_calls) == 1
+    assert connect_calls[0][0] == "postgres://from-constructor/db"
+    assert connect_calls[0][1] == {"command_timeout": 30}
+
+
+def test_search_empty_constructor_database_url_falls_back_to_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty constructor arg must not block env-var fallback.
+
+    The resolution chain treats an empty string the same as ``None``
+    (Python's ``or`` short-circuits on falsy), so a caller passing
+    ``database_url=""`` still gets the env DSN. Without this the API
+    pod — which constructs the client with no args — would break
+    silently the first time a caller explicitly passed ``""``.
+    """
+    monkeypatch.setenv("DATABASE_URL", "postgres://from-env/wins")
+    monkeypatch.setattr(
+        "semantic_scholar.client.secret",
+        lambda _key, default="": default,
+    )
+    mock = MockAsyncpgConn([])
+    connect_calls = _install_mock_conn(monkeypatch, mock)
+    _install_search_papers(monkeypatch, [])
+
+    client = SemanticScholarClient(api_key="", database_url="")
+    result = client.search("hello")
+
+    assert result["status"] == "ok"
+    assert connect_calls[0][0] == "postgres://from-env/wins"
