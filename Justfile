@@ -328,9 +328,13 @@ bfts-toy-run:
 bfts-verify-best:
     #!/usr/bin/env bash
     set -euo pipefail
-    api_deploy="deploy/${CENTAUR_RELEASE}-centaur-api"
+    # The api container does not ship psql; query the postgres pod
+    # directly (trust auth on the local socket). Pod name is stable
+    # for the chart's single-replica StatefulSet.
+    pg_pod="${CENTAUR_RELEASE}-centaur-postgres-0"
     psql_count() {
-      kubectl exec -n $CENTAUR_NAMESPACE $api_deploy -- psql "$DATABASE_URL" -tAc \
+      kubectl exec -n $CENTAUR_NAMESPACE "$pg_pod" -- \
+        psql -U tempo -d ai_v2 -tAc \
         "SELECT count(*) FROM bfts_artifacts WHERE relative_path = 'best_solution.py';" \
         | tr -d '[:space:]'
     }
@@ -399,10 +403,14 @@ bfts-parallel-smoke:
     child_run_id="${run_id}:tree:0"
     # Per-step concurrency: any (step, run_id) bucket with >= 2 sibling
     # nodes means bfts_expand_one ran in parallel for that iteration.
-    max_siblings=$(kubectl exec -n $CENTAUR_NAMESPACE $api_deploy -- psql "$DATABASE_URL" -tAc \
+    # Query the postgres pod directly (api container does not ship psql).
+    pg_pod="${CENTAUR_RELEASE}-centaur-postgres-0"
+    max_siblings=$(kubectl exec -n $CENTAUR_NAMESPACE "$pg_pod" -- \
+      psql -U tempo -d ai_v2 -tAc \
       "SELECT COALESCE(MAX(cnt), 0) FROM (SELECT step, COUNT(*) AS cnt FROM bfts_nodes WHERE run_id = '${child_run_id}' GROUP BY step) s;" \
       | tr -d '[:space:]')
-    total_nodes=$(kubectl exec -n $CENTAUR_NAMESPACE $api_deploy -- psql "$DATABASE_URL" -tAc \
+    total_nodes=$(kubectl exec -n $CENTAUR_NAMESPACE "$pg_pod" -- \
+      psql -U tempo -d ai_v2 -tAc \
       "SELECT COUNT(*) FROM bfts_nodes WHERE run_id = '${child_run_id}';" \
       | tr -d '[:space:]')
     echo "tree ${child_run_id}: ${total_nodes} total nodes, max sibling count per step = ${max_siblings}"
@@ -428,7 +436,10 @@ bfts-trigger-reflection:
       kubectl exec -n $CENTAUR_NAMESPACE "$api_deploy" -- sh -c \
         'curl -sS "$@" -H "X-Api-Key: $SLACKBOT_API_KEY"' -- "$@"
     }
-    before=$(kubectl exec -n $CENTAUR_NAMESPACE $api_deploy -- psql "$DATABASE_URL" -tAc \
+    # Query the postgres pod directly (api container does not ship psql).
+    pg_pod="${CENTAUR_RELEASE}-centaur-postgres-0"
+    before=$(kubectl exec -n $CENTAUR_NAMESPACE "$pg_pod" -- \
+      psql -U tempo -d ai_v2 -tAc \
       "SELECT count(*) FROM bfts_hyperparams;" | tr -d '[:space:]')
     run=$(exec_curl -X POST http://localhost:8000/workflows/runs \
         -H "Content-Type: application/json" \
@@ -444,7 +455,8 @@ bfts-trigger-reflection:
       status=$(printf '%s' "$state" | jq -r '.status // empty')
       case "$status" in
         completed)
-          after=$(kubectl exec -n $CENTAUR_NAMESPACE $api_deploy -- psql "$DATABASE_URL" -tAc \
+          after=$(kubectl exec -n $CENTAUR_NAMESPACE "$pg_pod" -- \
+            psql -U tempo -d ai_v2 -tAc \
             "SELECT count(*) FROM bfts_hyperparams;" | tr -d '[:space:]')
           delta=$((after - before))
           printf '%s\n' "$state" | jq
