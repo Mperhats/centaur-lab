@@ -68,13 +68,15 @@ async def update_node_metric(
     metric: dict[str, Any] | None,
     is_buggy: bool,
     analysis: str | None,
+    plan: str | None = None,
+    code: str | None = None,
 ) -> None:
     """Write the post-execution result for a node.
 
     Nullable params (``exc_info``, ``exc_stack``, ``metric``,
-    ``analysis``): pass ``None`` to leave the column ``NULL`` (= absent);
-    pass an empty container (``[]`` / ``{}`` / ``""``) to record
-    empty-but-present. Callers MUST NOT conflate the two.
+    ``analysis``, ``plan``, ``code``): pass ``None`` to leave the column
+    unchanged (= absent update); pass an empty container (``[]`` / ``{}`` /
+    ``""``) to record empty-but-present. Callers MUST NOT conflate the two.
     """
     await pool.execute(
         """
@@ -87,6 +89,8 @@ async def update_node_metric(
             metric_json = $7::jsonb,
             is_buggy = $8,
             analysis = $9,
+            plan = COALESCE($10, plan),
+            code = COALESCE($11, code),
             -- parse_* / plot_* / plot_code intentionally NOT updated here:
             -- they land in a separate update from Task 3.x once the
             -- metric-parse sub-step and plot exec sub-step are in scope.
@@ -102,6 +106,8 @@ async def update_node_metric(
         json.dumps(metric) if metric is not None else None,
         is_buggy,
         analysis,
+        plan,
+        code,
     )
 
 

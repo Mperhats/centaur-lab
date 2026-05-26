@@ -11,6 +11,7 @@ See docs/superpowers/plans/2026-05-25-bfts-on-centaur.md (Phase 2).
 """
 from __future__ import annotations
 
+import json
 import os
 import random
 import sys
@@ -53,13 +54,34 @@ class Input:
     openai_api_key_secret: str = "OPENAI_API_KEY"   # iron-proxy substitutes
 
 
+def _parse_metric_json(raw: Any) -> dict[str, Any]:
+    """Convert a DAO `metric_json` field (JSON string | dict | None) to a dict.
+
+    list_nodes_for_run returns JSONB columns as raw JSON strings; this normalizes
+    them before calling _bfts_metric.score(). Empty / malformed values fall back
+    to the WORST metric so scoring stays well-defined.
+    """
+    if raw is None:
+        return {"_worst": True}
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        if not raw:
+            return {"_worst": True}
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {"_worst": True}
+        return parsed if isinstance(parsed, dict) else {"_worst": True}
+    return {"_worst": True}
+
+
 def _should_terminate(nodes: list[dict[str, Any]], iters_used: int, max_iters: int) -> bool:
     has_good = any(n.get("is_buggy") is False and n.get("is_buggy_plots") is not True for n in nodes)
     return has_good or iters_used >= max_iters
 
 
 def _to_noderef(row: dict[str, Any]) -> NodeRef:
-    metric = row.get("metric_json") or {"_worst": True}
     return NodeRef(
         node_id=row["node_id"],
         parent_id=row.get("parent_node_id"),
@@ -67,7 +89,7 @@ def _to_noderef(row: dict[str, Any]) -> NodeRef:
         is_buggy=row.get("is_buggy"),
         is_buggy_plots=row.get("is_buggy_plots"),
         debug_depth=int(row.get("debug_depth") or 0),
-        metric_score=score(metric if isinstance(metric, dict) else {"_worst": True}),
+        metric_score=score(_parse_metric_json(row.get("metric_json"))),
         stage_name=row.get("stage_name", "draft"),
         is_leaf=True,
     )
@@ -122,27 +144,29 @@ async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
         # stable across expansion sub-steps even after restart).
         prepared: list[tuple[str, NodeRef | None]] = []
         for sel in selections:
-            node_id = uuid.uuid4().hex
             parent_id = sel.node_id if sel is not None else None
             parent_row = next((n for n in nodes if n["node_id"] == parent_id), None) if parent_id else None
             stage = "draft" if sel is None else ("debug" if parent_row and parent_row.get("is_buggy") else "improve")
             debug_depth = 0
             if sel is not None and parent_row and parent_row.get("is_buggy"):
                 debug_depth = int(parent_row.get("debug_depth") or 0) + 1
-            await ctx.step(
-                "insert_node",
-                lambda nid=node_id, pid=parent_id, st=stage, dd=debug_depth: insert_node(
+
+            async def _insert(parent_id=parent_id, st=stage, dd=debug_depth, used=iters_used):
+                nid = uuid.uuid4().hex
+                await insert_node(
                     pool,
                     node_id=nid,
                     run_id=inp.run_id,
-                    parent_node_id=pid,
-                    step=iters_used,
+                    parent_node_id=parent_id,
+                    step=used,
                     stage_name=st,
                     plan="",
                     code="",
                     debug_depth=dd,
-                ),
-            )
+                )
+                return nid
+
+            node_id = await ctx.step("insert_node", _insert)
             prepared.append((node_id, sel))
 
         # Expand each selected node sequentially within this controller step.
@@ -175,6 +199,8 @@ async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
                     metric=r["metric"],
                     is_buggy=r["is_buggy"],
                     analysis=r["analysis"],
+                    plan=r["plan"],
+                    code=r["code"],
                 ),
             )
         iters_used += 1
@@ -183,7 +209,7 @@ async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
         "list_nodes_final", lambda: list_nodes_for_run(pool, run_id=inp.run_id)
     )
     good = [n for n in final_nodes if n.get("is_buggy") is False and n.get("is_buggy_plots") is not True]
-    best = min(good, key=lambda n: score(n.get("metric_json") or {"_worst": True})) if good else None
+    best = min(good, key=lambda n: score(_parse_metric_json(n.get("metric_json")))) if good else None
     if best is not None:
         await ctx.step(
             "set_best", lambda: set_best_node(pool, run_id=inp.run_id, best_node_id=best["node_id"])
