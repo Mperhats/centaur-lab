@@ -183,32 +183,92 @@ smoke:
     echo "smoke timed out waiting for execution ${execution_id}" >&2
     exit 1
 
-# Per-session dev loop: port-forward Slackbot (:3001) + API (:8000), tail Slackbot logs. Tunnel auto-runs as a launch agent.
+# Background `kubectl port-forward` for Slackbot (:3001) and API (:8000), detached
+# from this terminal so it survives shell exit. Idempotent: re-running while alive
+# is a no-op. Pair with `just dev-stop` and `just status`. Use `just logs <component>`
+# (delegated to upstream `.centaur/Justfile`) for live cluster logs.
 [group('dev')]
 dev:
     #!/usr/bin/env bash
-    set -euo pipefail
-    slackbot_log=/tmp/centaur-port-forward-slackbot.log
-    api_log=/tmp/centaur-port-forward-api.log
-    kubectl port-forward -n $CENTAUR_NAMESPACE svc/${CENTAUR_RELEASE}-centaur-slackbot 3001:3001 \
-      >"$slackbot_log" 2>&1 &
-    slackbot_pid=$!
-    kubectl port-forward -n $CENTAUR_NAMESPACE svc/${CENTAUR_RELEASE}-centaur-api 8000:8000 \
-      >"$api_log" 2>&1 &
-    api_pid=$!
-    trap 'kill "$slackbot_pid" "$api_pid" 2>/dev/null || true; wait 2>/dev/null || true' EXIT INT TERM
-    sleep 2
-    for pid_var in slackbot_pid api_pid; do
-      pid=${!pid_var}
-      if ! kill -0 "$pid" 2>/dev/null; then
-        echo "port-forward ${pid_var} died on startup — check logs:" >&2
-        cat "$slackbot_log" "$api_log" >&2
-        exit 1
+    set -uo pipefail
+    started=0
+    for svc in slackbot:3001 api:8000; do
+      name=${svc%:*}; port=${svc#*:}
+      pidfile=/tmp/centaur-pf-$name.pid
+      logfile=/tmp/centaur-port-forward-$name.log
+      pid=$(cat "$pidfile" 2>/dev/null || true)
+      if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        echo "  $name :$port  already running (pid $pid)"
+        continue
+      fi
+      pkill -f "kubectl port-forward.*centaur-$name" 2>/dev/null || true
+      nohup kubectl port-forward -n $CENTAUR_NAMESPACE svc/${CENTAUR_RELEASE}-centaur-$name $port:$port \
+        >"$logfile" 2>&1 </dev/null &
+      new_pid=$!
+      disown "$new_pid" 2>/dev/null || true
+      echo "$new_pid" > "$pidfile"
+      echo "  $name :$port  started (pid $new_pid, log: $logfile)"
+      started=1
+    done
+    [ "$started" = "1" ] && sleep 2 || true
+    fail=0
+    for port in 3001 8000; do
+      if ! lsof -nP -iTCP:$port -sTCP:LISTEN -t >/dev/null 2>&1; then
+        echo "WARN: port $port not bound — check /tmp/centaur-port-forward-*.log" >&2
+        fail=1
       fi
     done
-    echo "slackbot -> localhost:3001 (pid $slackbot_pid, log: $slackbot_log)  -- routes /api/webhooks/slack"
-    echo "api      -> localhost:8000 (pid $api_pid, log: $api_log)            -- routes everything else"
-    echo "tunnel   -> https://centaur.local-labs.xyz (cloudflared user agent — 'just cloudflared::status' to verify)"
-    echo "Tailing Slackbot logs. Ctrl-C stops both port-forwards; tunnel keeps running."
+    [ "$fail" = "0" ] && echo "ready. 'just status' to confirm; 'just dev-stop' to tear down."
+
+# Stop the backgrounded port-forwards started by `just dev`. Idempotent.
+# Cleans up both the pid-file-tracked processes and any stale matches.
+[group('dev')]
+dev-stop:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    for name in slackbot api; do
+      pidfile=/tmp/centaur-pf-$name.pid
+      pid=$(cat "$pidfile" 2>/dev/null || true)
+      if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null || true
+        echo "  $name  stopped (pid $pid)"
+      fi
+      pkill -f "kubectl port-forward.*centaur-$name" 2>/dev/null || true
+      rm -f "$pidfile"
+    done
+    echo "done."
+
+# Full local-stack health check. Delegates the k8s slice to upstream's
+# `just status` and the tunnel slice to `just cloudflared::status`, then
+# layers in the port-forward and API-health pieces we own.
+[group('dev')]
+status:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    echo "=== helm release ==="
+    helm list -n $CENTAUR_NAMESPACE 2>/dev/null | awk 'NR==1 || /centaur/'
     echo ""
-    kubectl logs -n $CENTAUR_NAMESPACE deploy/${CENTAUR_RELEASE}-centaur-slackbot --tail=20 -f
+    echo "=== k8s resources (upstream just status) ==="
+    (cd {{centaur}} && just status) 2>&1 | head -40
+    echo ""
+    echo "=== cloudflared tunnel ==="
+    just cloudflared::status 2>&1 || true
+    echo ""
+    echo "=== port-forwards ==="
+    for svc in slackbot:3001 api:8000; do
+      name=${svc%:*}; port=${svc#*:}
+      pidfile=/tmp/centaur-pf-$name.pid
+      pid=$(cat "$pidfile" 2>/dev/null || true)
+      bound=$(lsof -nP -iTCP:$port -sTCP:LISTEN -t 2>/dev/null | head -1 || true)
+      if [ -n "$bound" ] && [ "$bound" = "$pid" ]; then
+        echo "  $name :$port  OK (pid $pid)"
+      elif [ -n "$bound" ]; then
+        echo "  $name :$port  WARN bound by pid $bound (not tracked — pid file says '${pid:-none}')"
+      else
+        echo "  $name :$port  DOWN — run 'just dev'"
+      fi
+    done
+    echo ""
+    echo "=== API health (in-cluster) ==="
+    kubectl exec -n $CENTAUR_NAMESPACE deploy/${CENTAUR_RELEASE}-centaur-api -c api -- \
+      curl -fsS http://localhost:8000/health 2>&1 || echo "health probe failed"
