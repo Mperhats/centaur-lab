@@ -22,7 +22,7 @@ up: bootstrap-secrets
     just deploy
 
 [group('lifecycle')]
-[working-directory(centaur)]
+[working-directory('.centaur')]
 deploy:
     #!/usr/bin/env bash
     set -euo pipefail

@@ -5,10 +5,14 @@ Actionable items only. Completed audits and MVP plans live in git history.
 ## Infra / deploy
 
 - [x] **Fix GHCR overlay image path in `infra/argocd/values/centaur.yaml`**
-  - CI publishes `ghcr.io/Mperhats/centaur-lab/centaur-overlay` (see `.github/workflows/overlay.yml`).
-  - Fixed in `infra/argocd/values/centaur.yaml` and `infra/argocd/application.yaml`.
+  - Target image: `ghcr.io/Mperhats/centaur-lab/centaur-overlay:sha-<git>` (see `.github/workflows/overlay.yml`).
+  - Path fixed in `infra/argocd/values/centaur.yaml` and `infra/argocd/application.yaml`.
 
-- [x] **Merge `feat/deploy-alignment`** — values split, sha tags, CI, infra skeleton.
+- [ ] **First successful GHCR publish from Overlay CI on `main`**
+  - Workflow exists (`.github/workflows/overlay.yml`) but has **never pushed** — only two failed runs on the feature branch (Justfile parse error on `just` 1.36; no run recorded after merge to `main`).
+  - Push step runs only on `push` to `main` after lint + tests pass.
+
+- [x] **Merge `feat/deploy-alignment`** — values split, sha tags, CI workflow, infra skeleton.
 
 ## Safe to delete (done or recommended)
 
@@ -22,7 +26,7 @@ Actionable items only. Completed audits and MVP plans live in git history.
 
 - [x] Drop `just overlay::lint-tools` / `lint-workflows` — `just overlay::lint` already covers both
 - [x] Drop `just overlay::reload-api` / `reload-skills` — keep single `just reload` unless you use the split weekly
-- [ ] Rename test doubles `Mock*` → `Fake*` to match upstream — cosmetic, 5 files
+- [x] ~~Rename test doubles `Mock*` → `Fake*`~~ — **won't do**; review A9 kept inline `Mock*` stubs (`e18bee5`) instead of reviving upstream `Fake*` hierarchy
 
 ## Do not build
 
