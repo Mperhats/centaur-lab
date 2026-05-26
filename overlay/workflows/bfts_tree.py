@@ -26,6 +26,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 if TYPE_CHECKING:
     from api.workflow_engine import WorkflowContext
 
+from _bfts_config import (
+    DEFAULT_METRIC_REDUCER,
+    resolve_llm_settings,
+    resolve_search_settings,
+)
 from _bfts_metric import score
 from _bfts_select import NodeRef, SearchConfig, select_next
 from _bfts_state import (
@@ -33,12 +38,6 @@ from _bfts_state import (
     insert_run,
     list_nodes_for_run,
     set_best_node,
-)
-
-from _bfts_config import (
-    DEFAULT_METRIC_REDUCER,
-    resolve_llm_settings,
-    resolve_search_settings,
 )
 
 WORKFLOW_NAME = "bfts_tree"
@@ -125,7 +124,7 @@ def _root_id(row: dict[str, Any]) -> str:
     return row["node_id"] if row.get("parent_node_id") is None else (row.get("parent_node_id") or "ROOT")
 
 
-async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
+async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     llm = resolve_llm_settings(
         draft_model=inp.draft_model,
         feedback_model=inp.feedback_model,
@@ -266,6 +265,17 @@ async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
         # re-queries the DB on the next iteration to see the results.
         # The child's return-value envelope is logging-only — the DB
         # row is the source of truth.
+        #
+        # NOTE: ``wait_for_workflow`` returns the child record even for
+        # failed/cancelled children. We do not inspect status here, which
+        # means a permanently-failed child leaves its placeholder row with
+        # NULL ``is_buggy`` / ``code`` / ``metric_json`` in the DB. Such a
+        # row is invisible to ``_buggy_leaf_nodes`` (checks ``is True``) and
+        # ``_good_nodes`` (checks ``is False``), but a draft-stage failure
+        # still occupies a slot in ``select_next``'s ``len(drafts)`` count
+        # and can stall the selector below ``num_drafts``. A follow-up will
+        # add bounded waits + explicit failure inspection (tracked alongside
+        # the same gap in ``bfts_root.py``).
         for child in children:
             await ctx.wait_for_workflow("wait_expand_child", run_id=child["run_id"])
         iters_used += 1

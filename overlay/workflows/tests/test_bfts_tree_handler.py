@@ -23,7 +23,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from bfts_tree import Input, WORKFLOW_NAME, _should_terminate
+from bfts_tree import WORKFLOW_NAME, Input, _should_terminate
 
 
 def test_workflow_name() -> None:

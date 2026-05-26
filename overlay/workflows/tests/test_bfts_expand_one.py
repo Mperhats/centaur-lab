@@ -310,6 +310,52 @@ async def test_handler_persists_node_and_marks_plots_on_good_path(
 
 
 @pytest.mark.asyncio
+async def test_handler_marks_buggy_plots_true_when_vlm_invalidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Good-path execution but VLM invalidates the plots:
+    ``is_buggy_plots=True`` with empty ``plot_analyses`` must propagate to
+    ``mark_buggy_plots`` so the controller's ``_good_nodes`` filter
+    (``is_buggy is False AND is_buggy_plots is not True``) excludes this
+    node from the stage-1 completion check. Pinning the True direction
+    fences a regression where the handler always passed
+    ``is_buggy_plots=False`` regardless of the VLM verdict.
+
+    The expansion result mirrors ``_good_expand_result`` but flips the
+    VLM verdict and empties ``plot_analyses`` (the shape produced by
+    ``_bfts_expand`` when the VLM rejects every plot).
+    """
+    import bfts_expand_one
+
+    invalid_result = _good_expand_result()
+    invalid_result["is_buggy_plots"] = True
+    invalid_result["plot_analyses"] = []
+    invalid_result["vlm_feedback_summary"] = "all plots invalid"
+
+    _expand_stub, update_stub, mark_stub = _patch_handler_deps(
+        monkeypatch, expand_result=invalid_result
+    )
+
+    ctx = _FakeCtx()
+    out = await bfts_expand_one.handler(_make_input(), ctx)
+
+    assert update_stub.await_count == 1
+    assert update_stub.call_args.kwargs["is_buggy"] is False
+
+    assert mark_stub.await_count == 1
+    mark_kwargs = mark_stub.call_args.kwargs
+    assert mark_kwargs["node_id"] == "n-deadbeef0001"
+    assert mark_kwargs["is_buggy_plots"] is True
+    assert mark_kwargs["plot_analyses"] == []
+    assert mark_kwargs["vlm_feedback_summary"] == "all plots invalid"
+
+    assert out["node_id"] == "n-deadbeef0001"
+    assert out["is_buggy"] is False
+    assert out["stage_name"] == "draft"
+    assert "mark_buggy_plots" in ctx.calls
+
+
+@pytest.mark.asyncio
 async def test_handler_persists_node_without_mark_on_buggy_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
