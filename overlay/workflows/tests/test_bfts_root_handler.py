@@ -163,9 +163,19 @@ class _BftsExecutorStub:
         self.stop_sandbox = AsyncMock(return_value=None)
 
 
-def _input(num_drafts: int = 2) -> Input:
+def _input(num_drafts: int = 2, idea: dict[str, Any] | None = None) -> Input:
+    # Default to a plan-complete idea so existing tests don't accidentally
+    # exercise the F.6 default-idea substitution path. Tests that exercise
+    # the substitution explicitly pass ``idea={}`` or omit required keys.
+    if idea is None:
+        idea = {
+            "Name": "toy-test",
+            "Title": "Toy test idea",
+            "Short Hypothesis": "Tests run with a complete idea by default.",
+            "Experiments": ["Run the handler."],
+        }
     return Input(
-        idea={"name": "toy"},
+        idea=idea,
         num_drafts=num_drafts,
         num_workers=1,
         max_debug_depth=3,
@@ -177,17 +187,26 @@ def _input(num_drafts: int = 2) -> Input:
 @pytest.mark.asyncio
 async def test_happy_path_runs_all_teardowns_and_returns_results() -> None:
     """Baseline: nothing fails; every create/start/wait/stop step runs once
-    and the return shape matches the original handler contract."""
+    and the return shape carries the F.6 verification surface (trees,
+    idea_used, idea_was_defaulted, resolved_search_config, sources)."""
     import bfts_root
 
     ctx = _RootCtx()
     out = await bfts_root.handler(_input(num_drafts=2), ctx)
 
     assert [c["tree_index"] for c in out["trees"]] == [0, 1]
-    assert len(out["results"]) == 2
+    assert len(out["trees"]) == 2
     assert ctx.tools.bfts_executor.create_sandbox.await_count == 2
     assert ctx.tools.bfts_executor.stop_sandbox.await_count == 2
     assert {"stop_sandbox_0", "stop_sandbox_1"}.issubset(set(ctx.step_calls))
+    # F.6 contract: the return value MUST carry these keys so a Slack
+    # agent can ``call workflow get <run_id>`` and read them without DB
+    # access (sandbox tokens cannot run direct queries).
+    for key in (
+        "run_id", "idea_used", "idea_was_defaulted",
+        "resolved_search_config", "sources", "trees",
+    ):
+        assert key in out, f"missing return-value key: {key!r}"
 
 
 @pytest.mark.asyncio
@@ -492,3 +511,224 @@ async def test_handler_logs_resolved_sources(monkeypatch) -> None:
     assert sources["num_drafts"] == "hyperparams"  # DB row
     assert sources["num_workers"] == "env"  # DB null → env
     assert sources["metric_reducer"] == "hyperparams"  # DB row
+
+
+# ---------------------------------------------------------------------------
+# F.6.1: default-idea substitution.
+#
+# Slack-driven smoke runs typically ship ``idea={}`` (or a tiny partial
+# dict) because the Slack agent doesn't synthesize an idea up-front. The
+# resulting ``## Idea`` markdown block in ``_propose_prompt`` would be
+# empty → degenerate drafts that burn LLM budget. The handler must
+# substitute the baked-in toy idea (``_DEFAULT_SMOKE_IDEA``) and log the
+# substitution so it's auditable from workflow logs.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_handler_substitutes_default_idea_when_empty() -> None:
+    """``idea={}`` → handler swaps in ``_DEFAULT_SMOKE_IDEA`` and routes
+    that idea into every child tree, sets ``idea_was_defaulted=True`` in
+    the return value, and emits a structured ``bfts_root_using_default_idea``
+    log with the list of missing fields."""
+    import bfts_root
+
+    ctx = _RootCtx()
+    out = await bfts_root.handler(_input(num_drafts=2, idea={}), ctx)
+
+    # Every child tree receives the substituted idea verbatim.
+    assert len(ctx.start_workflow_calls) == 2
+    for call in ctx.start_workflow_calls:
+        ri = call["run_input"]
+        assert ri["idea"] == bfts_root._DEFAULT_SMOKE_IDEA
+
+    # Return value reflects the substitution so a Slack agent can see it
+    # by ``call workflow get <run_id>`` without DB access.
+    assert out["idea_was_defaulted"] is True
+    assert out["idea_used"] == bfts_root._DEFAULT_SMOKE_IDEA
+
+    # Structured log enumerates which required fields were missing.
+    default_logs = [
+        kw for ev, kw in ctx.logs if ev == "bfts_root_using_default_idea"
+    ]
+    assert len(default_logs) == 1
+    assert set(default_logs[0]["missing_fields"]) == set(
+        bfts_root._REQUIRED_IDEA_FIELDS
+    )
+
+
+@pytest.mark.asyncio
+async def test_handler_substitutes_default_idea_when_partial() -> None:
+    """A partial idea (only ``Name`` + ``Title``, no ``Short Hypothesis``
+    nor ``Experiments``) is still substituted — empty-string and absent
+    fields are equally degenerate to the draft prompt."""
+    import bfts_root
+
+    partial = {"Name": "x", "Title": "Y", "Short Hypothesis": "", "Experiments": []}
+    ctx = _RootCtx()
+    out = await bfts_root.handler(_input(num_drafts=1, idea=partial), ctx)
+
+    assert out["idea_was_defaulted"] is True
+    assert out["idea_used"] == bfts_root._DEFAULT_SMOKE_IDEA
+    default_logs = [
+        kw for ev, kw in ctx.logs if ev == "bfts_root_using_default_idea"
+    ]
+    assert len(default_logs) == 1
+    # The two truly-empty fields (Short Hypothesis "", Experiments []) are
+    # reported; the populated ones (Name, Title) are not.
+    assert set(default_logs[0]["missing_fields"]) == {
+        "Short Hypothesis", "Experiments"
+    }
+
+
+@pytest.mark.asyncio
+async def test_handler_passes_through_valid_idea_unchanged() -> None:
+    """A plan-complete idea must be forwarded verbatim — the default
+    fixture is ONLY a backstop. ``idea_was_defaulted`` is False so
+    operator postmortems can distinguish operator-driven runs from
+    smoke/default runs."""
+    import bfts_root
+
+    real_idea = {
+        "Name": "operator-experiment",
+        "Title": "An actual research idea",
+        "Short Hypothesis": "Method X improves metric Y by Z.",
+        "Experiments": ["Step 1", "Step 2"],
+    }
+    ctx = _RootCtx()
+    out = await bfts_root.handler(_input(num_drafts=1, idea=real_idea), ctx)
+
+    assert out["idea_was_defaulted"] is False
+    assert out["idea_used"] == real_idea
+    # No substitution log.
+    default_logs = [
+        kw for ev, kw in ctx.logs if ev == "bfts_root_using_default_idea"
+    ]
+    assert default_logs == []
+    # Every child receives the operator-supplied idea, not the default.
+    for call in ctx.start_workflow_calls:
+        assert call["run_input"]["idea"] == real_idea
+
+
+def test_default_smoke_idea_has_every_required_field() -> None:
+    """Lock-in: the baked-in default must itself satisfy
+    ``_REQUIRED_IDEA_FIELDS``. A future field rename in one constant
+    without updating the other would silently revert smoke runs to the
+    substitution branch (and hit infinite recursion if the default were
+    a fallback of itself)."""
+    import bfts_root
+
+    for f in bfts_root._REQUIRED_IDEA_FIELDS:
+        assert bfts_root._DEFAULT_SMOKE_IDEA.get(f), (
+            f"default smoke idea missing required field: {f!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# F.6.2: verification surface in the handler return value.
+#
+# The Slack agent cannot query the DB directly. The workflow return value
+# (persisted to ``workflow_runs.output_json`` and read by
+# ``call workflow get <run_id>``) must carry enough postmortem data that
+# a sandbox-token agent can verify F.1–F.5 behaviors without psql.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_handler_return_carries_per_tree_summaries() -> None:
+    """Each tree summary must include ``tree_index``, ``run_id``,
+    ``sandbox_id``, and the merged ``bfts_tree`` handler return (read
+    from ``output_json`` on the wait-for-workflow envelope)."""
+    import bfts_root
+
+    # Configure the wait response to carry an ``output_json`` payload that
+    # mimics what ``bfts_tree.handler`` would actually return.
+    fake_tree_output = {
+        "iters_used": 3,
+        "node_count": 12,
+        "best_node_id": "node-best",
+        "best_metric_json": {"final_value": 0.42},
+        "best_stage_name": "improve",
+        "best_solution_artifact_id": "art-best-1",
+        "tree_dot_artifact_id": "r-1:tree:0:tree.dot",
+        "seed_aggregate": {
+            "aggregate_mean": 0.41,
+            "aggregate_std": 0.02,
+            "aggregate_n": 3.0,
+        },
+        "seed_children": [
+            {"node_id": "s0", "seed": 0, "is_buggy": False, "final_value": 0.4},
+            {"node_id": "s1", "seed": 1, "is_buggy": False, "final_value": 0.43},
+            {"node_id": "s2", "seed": 2, "is_buggy": False, "final_value": 0.40},
+        ],
+    }
+    ctx = _RootCtx()
+    # Inject the output by overriding wait_for_workflow's return shape.
+    original_wait = ctx.wait_for_workflow
+
+    async def _wait(name, *, run_id):
+        env = await original_wait(name, run_id=run_id)
+        return {**env, "output_json": fake_tree_output}
+
+    ctx.wait_for_workflow = _wait
+
+    out = await bfts_root.handler(_input(num_drafts=2), ctx)
+
+    assert len(out["trees"]) == 2
+    for tree in out["trees"]:
+        # Controller-side bookkeeping kept alongside the merged child return.
+        assert {"tree_index", "run_id", "sandbox_id", "status"}.issubset(tree)
+        # Child return fields merged in.
+        assert tree["best_node_id"] == "node-best"
+        assert tree["best_metric_json"] == {"final_value": 0.42}
+        assert tree["tree_dot_artifact_id"] == "r-1:tree:0:tree.dot"
+        assert tree["seed_aggregate"]["aggregate_n"] == 3.0
+        assert [s["seed"] for s in tree["seed_children"]] == [0, 1, 2]
+
+
+@pytest.mark.asyncio
+async def test_handler_return_carries_resolved_config_and_sources() -> None:
+    """``resolved_search_config`` and ``sources`` must be present so the
+    Slack agent can answer "which tier won this field?" without psql."""
+    import bfts_root
+
+    ctx = _RootCtx()
+    out = await bfts_root.handler(_input(num_drafts=1), ctx)
+
+    for key in ("debug_prob", "max_debug_depth", "num_drafts",
+                "num_workers", "metric_reducer",
+                "prior_attempts_window", "num_seeds"):
+        assert key in out["resolved_search_config"], (
+            f"resolved_search_config missing {key!r}"
+        )
+        assert key in out["sources"], f"sources missing {key!r}"
+
+
+@pytest.mark.asyncio
+async def test_handler_return_tolerates_failed_child_with_no_output() -> None:
+    """Failed children have ``output_json=None`` from the engine. The
+    handler MUST still emit a per-tree summary row (so the operator can
+    see which tree died), with only the controller-side keys populated."""
+    import bfts_root
+
+    ctx = _RootCtx()
+    # ``ctx.fail_on_wait`` makes the wait RAISE, not return a failed
+    # envelope. So instead, override wait to return a failed envelope
+    # with output_json=None for tree 0.
+    original_wait = ctx.wait_for_workflow
+
+    async def _wait(name, *, run_id):
+        env = await original_wait(name, run_id=run_id)
+        if run_id.endswith(":tree:0"):
+            return {**env, "status": "failed", "output_json": None}
+        return env
+
+    ctx.wait_for_workflow = _wait
+    out = await bfts_root.handler(_input(num_drafts=2), ctx)
+
+    assert len(out["trees"]) == 2
+    failed = next(t for t in out["trees"] if t["tree_index"] == 0)
+    assert failed["status"] == "failed"
+    # No child output → no merged fields, just controller bookkeeping.
+    assert failed["sandbox_id"].startswith("bfts-run-1-tree-0")
+    assert "best_node_id" not in failed

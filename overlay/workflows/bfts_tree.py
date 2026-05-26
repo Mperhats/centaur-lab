@@ -262,6 +262,28 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             node_id = await ctx.step(f"insert_node_{i}", _insert)
             prepared.append((node_id, parent_row))
 
+        # Resume the sandbox just-in-time for the children's
+        # ``exec_python`` calls. Iter 0 sees the sandbox warm-from-create
+        # (``bfts_root.handler`` provisions at ``replicas=1`` and waits
+        # for the pod Ready), so we skip the resume there; from iter 1
+        # onward the previous iteration's ``pause_sandbox`` has parked
+        # the pod at ``replicas=0`` to release compute while the API
+        # pod runs ``select_next`` + the LLM steps inside
+        # ``bfts_expand_one``. ``resume_sandbox`` is idempotent — on a
+        # workflow replay where the step result is already cached the
+        # engine skips the call entirely; on a replay where it wasn't,
+        # the underlying patch-to-1 + pod readiness wait completes in
+        # ms against an already-running pod. Step name embeds
+        # ``iters_used`` so each iteration's resume gets a distinct
+        # checkpoint row (same convention as ``insert_node_{i}`` above).
+        if iters_used > 0:
+            await ctx.step(
+                f"resume_sandbox_{iters_used}",
+                lambda: ctx.tools.bfts_executor.resume_sandbox(
+                    sandbox_id=inp.sandbox_id
+                ),
+            )
+
         # Fan out: start every child eagerly so the engine schedules
         # them in parallel rather than waiting for the next worker poll.
         # The trigger_key is deterministic in (run_id, node_id) so a
@@ -345,6 +367,29 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                         )
                     ),
                 )
+
+        # All children have reached a terminal state — their
+        # ``exec_python`` calls are done and we don't touch the sandbox
+        # again until the next iteration's fan-out. Park the pod at
+        # ``replicas=0`` to release CPU/memory while the API pod runs
+        # the next iteration's ``select_next`` (+ ``insert_node``
+        # placeholders, + the LLM steps inside the next batch of
+        # ``bfts_expand_one`` children before THEIR exec_python).
+        # The workspace PVC survives — each child's
+        # ``node_<id8>/`` directory (runfile.py, experiment_data.npy,
+        # *.png) is intact when we resume.
+        #
+        # Critical: this MUST run after the ``for node_id, child in
+        # children:`` wait loop closes. Pausing while any
+        # ``wait_expand_*`` step is still pending would terminate
+        # exec'ing children mid-flight (parallel siblings share one
+        # sandbox via disjoint ``working_dir`` parameters).
+        await ctx.step(
+            f"pause_sandbox_{iters_used}",
+            lambda: ctx.tools.bfts_executor.pause_sandbox(
+                sandbox_id=inp.sandbox_id
+            ),
+        )
         iters_used += 1
 
     final_nodes = await ctx.step(
@@ -359,12 +404,14 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     )
 
     best = select_best(final_nodes, reducer=search.metric_reducer)
+    best_solution_artifact_id: str | None = None
+    best_node_id_artifact_id: str | None = None
     if best is not None:
-        await ctx.step(
+        best_solution_artifact_id = await ctx.step(
             "write_best_artifact",
             lambda: write_best_artifact(pool, node_id=best["node_id"], code=best["code"]),
         )
-        await ctx.step(
+        best_node_id_artifact_id = await ctx.step(
             "write_best_node_id_artifact",
             lambda: write_best_node_id_artifact(pool, node_id=best["node_id"]),
         )
@@ -388,13 +435,14 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         best["node_id"] if best is not None
         else (final_nodes[0]["node_id"] if final_nodes else None)
     )
+    tree_dot_artifact_id: str | None = None
     if anchor_node_id is not None:
         dot_text = render_tree_dot(
             final_nodes,
             run_id=inp.run_id,
             best_node_id=best["node_id"] if best else None,
         )
-        await ctx.step(
+        tree_dot_artifact_id = await ctx.step(
             "write_tree_dot",
             lambda dt=dot_text, aid=anchor_node_id: write_tree_dot_artifact(
                 pool, run_id=inp.run_id, dot_text=dt, anchor_node_id=aid,
@@ -408,7 +456,24 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     # then aggregate mean/std of ``final_value`` into the best node's
     # ``metric_json`` so downstream tooling sees the noise estimate
     # alongside the point metric.
+    seed_rows: list[dict[str, Any]] = []
+    aggregate: dict[str, float] | None = None
     if best is not None and search.num_seeds > 0:
+        # The final main-loop iteration left the sandbox at
+        # ``replicas=0``. Seed-eval children each ``exec_python`` the
+        # best node's code with overridden seeds, so we need the pod
+        # awake before fanning out. One unsuffixed step name is fine —
+        # there is exactly one seed block per ``bfts_tree`` workflow.
+        # No matching pause after the seed fan-out: ``bfts_root``'s
+        # ``finally`` block calls ``stop_sandbox`` during teardown,
+        # which deletes the CR + pod outright; a pause→stop sequence
+        # would just waste a CRD patch.
+        await ctx.step(
+            "resume_sandbox_seeds",
+            lambda: ctx.tools.bfts_executor.resume_sandbox(
+                sandbox_id=inp.sandbox_id
+            ),
+        )
         seed_children: list[tuple[str, dict[str, Any]]] = []
         for seed_idx in range(search.num_seeds):
             # Seed node IDs are deterministic in ``(run_id, seed_idx)``
@@ -468,8 +533,8 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         seed_rows = await ctx.step(
             "list_seed_children",
             lambda: list_seed_children(pool, parent_node_id=best["node_id"]),
-        )
-        aggregate = _aggregate_seed_metrics(seed_rows or [])
+        ) or []
+        aggregate = _aggregate_seed_metrics(seed_rows)
         if aggregate is not None:
             await ctx.step(
                 "write_aggregate_metric",
@@ -490,7 +555,78 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         "iters_used": iters_used,
         "node_count": len(final_nodes),
         "best_node_id": best["node_id"] if best else None,
+        # F.6 verification surface — keep entries small so the whole dict
+        # round-trips through ``workflow_runs.output_json`` (jsonb) on a
+        # Slack-driven smoke without hitting payload limits. Large payloads
+        # (best_solution.py code, full per-node code/metric history) stay
+        # in ``bfts_artifacts`` / ``bfts_nodes`` and are reachable via the
+        # artifact ids surfaced below.
+        "best_metric_json": _coerce_metric_json(best.get("metric_json")) if best else None,
+        "best_stage_name": (
+            str(best["stage_name"])
+            if best is not None and best.get("stage_name") is not None
+            else None
+        ),
+        "best_solution_artifact_id": best_solution_artifact_id,
+        "best_node_id_artifact_id": best_node_id_artifact_id,
+        "tree_dot_artifact_id": tree_dot_artifact_id,
+        "seed_aggregate": aggregate,
+        "seed_children": _project_seed_children(seed_rows),
     }
+
+
+def _coerce_metric_json(value: Any) -> dict[str, Any] | None:
+    """Coerce asyncpg's jsonb return shape (``str | dict | None``) into a
+    plain dict so the return value round-trips through jsonb again on the
+    parent's ``output_json``. Mirrors ``_aggregate_seed_metrics``' parse
+    tolerance so a malformed metric_json doesn't crash the return.
+    """
+    import json as _json
+
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = _json.loads(value)
+        except _json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return None
+
+
+def _project_seed_children(
+    seed_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Reduce ``list_seed_children`` rows to the verification-relevant
+    subset. Slack agents only need ``seed`` + ``node_id`` + ``is_buggy``
+    + ``final_value`` to confirm the F.4 fan-out fired and produced
+    aggregatable values. The full ``metric_json`` blob (with parse_*,
+    plot_*, etc.) stays in the DB to keep the parent's ``output_json``
+    compact.
+    """
+    out: list[dict[str, Any]] = []
+    for r in seed_rows:
+        metric = _coerce_metric_json(r.get("metric_json")) or {}
+        final_value = metric.get("final_value")
+        if not isinstance(final_value, (int, float)):
+            names = metric.get("metric_names")
+            if isinstance(names, list) and names:
+                first = names[0]
+                if isinstance(first, dict):
+                    data = first.get("data")
+                    if isinstance(data, list) and data and isinstance(data[0], dict):
+                        inner = data[0].get("final_value")
+                        if isinstance(inner, (int, float)):
+                            final_value = float(inner)
+        out.append({
+            "node_id": str(r["node_id"]),
+            "seed": r.get("seed"),
+            "is_buggy": bool(r.get("is_buggy")) if r.get("is_buggy") is not None else None,
+            "final_value": (
+                float(final_value) if isinstance(final_value, (int, float)) else None
+            ),
+        })
+    return out
 
 
 def _aggregate_seed_metrics(

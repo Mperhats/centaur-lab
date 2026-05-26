@@ -170,6 +170,26 @@ def test_to_noderef_missing_child_count_defaults_to_leaf() -> None:
 # child workflow's internal pipeline (covered in test_bfts_expand_one.py).
 
 
+class _TreeTools:
+    """Stub ``ctx.tools`` surface for the bfts_tree handler.
+
+    Only ``bfts_executor.{pause,resume}_sandbox`` are exercised by the
+    handler — the per-iteration pause/resume lifecycle (see the
+    ``docs/superpowers/plans/2026-05-26-bfts-pause-resume.md`` plan
+    behind the WIP). ``AsyncMock`` lets individual tests assert call
+    counts and per-call ``sandbox_id`` arguments when needed.
+    """
+
+    def __init__(self) -> None:
+        self.bfts_executor = _TreeExecutorStub()
+
+
+class _TreeExecutorStub:
+    def __init__(self) -> None:
+        self.pause_sandbox = AsyncMock(return_value=None)
+        self.resume_sandbox = AsyncMock(return_value=None)
+
+
 class _TreeCtx:
     """Stand-in WorkflowContext for the bfts_tree handler.
 
@@ -201,6 +221,14 @@ class _TreeCtx:
         # of the default ``status="completed"``. Lets F.1 tests simulate
         # ``bfts_expand_one`` permafails without rewiring the whole stub.
         self.wait_results = wait_results or {}
+        # ``ctx.tools.bfts_executor.{pause,resume}_sandbox`` are called by
+        # the pause/resume WIP in ``bfts_tree.handler`` at iteration
+        # boundaries (resume just-in-time before fan-out, pause after
+        # every child reaches terminal, resume once more before the F.4
+        # seed fan-out). The handler exclusively goes through ``ctx.step``
+        # so the AsyncMocks below get awaited via the same recording
+        # path as every other tool call; no separate counter needed.
+        self.tools = _TreeTools()
 
     async def step(self, name: str, fn: Any) -> Any:
         self.calls.append(name)
@@ -1088,3 +1116,208 @@ def test_aggregate_seed_metrics_returns_none_when_no_usable_value() -> None:
     )
 
     assert out is None
+
+
+# ---------------------------------------------------------------------------
+# F.6: rich handler return value carries best_metric_json, artifact ids,
+# seed aggregate + seed children, and the resolved config snapshot.
+# Slack-driven runs read these via ``call workflow get <run_id>`` →
+# ``output_json``; without this surface the agent has no DB access path.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_handler_return_carries_best_and_artifact_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Successful run: return value carries ``best_node_id``,
+    ``best_metric_json``, ``best_solution_artifact_id``,
+    ``best_node_id_artifact_id``, and ``tree_dot_artifact_id``."""
+    import _bfts_export
+    import bfts_tree
+
+    best_row = {
+        "node_id": "best-1",
+        "code": "print('hi')",
+        "stage_name": "improve",
+        "is_buggy": False,
+        "is_buggy_plots": False,
+        "metric_json": {"final_value": 0.123},
+    }
+    _patch_fanout_deps(monkeypatch, list_nodes_returns=[[best_row], [best_row]])
+    monkeypatch.setattr(_bfts_export, "select_best", lambda _nodes, **_kw: best_row)
+    monkeypatch.setattr(
+        _bfts_export, "write_best_artifact",
+        AsyncMock(return_value="art-best-uuid"),
+    )
+    monkeypatch.setattr(
+        _bfts_export, "write_best_node_id_artifact",
+        AsyncMock(return_value="art-bestid-uuid"),
+    )
+    monkeypatch.setattr(
+        _bfts_export, "write_tree_dot_artifact",
+        AsyncMock(return_value="r-tree-1:tree.dot"),
+    )
+
+    ctx = _TreeCtx()
+    out = await bfts_tree.handler(
+        _input(num_drafts=1, num_workers=1, max_iters=1), ctx
+    )
+
+    assert out["best_node_id"] == "best-1"
+    assert out["best_metric_json"] == {"final_value": 0.123}
+    assert out["best_stage_name"] == "improve"
+    assert out["best_solution_artifact_id"] == "art-best-uuid"
+    assert out["best_node_id_artifact_id"] == "art-bestid-uuid"
+    assert out["tree_dot_artifact_id"] == "r-tree-1:tree.dot"
+
+
+@pytest.mark.asyncio
+async def test_handler_return_has_null_best_fields_when_no_good_node(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run with no good nodes returns ``best_*=None`` but still emits
+    a ``tree_dot_artifact_id`` (anchored on the first row of final_nodes)
+    so postmortem rendering works on failed runs too."""
+    import _bfts_export
+    import bfts_tree
+
+    only_buggy = [{
+        "node_id": "n-only", "parent_node_id": None,
+        "stage_name": "draft", "is_buggy": True, "is_buggy_plots": None,
+        "metric_json": None,
+    }]
+    _patch_fanout_deps(monkeypatch, list_nodes_returns=[only_buggy, only_buggy])
+    monkeypatch.setattr(_bfts_export, "select_best", lambda _nodes, **_kw: None)
+    monkeypatch.setattr(
+        _bfts_export, "write_tree_dot_artifact",
+        AsyncMock(return_value="r-tree-1:tree.dot"),
+    )
+
+    ctx = _TreeCtx()
+    out = await bfts_tree.handler(
+        _input(num_drafts=1, num_workers=1, max_iters=1), ctx
+    )
+
+    assert out["best_node_id"] is None
+    assert out["best_metric_json"] is None
+    assert out["best_solution_artifact_id"] is None
+    assert out["best_node_id_artifact_id"] is None
+    # tree.dot is still written so the operator can debug the failed run.
+    assert out["tree_dot_artifact_id"] == "r-tree-1:tree.dot"
+    # Seed aggregate empty because there's no best to re-evaluate.
+    assert out["seed_aggregate"] is None
+    assert out["seed_children"] == []
+
+
+@pytest.mark.asyncio
+async def test_handler_return_carries_seed_aggregate_and_children(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F.4 fan-out: ``seed_aggregate`` and ``seed_children`` are populated
+    from the seed DAO result and the aggregator output."""
+    import _bfts_export
+    import bfts_tree
+
+    best_row = {
+        "node_id": "best-1",
+        "code": "print('hi')",
+        "stage_name": "improve",
+        "is_buggy": False,
+        "is_buggy_plots": False,
+        "metric_json": {"final_value": 0.5},
+    }
+    _patch_fanout_deps(monkeypatch, list_nodes_returns=[[best_row], [best_row]])
+    monkeypatch.setattr(_bfts_export, "select_best", lambda _nodes, **_kw: best_row)
+    seed_rows = [
+        {"node_id": "s0", "seed": 0,
+         "metric_json": {"final_value": 0.4}, "is_buggy": False},
+        {"node_id": "s1", "seed": 1,
+         "metric_json": {"final_value": 0.6}, "is_buggy": False},
+    ]
+    monkeypatch.setattr(
+        bfts_tree, "list_seed_children", AsyncMock(return_value=seed_rows)
+    )
+    monkeypatch.setattr(
+        bfts_tree, "update_node_aggregate_metric", AsyncMock(return_value=None)
+    )
+
+    ctx = _TreeCtx()
+    inp = Input(
+        run_id="r-tree-1",
+        parent_run_id=None,
+        idea={"name": "x"},
+        num_drafts=1,
+        num_workers=1,
+        max_iters=1,
+        debug_prob=0.5,
+        num_seeds=2,
+        sandbox_id="bfts-r-tree-1-tree-0",
+        draft_model="claude-draft-test",
+        feedback_model="claude-feedback-test",
+        vlm_model="claude-vision-test",
+        llm_api_key_secret="TEST_API_KEY",
+    )
+    out = await bfts_tree.handler(inp, ctx)
+
+    assert out["seed_aggregate"] is not None
+    assert out["seed_aggregate"]["aggregate_n"] == 2.0
+    assert out["seed_aggregate"]["aggregate_mean"] == pytest.approx(0.5)
+    # Projected to (seed, node_id, is_buggy, final_value) only.
+    assert out["seed_children"] == [
+        {"node_id": "s0", "seed": 0, "is_buggy": False, "final_value": 0.4},
+        {"node_id": "s1", "seed": 1, "is_buggy": False, "final_value": 0.6},
+    ]
+
+
+def test_coerce_metric_json_handles_dict_str_and_none() -> None:
+    """``_coerce_metric_json`` accepts the three asyncpg jsonb return
+    shapes (parsed dict, raw JSON string, NULL) and surfaces None for
+    malformed input rather than crashing the whole return."""
+    from bfts_tree import _coerce_metric_json
+    import json as _json
+
+    assert _coerce_metric_json({"a": 1}) == {"a": 1}
+    assert _coerce_metric_json(_json.dumps({"b": 2})) == {"b": 2}
+    assert _coerce_metric_json(None) is None
+    assert _coerce_metric_json("not json") is None
+    # Non-dict JSON (e.g. a literal number) is also rejected.
+    assert _coerce_metric_json("42") is None
+
+
+def test_project_seed_children_reads_nested_metric_schema() -> None:
+    """``_project_seed_children`` falls back to the nested
+    ``metric_names[*].data[*].final_value`` shape when ``final_value``
+    isn't a top-level key."""
+    from bfts_tree import _project_seed_children
+
+    out = _project_seed_children([
+        {
+            "node_id": "s0", "seed": 0, "is_buggy": False,
+            "metric_json": {
+                "metric_names": [{"data": [{"final_value": 0.42}]}]
+            },
+        }
+    ])
+
+    assert out == [
+        {"node_id": "s0", "seed": 0, "is_buggy": False, "final_value": 0.42}
+    ]
+
+
+def test_project_seed_children_emits_none_final_value_for_buggy_or_missing() -> None:
+    """Buggy seeds and seeds with unreadable metric_json get
+    ``final_value=None`` rather than being dropped — operators need to
+    see every seed child to count failures."""
+    from bfts_tree import _project_seed_children
+
+    out = _project_seed_children([
+        {"node_id": "s-bug", "seed": 0, "is_buggy": True, "metric_json": None},
+        {"node_id": "s-bad", "seed": 1, "is_buggy": False,
+         "metric_json": "not json"},
+    ])
+
+    assert out == [
+        {"node_id": "s-bug", "seed": 0, "is_buggy": True, "final_value": None},
+        {"node_id": "s-bad", "seed": 1, "is_buggy": False, "final_value": None},
+    ]
