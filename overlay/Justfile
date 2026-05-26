@@ -6,6 +6,13 @@ set dotenv-load := true
 # Imported from the root Justfile via `mod overlay 'overlay/Justfile'` so
 # every recipe is reachable as `just overlay::<recipe>`.
 
+# Just module variables don't inherit `export`ed values from the parent
+# Justfile, so re-resolve namespace/release from the same env vars the
+# root Justfile uses. Keeps cluster recipes correct when the chart is
+# installed into a non-default namespace or release name.
+namespace := env_var_or_default("CENTAUR_NAMESPACE", "centaur-system")
+release := env_var_or_default("CENTAUR_RELEASE", "centaur")
+
 default:
     just --list
 
@@ -92,7 +99,7 @@ smoke-research-brief query="active inference world models" limit="5":
 # paper used in earlier semantic-scholar smokes.
 [group('cluster')]
 smoke-save-papers paper_id="173ba8ae4582b6f9f6919aa3f813579a5349f1f9":
-    kubectl exec -n centaur-system deploy/centaur-centaur-api -- sh -c \
+    kubectl exec -n {{namespace}} deploy/{{release}}-centaur-api -- sh -c \
       'curl -sS -X POST http://localhost:8000/workflows/runs \
         -H "X-Api-Key: $SLACKBOT_API_KEY" \
         -H "Content-Type: application/json" \
@@ -107,7 +114,7 @@ smoke-save-papers paper_id="173ba8ae4582b6f9f6919aa3f813579a5349f1f9":
 # when the CLI subcommand landed).
 [group('cluster')]
 smoke-research-brief-deployed query="active inference world models" limit="3":
-    kubectl exec -n centaur-system deploy/centaur-centaur-api -- sh -c \
+    kubectl exec -n {{namespace}} deploy/{{release}}-centaur-api -- sh -c \
       'curl -sS -X POST http://localhost:8000/workflows/runs \
         -H "X-Api-Key: $SLACKBOT_API_KEY" \
         -H "Content-Type: application/json" \
