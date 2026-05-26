@@ -966,8 +966,12 @@ class BFTSExecutor:
             f"timeout --signal=INT --kill-after=60 {int(timeout_s)} "
             f"python -u {runfile_path}"
         )
+        # The caller-visible ``timeout_s`` is the inner ``timeout(1)``
+        # deadline; the +90s wire-level buffer (SIGINT at T → +60s SIGKILL →
+        # +30s reply slack) lives inside :class:`_KubernetesSandboxAPI`
+        # (Task 1.6) so the Protocol stays clean for tests.
         exec_result = await api.run_command(
-            sandbox_id, command, timeout_s=timeout_s + 90.0
+            sandbox_id, command, timeout_s=timeout_s
         )
 
         # 3. Wrap into ExecutionResult. Non-zero exit => is_buggy upstream.
