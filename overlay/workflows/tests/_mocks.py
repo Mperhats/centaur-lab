@@ -1,10 +1,10 @@
-"""Shared test fakes for the overlay workflow test suite.
+"""Shared test mocks for the overlay workflow test suite.
 
 Test-internal helpers — the leading underscore mirrors the workflow loader's
 ``startswith("_")`` skip convention and signals that this module is not a
 workflow handler. Imported by sibling test modules
 (``test_paper_document.py``, ``test_save_papers.py``, etc.) so the same
-asyncpg pool stub and UPSERT argument-position map have a single source of
+asyncpg pool mock and UPSERT argument-position map have a single source of
 truth.
 """
 
@@ -32,8 +32,8 @@ EXECUTE_ARG_INDEX: dict[str, int] = {
 }
 
 
-class FakePool:
-    """Async-pool stub recording fetchval/execute calls for assertions.
+class MockPool:
+    """Async-pool mock recording fetchval/execute calls for assertions.
 
     Matches the surface of the asyncpg pool that
     ``_paper_document.upsert_document`` actually consumes — a single
@@ -62,11 +62,11 @@ class FakePool:
         return self._execute_status
 
 
-class FakeContext:
+class MockContext:
     """Minimal workflow context exposing ``_pool`` and a recording ``log``.
 
-    ``pool`` is intentionally typed ``Any`` so the same fake can wrap either
-    the in-memory ``FakePool`` (unit tests) or a real ``asyncpg.Pool``
+    ``pool`` is intentionally typed ``Any`` so the same mock can wrap either
+    the in-memory ``MockPool`` (unit tests) or a real ``asyncpg.Pool``
     (integration tests under ``tests/integration/``).
     """
 
@@ -93,12 +93,12 @@ class MetricsRecorder:
         self.calls.append((document, action))
 
 
-class FakeSemanticScholarClient:
-    """Stub of ``SemanticScholarClient`` supporting both lookup paths.
+class MockSemanticScholarClient:
+    """Mock of ``SemanticScholarClient`` supporting both lookup paths.
 
     Real ``SemanticScholarClient`` exposes ``get_paper`` (used by
     ``save_papers``) and ``search_papers`` (used by ``research_brief``);
-    this fake mirrors both so a single class can back integration tests
+    this mock mirrors both so a single class can back integration tests
     for either workflow. Configure whichever path the test exercises:
     ``papers_by_id`` for ``get_paper`` calls, ``search_results`` for
     ``search_papers`` calls. Calling an unconfigured path raises
@@ -118,7 +118,7 @@ class FakeSemanticScholarClient:
         self, paper_id: str, fields: Any = None
     ) -> dict[str, Any]:
         if paper_id not in self._papers_by_id:
-            raise RuntimeError(f"unknown paper id in stub: {paper_id}")
+            raise RuntimeError(f"unknown paper id in mock: {paper_id}")
         return dict(self._papers_by_id[paper_id])
 
     def search_papers(
@@ -130,7 +130,7 @@ class FakeSemanticScholarClient:
     ) -> list[dict[str, Any]]:
         if self._search_results is None:
             raise RuntimeError(
-                "FakeSemanticScholarClient: search_results not configured"
+                "MockSemanticScholarClient: search_results not configured"
             )
         return [dict(p) for p in self._search_results]
 

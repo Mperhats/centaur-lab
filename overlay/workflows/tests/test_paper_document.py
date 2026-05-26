@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from _paper_document import _content_hash, build_paper_document, upsert_document
 
-from ._fakes import EXECUTE_ARG_INDEX, FakePool
+from ._mocks import EXECUTE_ARG_INDEX, MockPool
 
 
 def _sample_paper() -> dict[str, Any]:
@@ -159,7 +159,7 @@ async def test_upsert_document_returns_noop_when_hash_matches() -> None:
     # effective parent (None here) so reparenting forces an update; see the
     # relink test below.
     persisted_hash = _content_hash(doc["content_hash"], None)
-    pool = FakePool(existing_hash=persisted_hash)
+    pool = MockPool(existing_hash=persisted_hash)
 
     result = await upsert_document(pool, doc)
 
@@ -171,7 +171,7 @@ async def test_upsert_document_returns_noop_when_hash_matches() -> None:
 @pytest.mark.asyncio
 async def test_upsert_document_returns_inserted_when_no_existing_row() -> None:
     doc = build_paper_document(_sample_paper())
-    pool = FakePool(existing_hash=None, execute_status="INSERT 0 1")
+    pool = MockPool(existing_hash=None, execute_status="INSERT 0 1")
 
     result = await upsert_document(pool, doc)
 
@@ -182,7 +182,7 @@ async def test_upsert_document_returns_inserted_when_no_existing_row() -> None:
 @pytest.mark.asyncio
 async def test_upsert_document_returns_updated_when_hash_differs() -> None:
     doc = build_paper_document(_sample_paper())
-    pool = FakePool(existing_hash="old_hash", execute_status="INSERT 0 1")
+    pool = MockPool(existing_hash="old_hash", execute_status="INSERT 0 1")
 
     result = await upsert_document(pool, doc)
 
@@ -196,7 +196,7 @@ async def test_upsert_document_returns_noop_when_execute_status_zero() -> None:
     # Defensive: even with a hash mismatch, the SQL's
     # `WHERE content_hash IS DISTINCT FROM EXCLUDED.content_hash` clause can
     # report "INSERT 0 0" — treat that as a no-op.
-    pool = FakePool(existing_hash="old_hash", execute_status="INSERT 0 0")
+    pool = MockPool(existing_hash="old_hash", execute_status="INSERT 0 0")
 
     result = await upsert_document(pool, doc)
 
@@ -207,7 +207,7 @@ async def test_upsert_document_returns_noop_when_execute_status_zero() -> None:
 async def test_upsert_document_parent_kwarg_overrides_document_field() -> None:
     doc = build_paper_document(_sample_paper())
     doc["parent_document_id"] = "doc:from-document"
-    pool = FakePool(existing_hash=None, execute_status="INSERT 0 1")
+    pool = MockPool(existing_hash=None, execute_status="INSERT 0 1")
 
     result = await upsert_document(pool, doc, parent_document_id="doc:from-kwarg")
 
@@ -220,7 +220,7 @@ async def test_upsert_document_parent_kwarg_overrides_document_field() -> None:
 async def test_upsert_document_uses_document_parent_when_kwarg_omitted() -> None:
     doc = build_paper_document(_sample_paper())
     doc["parent_document_id"] = "doc:from-document"
-    pool = FakePool(existing_hash=None, execute_status="INSERT 0 1")
+    pool = MockPool(existing_hash=None, execute_status="INSERT 0 1")
 
     result = await upsert_document(pool, doc)
 
@@ -239,7 +239,7 @@ async def test_upsert_document_relinks_parent_when_content_unchanged() -> None:
     doc = build_paper_document(_sample_paper())
     intrinsic_hash = doc["content_hash"]
     no_parent_persisted_hash = _content_hash(intrinsic_hash, None)
-    pool = FakePool(existing_hash=no_parent_persisted_hash, execute_status="INSERT 0 1")
+    pool = MockPool(existing_hash=no_parent_persisted_hash, execute_status="INSERT 0 1")
 
     result = await upsert_document(pool, doc, parent_document_id="brief:Q")
 

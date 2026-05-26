@@ -14,10 +14,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import save_papers
 from _paper_document import _content_hash, build_paper_document
 
-from ._fakes import FakeContext, FakePool, MetricsRecorder
+from ._mocks import MetricsRecorder, MockContext, MockPool
 
 
-class FakeS2Client:
+class MockS2Client:
     """Stand-in for ``SemanticScholarClient`` used inside the handler."""
 
     def __init__(
@@ -44,7 +44,7 @@ class FakeS2Client:
     def close(self) -> None:
         self.close_called = True
 
-    def __enter__(self) -> FakeS2Client:
+    def __enter__(self) -> MockS2Client:
         return self
 
     def __exit__(self, *args: object) -> None:
@@ -69,8 +69,8 @@ def _paper(paper_id: str, *, title: str = "Sample Paper") -> dict[str, Any]:
 
 @pytest.mark.asyncio
 async def test_handler_skips_when_paper_ids_empty() -> None:
-    pool = FakePool()
-    ctx = FakeContext(pool)
+    pool = MockPool()
+    ctx = MockContext(pool)
 
     with patch("save_papers.SemanticScholarClient") as mock_cls:
         result = await save_papers.handler(save_papers.Input(paper_ids=[]), ctx)
@@ -84,12 +84,12 @@ async def test_handler_skips_when_paper_ids_empty() -> None:
 
 @pytest.mark.asyncio
 async def test_handler_inserts_one_paper() -> None:
-    pool = FakePool(existing_hash=None, execute_status="INSERT 0 1")
-    ctx = FakeContext(pool)
-    fake = FakeS2Client({"abc123": _paper("abc123")})
+    pool = MockPool(existing_hash=None, execute_status="INSERT 0 1")
+    ctx = MockContext(pool)
+    mock = MockS2Client({"abc123": _paper("abc123")})
 
     with patch("save_papers.SemanticScholarClient") as mock_cls:
-        mock_cls.return_value = fake
+        mock_cls.return_value = mock
         result = await save_papers.handler(
             save_papers.Input(paper_ids=["abc123"]),
             ctx,
@@ -105,20 +105,20 @@ async def test_handler_inserts_one_paper() -> None:
     assert entry["status"] == "inserted"
     assert entry["document_id"] == "semantic_scholar:paper:abc123"
     assert entry["paperId"] == "abc123"
-    assert fake.close_called is True
+    assert mock.close_called is True
 
 
 @pytest.mark.asyncio
 async def test_handler_handles_partial_failure() -> None:
-    pool = FakePool(existing_hash=None, execute_status="INSERT 0 1")
-    ctx = FakeContext(pool)
-    fake = FakeS2Client(
+    pool = MockPool(existing_hash=None, execute_status="INSERT 0 1")
+    ctx = MockContext(pool)
+    mock = MockS2Client(
         {"ok1": _paper("ok1"), "ok2": _paper("ok2")},
         fail_ids=("bad",),
     )
 
     with patch("save_papers.SemanticScholarClient") as mock_cls:
-        mock_cls.return_value = fake
+        mock_cls.return_value = mock
         result = await save_papers.handler(
             save_papers.Input(paper_ids=["ok1", "bad", "ok2"]),
             ctx,
@@ -131,18 +131,18 @@ async def test_handler_handles_partial_failure() -> None:
     assert len(failed) == 1
     assert failed[0]["paperId"] == "bad"
     assert "S2 API error for bad" in failed[0]["error"]
-    assert fake.close_called is True
+    assert mock.close_called is True
     assert any(event == "save_papers_paper_failed" for event, _ in ctx.logs)
 
 
 @pytest.mark.asyncio
 async def test_handler_passes_query_to_metadata() -> None:
-    pool = FakePool(existing_hash=None, execute_status="INSERT 0 1")
-    ctx = FakeContext(pool)
-    fake = FakeS2Client({"x": _paper("x")})
+    pool = MockPool(existing_hash=None, execute_status="INSERT 0 1")
+    ctx = MockContext(pool)
+    mock = MockS2Client({"x": _paper("x")})
 
     with patch("save_papers.SemanticScholarClient") as mock_cls:
-        mock_cls.return_value = fake
+        mock_cls.return_value = mock
         await save_papers.handler(
             save_papers.Input(paper_ids=["x"], query="active inference"),
             ctx,
@@ -162,12 +162,12 @@ async def test_handler_returns_noop_for_unchanged_papers() -> None:
     # save_papers calls upsert_document without a parent_document_id kwarg, so
     # the persisted hash combines the intrinsic content_hash with None.
     persisted_hash = _content_hash(document["content_hash"], None)
-    pool = FakePool(existing_hash=persisted_hash)
-    ctx = FakeContext(pool)
-    fake = FakeS2Client({"noop-id": paper})
+    pool = MockPool(existing_hash=persisted_hash)
+    ctx = MockContext(pool)
+    mock = MockS2Client({"noop-id": paper})
 
     with patch("save_papers.SemanticScholarClient") as mock_cls:
-        mock_cls.return_value = fake
+        mock_cls.return_value = mock
         result = await save_papers.handler(
             save_papers.Input(paper_ids=["noop-id"]),
             ctx,
@@ -180,36 +180,36 @@ async def test_handler_returns_noop_for_unchanged_papers() -> None:
 
 @pytest.mark.asyncio
 async def test_handler_closes_client_on_exception() -> None:
-    pool = FakePool()
-    ctx = FakeContext(pool)
-    fake = FakeS2Client(
+    pool = MockPool()
+    ctx = MockContext(pool)
+    mock = MockS2Client(
         {},
         raise_on={"boom": ValueError("unexpected client failure")},
     )
 
     with patch("save_papers.SemanticScholarClient") as mock_cls:
-        mock_cls.return_value = fake
+        mock_cls.return_value = mock
         with pytest.raises(ValueError, match="unexpected client failure"):
             await save_papers.handler(
                 save_papers.Input(paper_ids=["boom"]),
                 ctx,
             )
 
-    assert fake.close_called is True
+    assert mock.close_called is True
 
 
 @pytest.mark.asyncio
 async def test_handler_emits_vm_metrics_per_upsert(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    pool = FakePool(existing_hash=None, execute_status="INSERT 0 1")
-    ctx = FakeContext(pool)
-    fake = FakeS2Client({"A": _paper("A"), "B": _paper("B")})
+    pool = MockPool(existing_hash=None, execute_status="INSERT 0 1")
+    ctx = MockContext(pool)
+    mock = MockS2Client({"A": _paper("A"), "B": _paper("B")})
     recorder = MetricsRecorder()
     monkeypatch.setattr(save_papers, "emit_document_metrics", recorder)
 
     with patch("save_papers.SemanticScholarClient") as mock_cls:
-        mock_cls.return_value = fake
+        mock_cls.return_value = mock
         await save_papers.handler(
             save_papers.Input(paper_ids=["A", "B"]),
             ctx,

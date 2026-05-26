@@ -11,7 +11,7 @@ namespace nor ``centaur_sdk`` installed.
 
 Register placeholder packages + module in ``sys.modules`` exactly once
 before any workflow module is imported by a test. Each test then patches
-``<workflow>.SemanticScholarClient`` with a fake; the placeholder is
+``<workflow>.SemanticScholarClient`` with a mock; the placeholder is
 never called directly. Using explicit ``not in`` checks (rather than
 ``setdefault``) keeps the intent visible: if the real modules are ever
 importable, we leave them alone.

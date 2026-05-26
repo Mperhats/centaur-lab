@@ -16,11 +16,11 @@ import pytest
 from semantic_scholar.client import SemanticScholarClient
 
 # ---------------------------------------------------------------------------
-# Fakes
+# Mocks
 # ---------------------------------------------------------------------------
 
 
-class FakeAsyncpgConn:
+class MockAsyncpgConn:
     """Minimal stand-in for ``asyncpg.Connection``.
 
     ``fetch`` records every call and returns the configured rows (or
@@ -49,25 +49,25 @@ class FakeAsyncpgConn:
         self.close_count += 1
 
 
-def _install_fake_conn(
+def _install_mock_conn(
     monkeypatch: pytest.MonkeyPatch,
-    fake: FakeAsyncpgConn | None,
+    mock: MockAsyncpgConn | None,
     *,
     connect_exc: BaseException | None = None,
 ) -> list[tuple[str, dict[str, Any]]]:
-    """Patch ``asyncpg.connect`` to return ``fake`` (or raise).
+    """Patch ``asyncpg.connect`` to return ``mock`` (or raise).
 
     Returns the list of ``(url, kwargs)`` connect invocations so tests
     can assert against them.
     """
     calls: list[tuple[str, dict[str, Any]]] = []
 
-    async def _connect(url: str, **kwargs: Any) -> FakeAsyncpgConn:
+    async def _connect(url: str, **kwargs: Any) -> MockAsyncpgConn:
         calls.append((url, kwargs))
         if connect_exc is not None:
             raise connect_exc
-        assert fake is not None
-        return fake
+        assert mock is not None
+        return mock
 
     monkeypatch.setattr(asyncpg, "connect", _connect)
     return calls
@@ -115,7 +115,7 @@ def _indexed_row(
     body: str = "Some body text mentioning the query terms.",
     score: float = 1.0,
 ) -> dict[str, Any]:
-    """Build a fake DB row shaped like asyncpg returns for the SELECT."""
+    """Build a mock DB row shaped like asyncpg returns for the SELECT."""
     metadata: dict[str, Any] = {"paperId": paper_id}
     if year is not None:
         metadata["year"] = year
@@ -170,7 +170,7 @@ def _client() -> SemanticScholarClient:
 
 def test_search_empty_query_returns_error(monkeypatch: pytest.MonkeyPatch) -> None:
     _install_database_url(monkeypatch)
-    connect_calls = _install_fake_conn(monkeypatch, FakeAsyncpgConn())
+    connect_calls = _install_mock_conn(monkeypatch, MockAsyncpgConn())
 
     client = _client()
     assert client.search("") == {"status": "error", "error": "query cannot be empty"}
@@ -189,7 +189,7 @@ def test_search_no_database_url_returns_error(monkeypatch: pytest.MonkeyPatch) -
         "semantic_scholar.client.secret",
         lambda _key, default="": "",
     )
-    connect_calls = _install_fake_conn(monkeypatch, FakeAsyncpgConn())
+    connect_calls = _install_mock_conn(monkeypatch, MockAsyncpgConn())
 
     client = _client()
     result = client.search("anything")
@@ -211,8 +211,8 @@ def test_search_indexed_only_when_live_returns_nothing(monkeypatch: pytest.Monke
         _indexed_row(paper_id="A", year=2023, title="Paper A"),
         _indexed_row(paper_id="B", year=2022, title="Paper B"),
     ]
-    fake = FakeAsyncpgConn(rows)
-    _install_fake_conn(monkeypatch, fake)
+    mock = MockAsyncpgConn(rows)
+    _install_mock_conn(monkeypatch, mock)
     live_calls = _install_search_papers(monkeypatch, [])
 
     result = _client().search("active inference")
@@ -237,8 +237,8 @@ def test_search_indexed_only_when_live_returns_nothing(monkeypatch: pytest.Monke
 
 def test_search_live_only_when_index_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     _install_database_url(monkeypatch)
-    fake = FakeAsyncpgConn([])
-    _install_fake_conn(monkeypatch, fake)
+    mock = MockAsyncpgConn([])
+    _install_mock_conn(monkeypatch, mock)
     live_calls = _install_search_papers(
         monkeypatch,
         [_live_paper("X"), _live_paper("Y"), _live_paper("Z")],
@@ -270,8 +270,8 @@ def test_search_merges_indexed_then_live_in_results_order(
         _indexed_row(paper_id="A", year=2020),
         _indexed_row(paper_id="B", year=2019),
     ]
-    fake = FakeAsyncpgConn(rows)
-    _install_fake_conn(monkeypatch, fake)
+    mock = MockAsyncpgConn(rows)
+    _install_mock_conn(monkeypatch, mock)
     _install_search_papers(
         monkeypatch,
         [_live_paper("C"), _live_paper("D"), _live_paper("E")],
@@ -294,8 +294,8 @@ def test_search_dedupes_live_against_indexed_by_paperid(
 ) -> None:
     _install_database_url(monkeypatch)
     rows = [_indexed_row(paper_id="A", year=2020)]
-    fake = FakeAsyncpgConn(rows)
-    _install_fake_conn(monkeypatch, fake)
+    mock = MockAsyncpgConn(rows)
+    _install_mock_conn(monkeypatch, mock)
     _install_search_papers(monkeypatch, [_live_paper("A"), _live_paper("C")])
 
     result = _client().search("dedupe me")
@@ -314,15 +314,15 @@ def test_search_dedupes_live_against_indexed_by_paperid(
 
 def test_search_clamps_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     _install_database_url(monkeypatch)
-    fake = FakeAsyncpgConn([])
-    _install_fake_conn(monkeypatch, fake)
+    mock = MockAsyncpgConn([])
+    _install_mock_conn(monkeypatch, mock)
     _install_search_papers(monkeypatch, [])
 
     result = _client().search("foo", limit=999)
     assert result["limit"] == 50
     # Last positional arg to the SQL is the LIMIT.
-    assert fake.fetch_calls, "expected fetch to be called once"
-    _sql, args = fake.fetch_calls[0]
+    assert mock.fetch_calls, "expected fetch to be called once"
+    _sql, args = mock.fetch_calls[0]
     assert args[-1] == 50
 
 
@@ -335,8 +335,8 @@ def test_search_uses_cutoff_year_for_live_when_year_from_none(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_database_url(monkeypatch)
-    fake = FakeAsyncpgConn([_indexed_row(paper_id="A", year=2023)])
-    _install_fake_conn(monkeypatch, fake)
+    mock = MockAsyncpgConn([_indexed_row(paper_id="A", year=2023)])
+    _install_mock_conn(monkeypatch, mock)
     live_calls = _install_search_papers(monkeypatch, [])
 
     result = _client().search("xyz")
@@ -353,8 +353,8 @@ def test_search_uses_max_of_provided_and_cutoff_year_for_live(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_database_url(monkeypatch)
-    fake = FakeAsyncpgConn([_indexed_row(paper_id="A", year=2023)])
-    _install_fake_conn(monkeypatch, fake)
+    mock = MockAsyncpgConn([_indexed_row(paper_id="A", year=2023)])
+    _install_mock_conn(monkeypatch, mock)
     live_calls = _install_search_papers(monkeypatch, [])
 
     result = _client().search("xyz", year_from=2025)
@@ -373,8 +373,8 @@ def test_search_passes_none_year_from_to_live_when_no_cutoff_and_no_input(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_database_url(monkeypatch)
-    fake = FakeAsyncpgConn([])
-    _install_fake_conn(monkeypatch, fake)
+    mock = MockAsyncpgConn([])
+    _install_mock_conn(monkeypatch, mock)
     live_calls = _install_search_papers(monkeypatch, [])
 
     result = _client().search("xyz")
@@ -392,8 +392,8 @@ def test_search_handles_live_failure_returns_indexed_only(
 ) -> None:
     _install_database_url(monkeypatch)
     rows = [_indexed_row(paper_id="A", year=2020), _indexed_row(paper_id="B", year=2019)]
-    fake = FakeAsyncpgConn(rows)
-    _install_fake_conn(monkeypatch, fake)
+    mock = MockAsyncpgConn(rows)
+    _install_mock_conn(monkeypatch, mock)
     _install_search_papers(monkeypatch, exc=RuntimeError("S2 down"))
 
     result = _client().search("q")
@@ -411,7 +411,7 @@ def test_search_handles_live_failure_returns_indexed_only(
 
 def test_search_handles_db_failure_top_level(monkeypatch: pytest.MonkeyPatch) -> None:
     _install_database_url(monkeypatch)
-    _install_fake_conn(
+    _install_mock_conn(
         monkeypatch,
         None,
         connect_exc=RuntimeError("could not connect to database"),
@@ -439,8 +439,8 @@ def test_search_indexed_result_includes_score_preview_lane_paperid(
         body="The query terms appear in this body so the preview is non-empty.",
         score=2.5,
     )
-    fake = FakeAsyncpgConn([row])
-    _install_fake_conn(monkeypatch, fake)
+    mock = MockAsyncpgConn([row])
+    _install_mock_conn(monkeypatch, mock)
     _install_search_papers(monkeypatch, [])
 
     result = _client().search("query")
@@ -466,7 +466,7 @@ def test_search_live_result_has_lane_and_score_none(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_database_url(monkeypatch)
-    _install_fake_conn(monkeypatch, FakeAsyncpgConn([]))
+    _install_mock_conn(monkeypatch, MockAsyncpgConn([]))
     _install_search_papers(
         monkeypatch,
         [_live_paper("L1"), _live_paper("L2")],
@@ -488,14 +488,14 @@ def test_search_live_result_has_lane_and_score_none(
 
 def test_search_strips_query_before_use(monkeypatch: pytest.MonkeyPatch) -> None:
     _install_database_url(monkeypatch)
-    fake = FakeAsyncpgConn([])
-    _install_fake_conn(monkeypatch, fake)
+    mock = MockAsyncpgConn([])
+    _install_mock_conn(monkeypatch, mock)
     live_calls = _install_search_papers(monkeypatch, [])
 
     result = _client().search("   foo bar  ")
     assert result["query"] == "foo bar"
     # First bind param is the original query (post-strip).
-    _sql, args = fake.fetch_calls[0]
+    _sql, args = mock.fetch_calls[0]
     assert args[0] == "foo bar"
     # Live API also receives the stripped query.
     assert live_calls[-1]["query"] == "foo bar"
@@ -510,11 +510,11 @@ def test_search_calls_close_on_db_error_inside_async(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_database_url(monkeypatch)
-    fake = FakeAsyncpgConn([], fetch_exc=RuntimeError("boom"))
-    _install_fake_conn(monkeypatch, fake)
+    mock = MockAsyncpgConn([], fetch_exc=RuntimeError("boom"))
+    _install_mock_conn(monkeypatch, mock)
     _install_search_papers(monkeypatch, [])
 
     result = _client().search("q")
     assert result["status"] == "error"
     assert "boom" in result["error"]
-    assert fake.close_count == 1
+    assert mock.close_count == 1

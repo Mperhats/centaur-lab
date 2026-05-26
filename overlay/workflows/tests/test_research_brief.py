@@ -14,10 +14,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import research_brief
 
-from ._fakes import EXECUTE_ARG_INDEX, FakeContext, FakePool, MetricsRecorder
+from ._mocks import EXECUTE_ARG_INDEX, MetricsRecorder, MockContext, MockPool
 
 
-class FakeS2Client:
+class MockS2Client:
     """Stand-in for ``SemanticScholarClient`` recording calls and forcing failures."""
 
     def __init__(
@@ -66,8 +66,8 @@ def _paper(paper_id: str, *, title: str | None = None) -> dict[str, Any]:
 
 @pytest.mark.asyncio
 async def test_handler_skips_when_query_empty() -> None:
-    pool = FakePool()
-    ctx = FakeContext(pool)
+    pool = MockPool()
+    ctx = MockContext(pool)
 
     with patch("research_brief.SemanticScholarClient") as mock_cls:
         result = await research_brief.handler(research_brief.Input(query="   "), ctx)
@@ -81,26 +81,26 @@ async def test_handler_skips_when_query_empty() -> None:
 
 @pytest.mark.asyncio
 async def test_handler_clamps_limit_to_max_20() -> None:
-    pool = FakePool()
-    ctx = FakeContext(pool)
-    fake = FakeS2Client(results=[])
+    pool = MockPool()
+    ctx = MockContext(pool)
+    mock = MockS2Client(results=[])
 
     with patch("research_brief.SemanticScholarClient") as mock_cls:
-        mock_cls.return_value = fake
+        mock_cls.return_value = mock
         await research_brief.handler(
             research_brief.Input(query="x", limit=999),
             ctx,
         )
 
-    assert len(fake.search_calls) == 1
-    assert fake.search_calls[0]["limit"] == 20
+    assert len(mock.search_calls) == 1
+    assert mock.search_calls[0]["limit"] == 20
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("bad_limit", [0, -5])
 async def test_handler_skips_when_limit_non_positive(bad_limit: int) -> None:
-    pool = FakePool()
-    ctx = FakeContext(pool)
+    pool = MockPool()
+    ctx = MockContext(pool)
 
     with patch("research_brief.SemanticScholarClient") as mock_cls:
         result = await research_brief.handler(
@@ -117,19 +117,19 @@ async def test_handler_skips_when_limit_non_positive(bad_limit: int) -> None:
 
 @pytest.mark.asyncio
 async def test_handler_logs_when_limit_clamped() -> None:
-    pool = FakePool()
-    ctx = FakeContext(pool)
-    fake = FakeS2Client(results=[])
+    pool = MockPool()
+    ctx = MockContext(pool)
+    mock = MockS2Client(results=[])
 
     with patch("research_brief.SemanticScholarClient") as mock_cls:
-        mock_cls.return_value = fake
+        mock_cls.return_value = mock
         await research_brief.handler(
             research_brief.Input(query="x", limit=999),
             ctx,
         )
 
-    assert len(fake.search_calls) == 1
-    assert fake.search_calls[0]["limit"] == 20
+    assert len(mock.search_calls) == 1
+    assert mock.search_calls[0]["limit"] == 20
     clamp_events = [
         kwargs for event, kwargs in ctx.logs if event == "research_brief_limit_clamped"
     ]
@@ -140,12 +140,12 @@ async def test_handler_logs_when_limit_clamped() -> None:
 
 @pytest.mark.asyncio
 async def test_handler_renders_no_results_brief_and_returns_zero_counts() -> None:
-    pool = FakePool()
-    ctx = FakeContext(pool)
-    fake = FakeS2Client(results=[])
+    pool = MockPool()
+    ctx = MockContext(pool)
+    mock = MockS2Client(results=[])
 
     with patch("research_brief.SemanticScholarClient") as mock_cls:
-        mock_cls.return_value = fake
+        mock_cls.return_value = mock
         result = await research_brief.handler(
             research_brief.Input(query="quantum gravity"),
             ctx,
@@ -161,18 +161,18 @@ async def test_handler_renders_no_results_brief_and_returns_zero_counts() -> Non
     # short-circuit to "noop" via content_hash.
     assert len(pool.execute_calls) == 1
     assert any(event == "research_brief_no_results" for event, _ in ctx.logs)
-    assert fake.close_called is True
+    assert mock.close_called is True
 
 
 @pytest.mark.asyncio
 async def test_handler_persists_brief_and_papers_with_parent_link() -> None:
-    pool = FakePool()
-    ctx = FakeContext(pool)
+    pool = MockPool()
+    ctx = MockContext(pool)
     papers = [_paper("p1"), _paper("p2"), _paper("p3")]
-    fake = FakeS2Client(results=papers)
+    mock = MockS2Client(results=papers)
 
     with patch("research_brief.SemanticScholarClient") as mock_cls:
-        mock_cls.return_value = fake
+        mock_cls.return_value = mock
         result = await research_brief.handler(
             research_brief.Input(query="active inference"),
             ctx,
@@ -245,12 +245,12 @@ def test_render_brief_markdown_shape() -> None:
 
 @pytest.mark.asyncio
 async def test_handler_passes_query_to_paper_metadata() -> None:
-    pool = FakePool()
-    ctx = FakeContext(pool)
-    fake = FakeS2Client(results=[_paper("p1")])
+    pool = MockPool()
+    ctx = MockContext(pool)
+    mock = MockS2Client(results=[_paper("p1")])
 
     with patch("research_brief.SemanticScholarClient") as mock_cls:
-        mock_cls.return_value = fake
+        mock_cls.return_value = mock
         await research_brief.handler(
             research_brief.Input(query="topic X"),
             ctx,
@@ -266,33 +266,33 @@ async def test_handler_passes_query_to_paper_metadata() -> None:
 
 @pytest.mark.asyncio
 async def test_handler_closes_client_when_search_raises() -> None:
-    pool = FakePool()
-    ctx = FakeContext(pool)
-    fake = FakeS2Client(results=[], raise_exc=RuntimeError("S2 down"))
+    pool = MockPool()
+    ctx = MockContext(pool)
+    mock = MockS2Client(results=[], raise_exc=RuntimeError("S2 down"))
 
     with patch("research_brief.SemanticScholarClient") as mock_cls:
-        mock_cls.return_value = fake
+        mock_cls.return_value = mock
         with pytest.raises(RuntimeError, match="S2 down"):
             await research_brief.handler(
                 research_brief.Input(query="anything"),
                 ctx,
             )
 
-    assert fake.close_called is True
+    assert mock.close_called is True
 
 
 @pytest.mark.asyncio
 async def test_handler_emits_vm_metrics_for_brief_and_papers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    pool = FakePool()
-    ctx = FakeContext(pool)
-    fake = FakeS2Client(results=[_paper("p1"), _paper("p2")])
+    pool = MockPool()
+    ctx = MockContext(pool)
+    mock = MockS2Client(results=[_paper("p1"), _paper("p2")])
     recorder = MetricsRecorder()
     monkeypatch.setattr(research_brief, "emit_document_metrics", recorder)
 
     with patch("research_brief.SemanticScholarClient") as mock_cls:
-        mock_cls.return_value = fake
+        mock_cls.return_value = mock
         await research_brief.handler(
             research_brief.Input(query="active inference"),
             ctx,
@@ -308,14 +308,14 @@ async def test_handler_emits_vm_metrics_for_brief_and_papers(
 async def test_handler_emits_vm_metrics_on_no_results_brief(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    pool = FakePool()
-    ctx = FakeContext(pool)
-    fake = FakeS2Client(results=[])
+    pool = MockPool()
+    ctx = MockContext(pool)
+    mock = MockS2Client(results=[])
     recorder = MetricsRecorder()
     monkeypatch.setattr(research_brief, "emit_document_metrics", recorder)
 
     with patch("research_brief.SemanticScholarClient") as mock_cls:
-        mock_cls.return_value = fake
+        mock_cls.return_value = mock
         await research_brief.handler(
             research_brief.Input(query="quantum gravity"),
             ctx,

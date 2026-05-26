@@ -25,7 +25,7 @@ _WORKFLOWS_DIR = Path(__file__).resolve().parent.parent.parent
 if str(_WORKFLOWS_DIR) not in sys.path:
     sys.path.insert(0, str(_WORKFLOWS_DIR))
 
-from tests._fakes import FakeContext, FakeSemanticScholarClient  # noqa: E402
+from tests._mocks import MockContext, MockSemanticScholarClient  # noqa: E402
 
 
 def _paper(paper_id: str, *, title: str | None = None) -> dict[str, Any]:
@@ -54,12 +54,12 @@ async def test_research_brief_writes_brief_and_papers_with_parent_link(
     monkeypatch.setattr(
         research_brief,
         "SemanticScholarClient",
-        lambda: FakeSemanticScholarClient(search_results=papers),
+        lambda: MockSemanticScholarClient(search_results=papers),
     )
 
     result = await research_brief.handler(
         research_brief.Input(query="active inference"),
-        FakeContext(db_pool),
+        MockContext(db_pool),
     )
 
     assert result["status"] == "completed"
@@ -93,16 +93,16 @@ async def test_research_brief_is_idempotent_on_rerun(
     monkeypatch.setattr(
         research_brief,
         "SemanticScholarClient",
-        lambda: FakeSemanticScholarClient(search_results=papers),
+        lambda: MockSemanticScholarClient(search_results=papers),
     )
     inp = research_brief.Input(query="active inference")
 
-    first = await research_brief.handler(inp, FakeContext(db_pool))
+    first = await research_brief.handler(inp, MockContext(db_pool))
     assert first["papers_inserted"] == 2
     assert first["papers_noop"] == 0
     assert first["brief_action"] == "inserted"
 
-    second = await research_brief.handler(inp, FakeContext(db_pool))
+    second = await research_brief.handler(inp, MockContext(db_pool))
     assert second["papers_inserted"] == 0
     assert second["papers_updated"] == 0
     assert second["papers_noop"] == 2
@@ -121,12 +121,12 @@ async def test_research_brief_no_results_writes_brief_only(
     monkeypatch.setattr(
         research_brief,
         "SemanticScholarClient",
-        lambda: FakeSemanticScholarClient(search_results=[]),
+        lambda: MockSemanticScholarClient(search_results=[]),
     )
 
     result = await research_brief.handler(
         research_brief.Input(query="quantum gravity nothing matches"),
-        FakeContext(db_pool),
+        MockContext(db_pool),
     )
 
     assert result["status"] == "completed"
