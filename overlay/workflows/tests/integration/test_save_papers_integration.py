@@ -13,19 +13,11 @@ clear which workflow regressed without context-switching to the file path.
 from __future__ import annotations
 
 import json
-import sys
-from pathlib import Path
 from typing import Any
 
 import pytest
 
-# Make the workflow modules importable. Mirrors the sys.path bootstrap in the
-# unit-test conftest.
-_WORKFLOWS_DIR = Path(__file__).resolve().parent.parent.parent
-if str(_WORKFLOWS_DIR) not in sys.path:
-    sys.path.insert(0, str(_WORKFLOWS_DIR))
-
-from tests._mocks import MockContext  # noqa: E402
+from tests._mocks import MockContext
 
 
 class FakeS2Client:

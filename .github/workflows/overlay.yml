@@ -51,19 +51,21 @@ jobs:
         working-directory: overlay/workflows
         run: uvx ruff check .
 
+      - name: Install semantic_scholar test deps
+        working-directory: overlay/tools/semantic_scholar
+        run: uv sync --group dev --python 3.11
+
       - name: Test semantic_scholar tool
         working-directory: overlay/tools/semantic_scholar
-        run: |
-          uv run --python 3.11 \
-            --with pytest --with pytest-asyncio --with asyncpg --with httpx \
-            pytest tests/ -v
+        run: uv run --python 3.11 pytest tests/ --ignore=tests/integration -v
+
+      - name: Install workflows test deps
+        working-directory: overlay/workflows
+        run: uv sync --group dev --python 3.11
 
       - name: Test workflows
         working-directory: overlay/workflows
-        run: |
-          uv run --python 3.11 \
-            --with pytest --with pytest-asyncio \
-            pytest tests/ -v
+        run: uv run --python 3.11 pytest tests/ --ignore=tests/integration -v
 
   publish:
     name: Build and push overlay image

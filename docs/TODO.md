@@ -50,6 +50,37 @@ Actionable items only. Completed audits and MVP plans live in git history.
 
 **Real bug already fixed:** lazy `secret()` in `SemanticScholarClient._get_api_key()` (was in old audit as critical).
 
+## Known upstream limitation: `centaur_sdk` is not a real installable package
+
+**TLDR:** `from centaur_sdk import secret` only resolves if `.centaur/` is on `sys.path`. There is no install path (PyPI, git+subdirectory, editable) that makes the import work portably.
+
+**Reproducer:**
+
+```bash
+cd /tmp && rm -rf t && mkdir t && cd t && uv venv --python 3.11 -q
+uv pip install "centaur-sdk @ git+https://github.com/paradigmxyz/centaur.git#subdirectory=centaur_sdk"
+cd / && /tmp/t/.venv/bin/python -c "from centaur_sdk import secret"
+# ModuleNotFoundError: No module named 'centaur_sdk'
+```
+
+**Root cause:** `.centaur/centaur_sdk/pyproject.toml` declares `[tool.hatch.build.targets.wheel] packages = ["."]`. Hatchling installs the dir's contents at the wheel root, so `tool_sdk.py`, `cli_tables.py`, `__init__.py`, even `README.md` and `pyproject.toml` end up loose in `site-packages/` — there is no `centaur_sdk/` package directory. Upstream's own API gets away with it because its Dockerfile `COPY centaur_sdk/ centaur_sdk/` puts the source dir at `/app/centaur_sdk/` and runs with `WORKDIR /app`; the import resolves via cwd discovery, not via the install.
+
+Neither the README's `pip install "centaur-sdk @ git+..."` snippet nor the AGENTS.md `pip install centaur-sdk` comment actually works — the package is not on PyPI ([paradigmxyz packages](https://github.com/orgs/paradigmxyz/packages?repo_name=centaur) lists 4 containers, no SDK; `pypi.org/simple/centaur-sdk/` 404s).
+
+**Our workaround (`.github/workflows/overlay.yml`, `overlay/*/pyproject.toml`, `overlay/tools/semantic_scholar/cli.py`):**
+
+| Context | Mechanism |
+|---|---|
+| Runtime in API pod | Centaur tool loader puts `overlay/` on `sys.path`; `/app/centaur_sdk/` already on cwd path |
+| Pytest (local + CI) | `[tool.pytest.ini_options] pythonpath = ["..", "../..", "../../../.centaur"]` in tool pyproject (+ analogous in workflows pyproject) |
+| `uv run python cli.py` from a tool dir | 9 lines of `sys.path.insert` bootstrap in `cli.py` (documented in the file) |
+
+CI requires `submodules: recursive` on `actions/checkout` so `.centaur/centaur_sdk/` is present for pytest.
+
+**Upstream fix would collapse all of the above:** move files into `.centaur/centaur_sdk/centaur_sdk/` and change `packages = ["centaur_sdk"]`. After that, declare `centaur-sdk @ git+...` as a regular dep and delete every workaround. Not pursued because we don't own the upstream repo.
+
+- [ ] If upstream ever fixes the packaging, drop pythonpath/cli bootstrap and add `centaur-sdk @ git+...` as a regular dep in overlay tool/workflow pyprojects
+
 ## Overlay DB migrations (future)
 
 **Reuse core schema vs add overlay migrations**

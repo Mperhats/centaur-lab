@@ -159,19 +159,20 @@ lint:
     cd workflows && uvx ruff check .
 
 # Run the workflow handler test suite locally. Workflows aren't packaged —
-# uv resolves dev deps via overlay/workflows/pyproject.toml without polluting
-# the tool packages.
+# uv resolves dev deps via overlay/workflows/pyproject.toml's [dependency-groups]
+# without polluting the tool packages.
 [group('dev')]
 test-workflows:
-    cd workflows && uv run --python 3.11 --with pytest --with pytest-asyncio pytest tests/ -v
+    cd workflows && uv sync --group dev --python 3.11 && uv run --python 3.11 pytest tests/ --ignore=tests/integration -v
 
-# Run the org tool test suites locally. Mirrors `test-workflows` — deps are
-# passed via --with rather than relying on dev-group resolution so the recipe
-# stays self-contained. asyncpg is required because ``research_brief``
-# persists rows into ``company_context_documents``.
+# Run the org tool test suites locally. Dev deps (pytest, asyncpg, httpx)
+# come from overlay/tools/semantic_scholar/pyproject.toml's
+# [dependency-groups]; pytest pythonpath in the same file makes
+# centaur_sdk, centaur_lab, and tools.semantic_scholar.* importable without
+# conftest sys.path bootstrap.
 [group('dev')]
 test-tools:
-    cd tools/semantic_scholar && uv run --python 3.11 --with pytest --with pytest-asyncio --with asyncpg --with httpx pytest tests/ -v
+    cd tools/semantic_scholar && uv sync --group dev --python 3.11 && uv run --python 3.11 pytest tests/ --ignore=tests/integration -v
 
 # Run integration tests for the save_papers workflow against a real
 # Postgres. Requires CENTAUR_TEST_DATABASE_URL to point at a centaur DB
@@ -181,14 +182,14 @@ test-tools:
 # contract now lives with its tool method — see `test-tools-integration`.
 [group('dev')]
 test-workflows-integration:
-    cd workflows && uv run --python 3.11 --with pytest --with pytest-asyncio --with asyncpg pytest tests/integration/ -v
+    cd workflows && uv sync --group dev --python 3.11 && uv run --python 3.11 pytest tests/integration/ -v
 
 # Run integration tests for the semantic_scholar tool methods (currently
 # `research_brief`) against a real Postgres. Same gate and skip semantics
 # as `test-workflows-integration` — set CENTAUR_TEST_DATABASE_URL to enable.
 [group('dev')]
 test-tools-integration:
-    cd tools/semantic_scholar && uv run --python 3.11 --with pytest --with pytest-asyncio --with asyncpg --with httpx pytest tests/integration/ -v
+    cd tools/semantic_scholar && uv sync --group dev --python 3.11 && uv run --python 3.11 pytest tests/integration/ -v
 
 # Smoke-test the CLI without spinning up a sandbox. Honors $SEMANTIC_SCHOLAR_API_KEY
 # from the root `.env` (auto-loaded above) but works without it (anonymous,

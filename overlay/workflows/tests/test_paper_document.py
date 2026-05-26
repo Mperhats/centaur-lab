@@ -4,18 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sys
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any
 
 import pytest
-
-# The workflows directory isn't a package (no __init__.py — it's a runtime
-# WORKFLOW_DIRS drop folder, not an importable Python package). Tests run
-# under it, so we stitch the parent on the path to import the module by file
-# name without changing the production layout.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from centaur_lab.paper_document import (
     _canonical_json,

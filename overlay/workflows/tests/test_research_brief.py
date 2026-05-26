@@ -15,14 +15,9 @@ the wrapper's three responsibilities:
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from typing import Any
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
 import research_brief
 
 from ._mocks import MockContext, MockPool
