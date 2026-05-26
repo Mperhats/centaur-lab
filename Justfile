@@ -286,7 +286,7 @@ bfts-platform-smoke:
     sandbox_id="bfts-platform-smoke-$(date +%s)"
     cleanup() {
       kubectl -n "$ns" delete sandbox.agents.x-k8s.io "$sandbox_id" \
-        --ignore-not-found --wait=true >/dev/null 2>&1 || true
+        --ignore-not-found --cascade=foreground --wait=true || true
     }
     trap cleanup EXIT
     cat <<YAML | kubectl -n "$ns" apply -f -
