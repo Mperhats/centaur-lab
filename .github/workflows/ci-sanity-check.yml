@@ -1,0 +1,12 @@
+name: CI Sanity Check
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  hello:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "If you can see this run, GitHub Actions is processing pushes to main."
