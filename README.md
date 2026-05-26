@@ -35,6 +35,19 @@ The repo follows the
 overlay layout. For background on the model itself, see
 [Using an overlay](https://centaur.run/extend/overlay).
 
+## Updating the SDK
+
+The `centaur_sdk` symlink resolves to whatever `.centaur` is pinned at,
+so syncing the SDK == bumping the submodule pin. Quickstart's
+`git submodule update --init --recursive` only checks out the pinned
+SHA. To advance the pin to upstream's latest:
+
+```bash
+git submodule update --remote .centaur
+uv run pytest tests/                       # confirm overlay still works
+git add .centaur && git commit -m "bump .centaur to <sha>"
+```
+
 ## License
 
 [Apache-2.0 OR MIT](LICENSE).
