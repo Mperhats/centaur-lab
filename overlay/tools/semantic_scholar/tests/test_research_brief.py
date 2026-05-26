@@ -47,8 +47,13 @@ def _install_search_papers(
     return calls
 
 
-class _MetricsRecorder:
-    """Captures ``observe_document_size`` + ``record_document_change`` calls."""
+class MetricsRecorder:
+    """Captures ``observe_document_size`` + ``record_document_change`` calls.
+
+    Matches the same-named helper in ``workflows/tests/test_save_papers.py``
+    so both test trees use a single naming convention for file-local test
+    doubles (no leading underscore — these aren't module API).
+    """
 
     def __init__(self) -> None:
         self.observe_calls: list[dict[str, Any]] = []
@@ -61,10 +66,10 @@ class _MetricsRecorder:
         self.change_calls.append((document, action))
 
 
-def _install_metrics(monkeypatch: pytest.MonkeyPatch) -> _MetricsRecorder:
+def _install_metrics(monkeypatch: pytest.MonkeyPatch) -> MetricsRecorder:
     import centaur_lab.brief as brief_module
 
-    recorder = _MetricsRecorder()
+    recorder = MetricsRecorder()
     monkeypatch.setattr(brief_module, "observe_document_size", recorder.observe, raising=True)
     monkeypatch.setattr(brief_module, "record_document_change", recorder.record, raising=True)
     return recorder
