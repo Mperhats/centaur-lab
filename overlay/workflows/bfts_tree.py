@@ -32,6 +32,7 @@ from _bfts_state import (
     insert_node,
     insert_run,
     list_nodes_for_run,
+    mark_buggy_plots,
     set_best_node,
     update_node_metric,
 )
@@ -203,6 +204,17 @@ async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
                     code=r["code"],
                 ),
             )
+            if "is_buggy_plots" in result:
+                await ctx.step(
+                    "mark_buggy_plots",
+                    lambda nid=node_id, r=result: mark_buggy_plots(
+                        pool,
+                        node_id=nid,
+                        is_buggy_plots=bool(r["is_buggy_plots"]),
+                        plot_analyses=r.get("plot_analyses"),
+                        vlm_feedback_summary=r.get("vlm_feedback_summary"),
+                    ),
+                )
         iters_used += 1
 
     final_nodes = await ctx.step(
