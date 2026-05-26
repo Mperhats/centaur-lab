@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  centaur-lab Cloudflare Tunnel launch agent.
+
+  We hand-roll this instead of using `cloudflared service install` because
+  cloudflared's built-in service install does not support locally-managed
+  tunnels cleanly: its generated plist has bare `cloudflared` in
+  ProgramArguments (no subcommand) and silently fails to read config.yml
+  unless it is at the default `~/.cloudflared/config.yml` path AND HOME is
+  set in the launchd environment (it usually is not).
+
+  This template uses absolute paths exclusively, so the daemon's launchd
+  environment is irrelevant. `just cloudflared::install-service` renders
+  __TUNNEL_BIN__, __CONFIG_PATH__, and __LOG_PATH__ before loading.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.local-labs.centaur-tunnel</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__TUNNEL_BIN__</string>
+    <string>tunnel</string>
+    <string>--config</string>
+    <string>__CONFIG_PATH__</string>
+    <string>run</string>
+    <string>centaur-dev</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>__LOG_PATH__</string>
+
+  <key>StandardErrorPath</key>
+  <string>__LOG_PATH__</string>
+</dict>
+</plist>

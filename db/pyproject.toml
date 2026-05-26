@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "centaur-db"
+version = "0.1.0"
+description = "Local-only helpers for poking at the centaur Postgres."
+requires-python = ">=3.11"
+dependencies = [
+  "jupyterlab>=4.2",
+  "pandas>=2.2",
+  "psycopg[binary]>=3.2",
+]
+
+[dependency-groups]
+dev = [
+  "nbstripout>=0.7",
+  "pyright>=1.1.380",
+  "ruff>=0.8",
+]
+
+[tool.hatch.build.targets.wheel]
+only-include = ["centaur_db.py"]
+
+[tool.uv]
+default-groups = ["dev"]
+
+# Mirrors overlay/tools/ruff.toml — the centaur lint contract.
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF", "TID", "T201"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"notebooks/**" = ["E731", "T201"]
+
+[tool.pyright]
+include = ["centaur_db.py"]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+venvPath = "."
+venv = ".venv"

@@ -1,0 +1,3 @@
+[submodule ".centaur"]
+	path = .centaur
+	url = https://github.com/paradigmxyz/centaur.git
