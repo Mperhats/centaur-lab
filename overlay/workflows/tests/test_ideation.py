@@ -379,3 +379,191 @@ async def test_handler_uses_step_names_for_durability(
     await ideation.handler(ideation.Input(topic="x"), ctx)
 
     assert ctx.step_calls == ["seed_search", "synthesize_idea"]
+
+
+# --- M1: critic_retries clamping ----------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_handler_clamps_critic_retries_to_max(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pathological caller passing ``critic_retries=1000`` must not
+    burn 1000 serial LLM calls; the handler clamps to ``_MAX_CRITIC_RETRIES``
+    and logs the clamp so an operator can see what happened."""
+    import ideation
+
+    _clear_bfts_env(monkeypatch)
+    # 1 synthesize + 5 critic rounds = 6 mocked responses.
+    stub_llm = _install_stub_llm(
+        monkeypatch, return_values=[_valid_idea()] * 6
+    )
+    ctx = _IdeationCtx()
+
+    await ideation.handler(
+        ideation.Input(topic="diffusion models", critic_retries=1000), ctx
+    )
+
+    validate_steps = [n for n in ctx.step_calls if n.startswith("validate_idea")]
+    assert len(validate_steps) == ideation._MAX_CRITIC_RETRIES == 5
+    assert stub_llm.await_count == 1 + 5
+
+    clamp_logs = [kw for ev, kw in ctx.logs if ev == "ideation_critic_retries_clamped"]
+    assert len(clamp_logs) == 1
+    assert clamp_logs[0] == {"requested": 1000, "applied": 5}
+
+
+@pytest.mark.asyncio
+async def test_handler_clamps_negative_critic_retries_to_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Negative ``critic_retries`` is nonsensical; treat as 0 (no critic
+    loop). Complement to the existing zero-default test."""
+    import ideation
+
+    _clear_bfts_env(monkeypatch)
+    stub_llm = _install_stub_llm(monkeypatch)
+    ctx = _IdeationCtx()
+
+    await ideation.handler(
+        ideation.Input(topic="x", critic_retries=-5), ctx
+    )
+
+    assert not any(name.startswith("validate_idea") for name in ctx.step_calls)
+    assert stub_llm.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_handler_does_not_log_clamp_when_value_in_bounds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No clamp-log noise for callers in-bounds — only fires when the
+    handler actually mutated the value."""
+    import ideation
+
+    _clear_bfts_env(monkeypatch)
+    # 1 synthesize + 3 critic rounds = 4 mocked responses.
+    _install_stub_llm(monkeypatch, return_values=[_valid_idea()] * 4)
+    ctx = _IdeationCtx()
+
+    await ideation.handler(
+        ideation.Input(topic="x", critic_retries=3), ctx
+    )
+
+    clamp_logs = [ev for ev, _kw in ctx.logs if ev == "ideation_critic_retries_clamped"]
+    assert clamp_logs == []
+
+
+# --- M2: idea-field validation ------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_handler_raises_when_llm_returns_partial_idea(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """JSON-Schema enforcement is best-effort across providers; the handler
+    must reject partial dicts post-call so ``bfts_root`` never sees a
+    malformed idea."""
+    import ideation
+
+    _clear_bfts_env(monkeypatch)
+    _install_stub_llm(monkeypatch, return_values=[{"Name": "X", "Title": "Y"}])
+    ctx = _IdeationCtx()
+
+    with pytest.raises(ValueError) as excinfo:
+        await ideation.handler(ideation.Input(topic="x"), ctx)
+
+    msg = str(excinfo.value)
+    assert "Short Hypothesis" in msg
+    assert "Experiments" in msg
+
+
+@pytest.mark.asyncio
+async def test_handler_raises_when_llm_returns_empty_required_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty strings are as useless as missing keys for downstream
+    consumers; reject both."""
+    import ideation
+
+    _clear_bfts_env(monkeypatch)
+    _install_stub_llm(
+        monkeypatch,
+        return_values=[
+            {
+                "Name": "X",
+                "Title": "Y",
+                "Short Hypothesis": "",
+                "Experiments": "Train on dataset.",
+            }
+        ],
+    )
+    ctx = _IdeationCtx()
+
+    with pytest.raises(ValueError) as excinfo:
+        await ideation.handler(ideation.Input(topic="x"), ctx)
+
+    assert "Short Hypothesis" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_handler_raises_when_critic_drops_required_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Critic round can mutate the idea and accidentally drop fields;
+    validate after each round, not just after synthesize."""
+    import ideation
+
+    _clear_bfts_env(monkeypatch)
+    partial = {"Name": "X", "Title": "Y"}
+    _install_stub_llm(monkeypatch, return_values=[_valid_idea(), partial])
+    ctx = _IdeationCtx()
+
+    with pytest.raises(ValueError) as excinfo:
+        await ideation.handler(
+            ideation.Input(topic="x", critic_retries=1), ctx
+        )
+
+    assert "Short Hypothesis" in str(excinfo.value)
+
+
+# --- M3: empty-seed-papers logging --------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_handler_logs_when_seed_search_returns_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An S2 outage or no-match query returns ``[]``; the workflow still
+    proceeds (the LLM can produce something less well-grounded) but a log
+    surfaces the silent-degradation case."""
+    import ideation
+
+    _clear_bfts_env(monkeypatch)
+    stub_llm = _install_stub_llm(monkeypatch)
+    ctx = _IdeationCtx(tools=_Tools(semantic_scholar=_SemanticScholarStub(return_value=[])))
+
+    await ideation.handler(ideation.Input(topic="obscure topic"), ctx)
+
+    no_seed = [kw for ev, kw in ctx.logs if ev == "ideation_no_seed_papers"]
+    assert len(no_seed) == 1
+    assert no_seed[0] == {"topic": "obscure topic"}
+    # Workflow continues to synthesize.
+    assert stub_llm.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_handler_does_not_log_no_seed_papers_when_seed_search_returns_papers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-empty seed search must not emit the degradation log."""
+    import ideation
+
+    _clear_bfts_env(monkeypatch)
+    _install_stub_llm(monkeypatch)
+    ctx = _IdeationCtx()
+
+    await ideation.handler(ideation.Input(topic="x"), ctx)
+
+    no_seed = [ev for ev, _kw in ctx.logs if ev == "ideation_no_seed_papers"]
+    assert no_seed == []

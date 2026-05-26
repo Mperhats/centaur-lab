@@ -49,6 +49,11 @@ _DEFAULT_SEED_PAPER_LIMIT = 10
 _IDEATION_TEMP = 1.0
 _CRITIC_TEMP = 0.5
 _SEED_ABSTRACT_CHARS = 600
+# Upper bound for ``Input.critic_retries`` so a misconfigured caller
+# (e.g. ``critic_retries=1000``) cannot burn budget on serial LLM calls.
+# Five rounds is well past the point of diminishing returns for the
+# Sakana-style refinement loop.
+_MAX_CRITIC_RETRIES = 5
 
 # Full Sakana ``FinalizeIdea`` schema. The plan only requires the first
 # four downstream; the rest are emitted so the ``_bfts_expand`` prompt
@@ -209,6 +214,31 @@ def _critique_prompt(*, topic: str, idea: dict[str, Any], round_index: int) -> s
     )
 
 
+# Subset of ``_REQUIRED_IDEA_FIELDS`` that downstream consumers
+# (``bfts_root``, ``_bfts_expand``) actually read; provider-side JSON
+# Schema enforcement is best-effort across OpenAI/Anthropic shapes, so
+# we re-check post-call to fail fast on partial dicts rather than let a
+# malformed idea poison a bfts_root run.
+_PLAN_REQUIRED_IDEA_FIELDS: tuple[str, ...] = (
+    "Name",
+    "Title",
+    "Short Hypothesis",
+    "Experiments",
+)
+
+
+def _validate_idea(idea: dict[str, Any]) -> None:
+    """Raise ``ValueError`` if ``idea`` is missing any plan-required field.
+
+    Treats empty strings as missing — an empty ``Short Hypothesis`` is as
+    useless to ``_bfts_expand`` as a missing key.
+    """
+    missing = [f for f in _PLAN_REQUIRED_IDEA_FIELDS if not idea.get(f)]
+    if missing:
+        msg = f"ideation LLM returned idea missing required fields: {missing}"
+        raise ValueError(msg)
+
+
 async def _synthesize(
     *,
     api_key: str,
@@ -284,6 +314,12 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         ),
     )
 
+    # Silent-degradation case: S2 outage or no-match query. The workflow
+    # still proceeds (the LLM can produce something less well-grounded),
+    # but a log surfaces it for operators inspecting low-quality runs.
+    if not papers:
+        ctx.log("ideation_no_seed_papers", topic=topic)
+
     idea = await ctx.step(
         "synthesize_idea",
         lambda: _synthesize(
@@ -293,12 +329,21 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             papers=papers,
         ),
     )
+    _validate_idea(idea)
 
     # Each retry needs a unique deterministic step name so workflow
     # replay maps cached step rows back to the right call. The
     # critic-retries=0 default skips this loop entirely (opt-in only).
-    retries = max(0, inp.critic_retries)
-    for round_index in range(retries):
+    # Upper-clamped to ``_MAX_CRITIC_RETRIES`` so a misconfigured caller
+    # cannot burn budget on serial LLM calls.
+    critic_retries = max(0, min(inp.critic_retries, _MAX_CRITIC_RETRIES))
+    if critic_retries != inp.critic_retries:
+        ctx.log(
+            "ideation_critic_retries_clamped",
+            requested=inp.critic_retries,
+            applied=critic_retries,
+        )
+    for round_index in range(critic_retries):
         idea = await ctx.step(
             f"validate_idea_{round_index}",
             lambda current=idea, i=round_index: _critique(
@@ -309,6 +354,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                 round_index=i,
             ),
         )
+        _validate_idea(idea)
 
     seed_paper_ids = _seed_paper_ids(papers)
 
@@ -317,6 +363,6 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         topic=topic,
         seed_papers=len(seed_paper_ids),
         draft_model=llm.draft_model,
-        critic_retries=retries,
+        critic_retries=critic_retries,
     )
     return {"idea": idea, "seed_papers": seed_paper_ids}
