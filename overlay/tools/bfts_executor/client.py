@@ -16,6 +16,7 @@ Construction:
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Protocol
 
 from models import ExecutionResult
@@ -49,6 +50,10 @@ class _SandboxAPI(Protocol):
     async def run_command(
         self, sandbox_id: str, command: str, *, timeout_s: float
     ) -> _PodExecResult: ...
+
+    async def list_dir(self, sandbox_id: str, path: str) -> list[str]: ...
+
+    async def read_file_bytes(self, sandbox_id: str, path: str) -> bytes: ...
 
 
 class BFTSExecutor:
@@ -119,3 +124,31 @@ class BFTSExecutor:
             exc_info=exc_info,
             exc_stack=None,
         )
+
+    async def collect_artifacts(
+        self,
+        sandbox_id: str,
+        dest_dir: "Path",
+        node_id: str,
+    ) -> list[str]:
+        """Copy working/*.npy + working/*.png out of the sandbox to dest_dir.
+
+        Returns the list of collected basenames (sorted). Mirrors Sakana's
+        per-node artifact directory layout (research 02 §Workspace layout):
+        ``logs/<exp>/experiment_results/experiment_<node_id>_proc_<pid>/``.
+
+        We drop the ``_proc_<pid>`` suffix because in Centaur the PID is
+        meaningless (the workflow is the durable identity).
+        """
+        api = self._require_api()
+        entries = await api.list_dir(sandbox_id, WORKING_DIR)
+        keep = [e for e in entries if e.endswith(".npy") or e.endswith(".png")]
+        node_dir = dest_dir / f"experiment_{node_id}"
+        node_dir.mkdir(parents=True, exist_ok=True)
+        collected: list[str] = []
+        for full in keep:
+            basename = full.rsplit("/", 1)[-1]
+            content = await api.read_file_bytes(sandbox_id, full)
+            (node_dir / basename).write_bytes(content)
+            collected.append(basename)
+        return sorted(collected)
