@@ -8,11 +8,6 @@ so `tools/`, `workflows/`, `.agents/skills/`, `services/`, the root
 `Dockerfile`, root `pyproject.toml`, and root `tests/` are packaged
 directly into the overlay image (or used to verify it locally).
 
-The full design rationale lives in
-[`docs/superpowers/specs/2026-05-25-centaur-lab-mvp-design.md`](docs/superpowers/specs/2026-05-25-centaur-lab-mvp-design.md).
-ACME-mirror reorganization plan:
-[`docs/superpowers/plans/2026-05-26-acme-mirror-reorg.md`](docs/superpowers/plans/2026-05-26-acme-mirror-reorg.md).
-
 ## What this repo contains
 
 | Path | Purpose |
@@ -28,8 +23,8 @@ ACME-mirror reorganization plan:
 | `.centaur/` | Git submodule pinned at a specific `paradigmxyz/centaur` SHA. Source of truth for the base platform **and** the `centaur-sdk` package. |
 | `.scientist/` | Git submodule pinning [Sakana AI-Scientist-v2](https://github.com/SakanaAI/AI-Scientist-v2) for research-flow experiments. |
 | `cloudflared/` | Cloudflare Tunnel routing, launchd agent template, and per-machine setup README. Has its own standalone `Justfile` (`cd cloudflared && just install-service`). |
-| `docs/superpowers/` | Design specs + implementation plans. |
 | `docs/TODO.md` | Actionable backlog. |
+| `docs/overlay-db-migrations.md` | Decision tree + dbmate workflow for overlay-owned migrations. |
 | `.env.example` | Template for the shell env vars the cluster bootstrap script reads. |
 | `tmp/` | Local-only scratch (gitignored, also `.dockerignore`d). The pre-reorg per-tool/workflow test suites currently live at `tmp/tests-old/` for reference while we re-author them under `tests/`. |
 

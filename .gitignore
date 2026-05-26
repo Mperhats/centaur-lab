@@ -38,9 +38,6 @@ cloudflared/cert.pem
 # overlay image — also excluded by .dockerignore.
 /tmp/
 
-# Local overlay tag written by `just build` (consumed by `just deploy`)
-.tag
-
 # Editor / OS
 .idea/
 .vscode/

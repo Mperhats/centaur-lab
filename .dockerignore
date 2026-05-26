@@ -58,9 +58,6 @@ values*.yaml
 tests
 tmp
 
-# Local overlay-image tag sentinel written by `just build` (gitignored)
-.tag
-
 # Environment (secrets — never bake into images)
 **/.env
 **/.env.*
