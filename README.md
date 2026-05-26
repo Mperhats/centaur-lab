@@ -10,7 +10,7 @@
 ## Quickstart
 
 ```bash
-git clone --recursive https://github.com/<owner>/centaur-lab && cd centaur-lab
+git submodule update --init --recursive
 uv sync && uv run pytest tests/
 docker build -t centaur-overlay:dev .
 ```
