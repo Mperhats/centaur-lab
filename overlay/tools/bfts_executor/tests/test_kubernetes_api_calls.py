@@ -59,6 +59,9 @@ async def test_run_command_aggregates_stdout_and_returns_exit_zero() -> None:
     api = _KubernetesSandboxAPI(
         ws_core_api=ws_core,
         ws_api_client=ws_api,
+        core_api=MagicMock(),
+        custom_api=MagicMock(),
+        networking_api=MagicMock(),
         namespace="centaur-system",
     )
     res = await api.run_command("sbx-1", "echo hello", timeout_s=10.0)
@@ -85,6 +88,9 @@ async def test_run_command_captures_stderr_channel() -> None:
     api = _KubernetesSandboxAPI(
         ws_core_api=ws_core,
         ws_api_client=ws_api,
+        core_api=MagicMock(),
+        custom_api=MagicMock(),
+        networking_api=MagicMock(),
         namespace="centaur-system",
     )
     res = await api.run_command("sbx-1", "false", timeout_s=10.0)
@@ -110,6 +116,9 @@ async def test_run_command_extracts_exit_code_from_error_channel() -> None:
     api = _KubernetesSandboxAPI(
         ws_core_api=ws_core,
         ws_api_client=ws_api,
+        core_api=MagicMock(),
+        custom_api=MagicMock(),
+        networking_api=MagicMock(),
         namespace="centaur-system",
     )
     res = await api.run_command("sbx-1", "exit 42", timeout_s=10.0)

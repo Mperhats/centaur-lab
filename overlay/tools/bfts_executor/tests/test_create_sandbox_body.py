@@ -28,6 +28,9 @@ async def test_create_sandbox_emits_expected_body() -> None:
     api = _KubernetesSandboxAPI(
         custom_api=custom_api,
         networking_api=networking_api,
+        core_api=MagicMock(),
+        ws_core_api=MagicMock(),
+        ws_api_client=MagicMock(),
         namespace="centaur-system",
     )
     await api.create_sandbox(
@@ -84,6 +87,9 @@ async def test_create_sandbox_passes_storage_class_when_given() -> None:
     api = _KubernetesSandboxAPI(
         custom_api=custom_api,
         networking_api=networking_api,
+        core_api=MagicMock(),
+        ws_core_api=MagicMock(),
+        ws_api_client=MagicMock(),
         namespace="centaur-system",
     )
     await api.create_sandbox(

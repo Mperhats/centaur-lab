@@ -50,10 +50,22 @@ _DEFAULT_EXECUTOR_IMAGE = "bfts-executor:latest"
 _DEFAULT_STORAGE_SIZE = "10Gi"
 _WORKSPACE_MOUNT_PATH = "/workspace"
 _WORKSPACE_VOLUME_NAME = "workspace"
+_CONTAINER_NAME = "sandbox"
+"""Container name inside the Sandbox CRD's podTemplate. Bound to the
+single-container default — if a future user adds a sidecar, exec calls
+must explicitly select the executor container."""
 
 
-def _parse_ws_frame(data: bytes | str) -> tuple[int, str]:
-    # Lifted verbatim from .centaur/services/api/api/sandbox/kubernetes.py:393-396.
+def _parse_ws_frame(data: bytes | str) -> tuple[int, str] | None:
+    """Channel-prefixed WS frame parse. None on empty payload.
+
+    Lifted from .centaur/services/api/api/sandbox/kubernetes.py:393-396 and
+    hardened: kubernetes_asyncio occasionally yields zero-length BINARY
+    frames during channel setup/teardown — indexing ``data[0]`` on those
+    raises IndexError and aborts the exec loop mid-flight.
+    """
+    if not data:
+        return None
     if isinstance(data, bytes):
         return data[0], data[1:].decode("utf-8", errors="replace")
     return ord(data[0]), data[1:]
@@ -269,15 +281,20 @@ class _KubernetesSandboxAPI:
         self.namespace = namespace or os.getenv("KUBERNETES_NAMESPACE", "centaur-system")
 
     async def _ensure_clients(self) -> None:
-        if (
-            self.core_api is not None
-            and self.custom_api is not None
-            and self.networking_api is not None
-            and self.ws_core_api is not None
-            and self.ws_api_client is not None
-        ):
+        # Per-attribute lazy init: only load kubeconfig + construct a real
+        # ApiClient if any client is still unset. Lets tests inject just
+        # the surfaces they need (custom_api+networking_api for body
+        # tests; ws_core_api+ws_api_client for exec tests) without going
+        # through cluster auth.
+        needs_real = (
+            self.core_api is None
+            or self.custom_api is None
+            or self.networking_api is None
+            or self.ws_core_api is None
+            or self.ws_api_client is None
+        )
+        if not needs_real:
             return
-        # Lazy import so the module is testable without a kube_config.
         from kubernetes_asyncio import client, config
         from kubernetes_asyncio.config.config_exception import ConfigException
         from kubernetes_asyncio.stream import WsApiClient
@@ -357,7 +374,7 @@ class _KubernetesSandboxAPI:
                     "spec": {
                         "containers": [
                             {
-                                "name": "sandbox",
+                                "name": _CONTAINER_NAME,
                                 "image": image,
                                 "imagePullPolicy": "IfNotPresent",
                                 "command": ["sleep", "infinity"],
@@ -478,7 +495,7 @@ class _KubernetesSandboxAPI:
             sandbox_id,
             self.namespace,
             command=["/bin/sh", "-c", command],
-            container="sandbox",
+            container=_CONTAINER_NAME,
             stderr=True,
             stdin=False,
             stdout=True,
@@ -495,7 +512,10 @@ class _KubernetesSandboxAPI:
                     break
                 if msg.type not in {WSMsgType.BINARY, WSMsgType.TEXT}:
                     continue
-                channel, payload = _parse_ws_frame(msg.data)
+                parsed = _parse_ws_frame(msg.data)
+                if parsed is None:
+                    continue
+                channel, payload = parsed
                 if channel == STDOUT_CHANNEL:
                     stdout_parts.append(payload)
                 elif channel == STDERR_CHANNEL:
@@ -514,11 +534,17 @@ class _KubernetesSandboxAPI:
         )
 
     async def write_file(self, sandbox_id: str, path: str, content: str) -> None:
-        # Heredoc-stream the file via /bin/sh. UTF-8 text only (BFTS code).
-        encoded = content.replace("'", "'\\''")
+        """Write `content` to `path` inside the sandbox via a quoted heredoc.
+
+        Quoted heredocs (``<< '__BFTS_EOF__'``) are literal: no parameter
+        expansion, no command substitution, no quote processing — so we pass
+        ``content`` verbatim. The terminator is fixed; collisions with a line
+        matching the sentinel inside generated code are accepted (extremely
+        unlikely; tighten to an entropy-suffixed sentinel if it ever fires).
+        """
         cmd = (
             f"mkdir -p $(dirname '{path}') && cat > '{path}' << '__BFTS_EOF__'\n"
-            f"{encoded}\n__BFTS_EOF__"
+            f"{content}\n__BFTS_EOF__"
         )
         await self.run_command(sandbox_id, cmd, timeout_s=30.0)
 

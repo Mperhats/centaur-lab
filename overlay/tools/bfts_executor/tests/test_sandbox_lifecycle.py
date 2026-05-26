@@ -31,6 +31,9 @@ def _mk_api() -> tuple[_KubernetesSandboxAPI, MagicMock]:
     api = _KubernetesSandboxAPI(
         custom_api=custom,
         core_api=core,
+        networking_api=MagicMock(),
+        ws_core_api=MagicMock(),
+        ws_api_client=MagicMock(),
         namespace="centaur-system",
     )
     return api, custom
