@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from _bfts_state import update_node_metric
 
-from ._fakes import FakePool
+from ._mocks import MockPool as FakePool
 
 
 @pytest.mark.asyncio

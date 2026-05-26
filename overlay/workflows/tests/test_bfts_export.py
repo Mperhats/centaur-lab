@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from _bfts_export import select_best, write_best_node_id_artifact
 
-from ._fakes import FakePool
+from ._mocks import MockPool as FakePool
 
 
 def _node(node_id: str, is_buggy: bool, is_buggy_plots: bool | None, final_value: float) -> dict:
