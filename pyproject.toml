@@ -1,0 +1,85 @@
+[project]
+name = "centaur-scientist-overlay"
+version = "0.1.0"
+description = "centaur-scientist organization overlay for Centaur (BFTS / AI-Scientist-v2 driver workflows, execution sandbox tooling, and academic-research helpers)"
+requires-python = ">=3.11"
+license = "Apache-2.0 OR MIT"
+
+# Single source of truth for every dep used by ``tools/`` and
+# ``workflows/``. Per-tool ``pyproject.toml`` files have been removed —
+# matching the centaur-acme example layout — so this list is what
+# ``uv sync`` installs into the root ``.venv`` and what CI verifies.
+#
+# NOTE: dropping per-tool pyprojects also drops the ``[tool.centaur]``
+# blocks the upstream API pod's ``tool_manager`` reads at startup
+# (see ``.centaur/services/api/api/tool_manager.py:1574-1683``). The
+# overlay as packaged today therefore registers zero tools at deploy
+# time — known regression to be resolved before the first cluster
+# publish (either by restoring a minimal pyproject per tool or by
+# landing root-aggregated tool discovery upstream). ``bfts_vlm`` will
+# specifically need its ``optional_secrets`` block back so the
+# iron-proxy Anthropic / OpenAI binding still works.
+#
+# ``centaur_sdk`` is intentionally not listed here: upstream's
+# ``centaur_sdk/pyproject.toml`` declares ``packages = ["."]`` which
+# flattens module files into the wheel root, so a normal ``pip install``
+# / ``uv add`` does not expose ``from centaur_sdk import …``. Instead we
+# expose the SDK via a ``centaur_sdk`` → ``.centaur/centaur_sdk``
+# symlink at the repo root, which lets every Python tool that already
+# has the repo root on ``sys.path`` (pytest, ``uv run python -m …``,
+# IDEs, mypy / pyright) resolve the package directly. Bumping the
+# ``.centaur`` submodule pin updates the SDK in lockstep with the API.
+dependencies = [
+    "aiohttp>=3.9.0",
+    "asyncpg>=0.30.0",
+    "dataclasses-json>=0.6.0",
+    "httpx>=0.27.0",
+    "kubernetes-asyncio>=29.0.0",
+    "python-dotenv>=1.0.0",
+    "rich>=13.0.0",
+    "typer>=0.12.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.6.0",
+]
+
+# This repo is a Docker image build context, not a publishable Python
+# distribution — tell uv not to build the overlay itself.
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+# ``tests`` is the ACME-style root smoke suite; ``tools`` and
+# ``workflows`` pick up every per-tool / per-workflow test file that
+# lives next to the code under test. A single ``uv run pytest`` from
+# the repo root walks all three.
+testpaths = ["tests", "tools", "workflows"]
+# Repo root on the path so ``from tools.bfts_executor.client import …``
+# and ``from workflows.bfts_tree import …`` resolve as namespace
+# packages — byte-identical to how the API pod sets up TOOL_DIRS /
+# WORKFLOW_DIRS at startup. ``centaur_sdk`` resolves through the symlink
+# at the repo root (see the ``dependencies`` comment above), so we don't
+# need ``.centaur`` on the path here anymore.
+pythonpath = ["."]
+asyncio_mode = "strict"
+# ``importlib`` is required because we have multiple sibling
+# ``tests/`` packages (one each under ``workflows/`` and
+# ``tools/<name>/``) without ``workflows/__init__.py`` or
+# ``tools/__init__.py`` — those stay as implicit namespace packages
+# so the API pod's runtime ``importlib.import_module("tools.<n>.client")``
+# discovery works without us hard-pinning the package roots here.
+# Pytest's default ``prepend`` import mode would collide the leaf
+# ``tests`` package names across siblings; ``importlib`` mode imports
+# each test file under its unique rootdir-relative module path
+# (e.g. ``workflows.tests.test_bfts_config``,
+# ``tools.bfts_executor.tests.test_collect_artifacts``).
+addopts = "--import-mode=importlib"
+
+# ruff config lives in ./ruff.toml so it can also be used by per-tool
+# `uvx ruff check .` invocations from inside `tools/<name>/` — keeping
+# a duplicate `[tool.ruff]` block here would silently win over ruff.toml
+# in unrelated subdirs.

@@ -4,11 +4,29 @@ on:
   push:
     branches: [main]
     paths:
-      - overlay/**
+      - tools/**
+      - workflows/**
+      - .agents/**
+      - services/**
+      - tests/**
+      - centaur_lab/**
+      - Dockerfile
+      - .dockerignore
+      - pyproject.toml
+      - uv.lock
       - .github/workflows/overlay.yml
   pull_request:
     paths:
-      - overlay/**
+      - tools/**
+      - workflows/**
+      - .agents/**
+      - services/**
+      - tests/**
+      - centaur_lab/**
+      - Dockerfile
+      - .dockerignore
+      - pyproject.toml
+      - uv.lock
       - .github/workflows/overlay.yml
   workflow_dispatch:
 
@@ -43,29 +61,14 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Lint tools
-        working-directory: overlay/tools
-        run: uvx ruff check .
+      - name: Install dev deps + aggregated runtime deps
+        run: uv sync --python 3.11
 
-      - name: Lint workflows
-        working-directory: overlay/workflows
-        run: uvx ruff check .
+      - name: Lint
+        run: uv run --python 3.11 ruff check .
 
-      - name: Install semantic_scholar test deps
-        working-directory: overlay/tools/semantic_scholar
-        run: uv sync --group dev --python 3.11
-
-      - name: Test semantic_scholar tool
-        working-directory: overlay/tools/semantic_scholar
-        run: uv run --python 3.11 pytest tests/ --ignore=tests/integration -v
-
-      - name: Install workflows test deps
-        working-directory: overlay/workflows
-        run: uv sync --group dev --python 3.11
-
-      - name: Test workflows
-        working-directory: overlay/workflows
-        run: uv run --python 3.11 pytest tests/ --ignore=tests/integration -v
+      - name: Test
+        run: uv run --python 3.11 pytest --ignore=workflows/tests/integration --ignore=tools/semantic_scholar/tests/integration -v
 
   publish:
     name: Build and push overlay image
@@ -76,6 +79,10 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
+
+      - uses: docker/setup-qemu-action@49b3bc8e6bdd4a60e6116a5414239cba5943d3cf # v3
+        with:
+          platforms: arm64
 
       - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
 
@@ -101,7 +108,12 @@ jobs:
 
       - uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7
         with:
-          context: overlay
+          context: .
+          # Build both arches so Docker Desktop on Apple Silicon can pull from
+          # GHCR directly (single-arch amd64 would force `--platform linux/amd64`
+          # + Rosetta on M-series Macs). buildx fans out via QEMU emulation;
+          # the overlay image is small enough that arm64 emulation stays fast.
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
