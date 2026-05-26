@@ -57,6 +57,14 @@ def _env_flag_enabled(name: str) -> bool:
     return str(os.getenv(name, "")).strip().lower() in ("1", "true", "yes")
 
 
+# NOTE: ``enabled`` only gates the scheduler's cron tick. Manual POSTs
+# (e.g. the planned ``bfts-trigger-reflection`` Justfile target) always
+# run ``handler`` regardless of ``BFTS_REFLECTION_ENABLED``, so an
+# operator can dry-fire reflection without flipping Helm. Compare
+# ``slack_sync.py:326``, which re-checks the env flag inside
+# ``handler()`` for stricter gating — we deliberately omit that
+# defense-in-depth check here because manual triggering is a feature,
+# not a misuse.
 SCHEDULE = {
     "cron": "0 3 * * *",
     "timezone": "UTC",
@@ -81,12 +89,16 @@ class Input:
 async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
     pool = ctx._pool
 
+    # v1 heuristic only inspects ``best_node_id`` (truthy ⇒ "good run").
+    # The plan's wider SELECT was forward-looking; pulling
+    # ``idea_json`` / ``config_json`` here costs KB-MB per row and adds
+    # nothing the heuristic uses. Expand at the call site when a v2
+    # rule actually reads more columns.
     recent = await ctx.step(
         "load_recent_runs",
         lambda: pool.fetch(
             """
-            SELECT run_id, idea_json, config_json, best_node_id, status,
-                   created_at, updated_at
+            SELECT best_node_id
             FROM bfts_runs
             WHERE status = 'completed'
             ORDER BY updated_at DESC

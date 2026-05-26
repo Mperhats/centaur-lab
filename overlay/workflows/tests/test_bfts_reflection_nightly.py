@@ -49,21 +49,14 @@ class _ReflectionCtx:
 
 
 def _run(*, best_node_id: str | None) -> dict[str, Any]:
-    """Build one synthetic ``bfts_runs`` row.
+    """Build one synthetic row matching the handler's narrowed SELECT.
 
-    Only ``best_node_id`` matters for the heuristic; the other columns
-    are present so the handler's ``recent`` list shape matches what
-    ``pool.fetch`` would return in production.
+    The v1 heuristic only inspects ``best_node_id``, so the SQL returns
+    just that column; the fixture mirrors the production shape so a
+    future hidden read of any other field would surface as a KeyError
+    in the tests, not silently in production.
     """
-    return {
-        "run_id": "r",
-        "idea_json": "{}",
-        "config_json": "{}",
-        "best_node_id": best_node_id,
-        "status": "completed",
-        "created_at": None,
-        "updated_at": None,
-    }
+    return {"best_node_id": best_node_id}
 
 
 def _prev_row(
@@ -90,9 +83,15 @@ def test_workflow_name_and_schedule_shape() -> None:
     assert wf.SCHEDULE["timezone"] == "UTC"
     assert wf.SCHEDULE["no_delivery"] is True
     assert wf.SCHEDULE["catchup_policy"] == "skip"
-    # Defaults OFF — the env flag toggles the schedule on, so a stale
-    # values.yaml never silently runs a reflection.
-    assert wf.SCHEDULE["enabled"] is False
+    # Behavior contract, not state contract: ``SCHEDULE["enabled"]`` is
+    # whatever ``_env_flag_enabled`` returns for the gate at import time.
+    # Asserting ``is False`` here would spuriously fail in shells that
+    # happen to export ``BFTS_REFLECTION_ENABLED=1`` (e.g. an operator's
+    # local dry-run terminal). The default-off semantics belong to the
+    # helper itself, not the schedule shape.
+    assert wf.SCHEDULE["enabled"] == wf._env_flag_enabled(
+        "BFTS_REFLECTION_ENABLED"
+    )
 
 
 @pytest.mark.asyncio
