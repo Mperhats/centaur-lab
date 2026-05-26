@@ -13,7 +13,7 @@ slackbot:
 # to main as ghcr.io/mperhats/centaur-lab/centaur-overlay:sha-<7char>. The
 # root `just deploy` recipe resolves the tag automatically:
 #   1. $OVERLAY_TAG (explicit pin)
-#   2. overlay/.tag           (local Docker Desktop build via `just overlay::build`)
+#   2. .tag                   (local Docker Desktop build via `just build`)
 #   3. sha-<short origin/main> (default, pulled from GHCR)
 # In mode 2 the deploy recipe also overrides repository back to bare
 # `centaur-overlay` so the image lookup hits the local Docker daemon.

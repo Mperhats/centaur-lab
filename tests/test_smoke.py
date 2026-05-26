@@ -1,0 +1,32 @@
+"""Smoke test that the overlay packages import.
+
+Tests are migrated from ``tests-old/`` one at a time. This file is the
+ACME-style entrypoint: keep it small, don't grow it past a few minutes
+of runtime, and let new test files land alongside it as we re-author
+each suite from ``tests-old/``.
+"""
+
+from __future__ import annotations
+
+import workflows
+from tools import pdf, semantic_scholar
+
+
+def test_overlay_root_imports() -> None:
+    assert pdf is not None
+    assert semantic_scholar is not None
+    assert workflows is not None
+
+
+def test_workflow_modules_import() -> None:
+    from workflows import (
+        archive_papers,
+        research_brief,
+        save_papers,
+        search_and_archive_papers,
+    )
+
+    assert all(
+        hasattr(mod, "WORKFLOW_NAME")
+        for mod in (archive_papers, research_brief, save_papers, search_and_archive_papers)
+    )

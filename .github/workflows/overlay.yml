@@ -4,11 +4,27 @@ on:
   push:
     branches: [main]
     paths:
-      - overlay/**
+      - tools/**
+      - workflows/**
+      - .agents/**
+      - services/**
+      - tests/**
+      - Dockerfile
+      - .dockerignore
+      - pyproject.toml
+      - uv.lock
       - .github/workflows/overlay.yml
   pull_request:
     paths:
-      - overlay/**
+      - tools/**
+      - workflows/**
+      - .agents/**
+      - services/**
+      - tests/**
+      - Dockerfile
+      - .dockerignore
+      - pyproject.toml
+      - uv.lock
       - .github/workflows/overlay.yml
   workflow_dispatch:
 
@@ -43,29 +59,14 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Lint tools
-        working-directory: overlay/tools
-        run: uvx ruff check .
+      - name: Install dev deps + aggregated runtime deps
+        run: uv sync --python 3.11
 
-      - name: Lint workflows
-        working-directory: overlay/workflows
-        run: uvx ruff check .
+      - name: Lint
+        run: uv run --python 3.11 ruff check .
 
-      - name: Install semantic_scholar test deps
-        working-directory: overlay/tools/semantic_scholar
-        run: uv sync --group dev --python 3.11
-
-      - name: Test semantic_scholar tool
-        working-directory: overlay/tools/semantic_scholar
-        run: uv run --python 3.11 pytest tests/ --ignore=tests/integration -v
-
-      - name: Install workflows test deps
-        working-directory: overlay/workflows
-        run: uv sync --group dev --python 3.11
-
-      - name: Test workflows
-        working-directory: overlay/workflows
-        run: uv run --python 3.11 pytest tests/ --ignore=tests/integration -v
+      - name: Test
+        run: uv run --python 3.11 pytest tests/ -v
 
   publish:
     name: Build and push overlay image
@@ -105,7 +106,7 @@ jobs:
 
       - uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7
         with:
-          context: overlay
+          context: .
           # Build both arches so Docker Desktop on Apple Silicon can pull from
           # GHCR directly (single-arch amd64 would force `--platform linux/amd64`
           # + Rosetta on M-series Macs). buildx fans out via QEMU emulation;

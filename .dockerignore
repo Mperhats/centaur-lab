@@ -1,0 +1,81 @@
+# Source of truth for what the overlay image does NOT ship.
+#
+# The Dockerfile is a single ``COPY . /overlay`` (matching upstream's
+# canonical pattern in .centaur/docs/public/md/extend/overlay.md:80-84),
+# so anything we want to keep out of the runtime payload must be
+# excluded here.
+#
+# Build context is the repo root (post-ACME-mirror reorg). Everything that
+# is NOT an overlay extension point (tools/, workflows/, .agents/, services/)
+# must be excluded explicitly.
+
+# Version control
+.git
+.gitmodules
+.gitattributes
+.github
+
+# Submodules — vendored upstream source trees, never shipped in the image
+.centaur
+.scientist
+
+# Dev/ops directories at the repo root that aren't part of the overlay
+db
+cloudflared
+docs
+clusters
+infra
+.cursor
+.scientist
+.worktrees
+
+# Helm values + GitOps configs (consumed at deploy time, not runtime)
+values.local.yaml
+values.org.yaml
+
+# Virtual environments
+**/.venv
+
+# Caches
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+**/*.pyc
+
+# Lock files (each tool's pyproject.toml is the resolution source;
+# upstream installs deps at API discovery time, so lockfiles add weight
+# without affecting runtime behavior)
+**/*.lock
+
+# Docker
+.dockerignore
+
+# Tests (root pytest suite + legacy per-tool/workflow trees never run
+# inside the API or sandbox pods)
+tests
+tests-old
+
+# Local overlay-image tag sentinel written by `just build` (gitignored)
+.tag
+
+# Environment (secrets — never bake into images)
+**/.env
+**/.env.*
+
+# Non-runtime markdown.
+#
+# Most ``*.md`` files are README-style developer docs that don't belong
+# in the image, but a few are runtime payload that the API/sandbox
+# explicitly reads at request time. Allow-list those:
+#
+#   - ``.agents/skills/**`` — every skill is a ``SKILL.md`` plus its
+#     reference docs; the sandbox loads them when the agent invokes a
+#     skill.
+#   - ``services/**/SYSTEM_PROMPT.md`` — overlay prompt overlays live
+#     next to the upstream service they extend (see
+#     .centaur/docs/public/md/extend/overlay.md:32-34). Scoped to the
+#     exact filename so other developer-doc ``*.md`` files under
+#     ``services/`` (READMEs, runbooks) stay out of the runtime image.
+*.md
+!.agents/skills/**
+!services/**/SYSTEM_PROMPT.md

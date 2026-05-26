@@ -1,28 +1,48 @@
 # centaur-lab
 
 Local-first onboarding for [Centaur](https://github.com/paradigmxyz/centaur),
-the production control plane for shared AI agents. The goal is a Claude Code
-agent that replies with `PONG` through Centaur's durable agent API, on your
-laptop, reachable from a real Slack workspace via a Cloudflare Tunnel.
+the production control plane for shared AI agents. The repo doubles as
+the **organization overlay** — its surface mirrors
+[`paradigmxyz/centaur-acme`](https://github.com/paradigmxyz/centaur-acme),
+so `tools/`, `workflows/`, `.agents/skills/`, `services/`, the root
+`Dockerfile`, root `pyproject.toml`, and root `tests/` are packaged
+directly into the overlay image (or used to verify it locally).
 
 The full design rationale lives in
 [`docs/superpowers/specs/2026-05-25-centaur-lab-mvp-design.md`](docs/superpowers/specs/2026-05-25-centaur-lab-mvp-design.md).
-Deploy alignment plan: [`docs/superpowers/plans/2026-05-26-centaur-lab-deploy-alignment.md`](docs/superpowers/plans/2026-05-26-centaur-lab-deploy-alignment.md).
+ACME-mirror reorganization plan:
+[`docs/superpowers/plans/2026-05-26-acme-mirror-reorg.md`](docs/superpowers/plans/2026-05-26-acme-mirror-reorg.md).
 
 ## What this repo contains
 
 | Path | Purpose |
 |------|---------|
-| `.centaur/` | Git submodule pinned at a specific `paradigmxyz/centaur` SHA. The base platform. |
-| `overlay/` | Org-specific tools, **workflows**, skills, and a `Dockerfile` packaged into `centaur-overlay:sha-<git-short>` and mounted into the API + sandbox pods. See [Tools](#tools-in-overlay) and [Workflows](#workflows-in-overlay). |
+| `tools/` | Org-specific tool plugins discovered by the API at startup. See [Tools](#tools). |
+| `workflows/` | Durable, checkpoint-replayable workflow handlers. See [Workflows](#workflows). |
+| `.agents/skills/` | Sandbox-loaded agent skills (one `SKILL.md` per directory). |
+| `services/api/db/migrations/` | Overlay-side SQL migrations applied by the API on startup. |
+| `services/sandbox/SYSTEM_PROMPT.md` | Org-specific sandbox prompt overlay. |
+| `tests/` | Pytest suite at the repo root, ACME-style. New tests land here; legacy suites are staged in `tests-old/` for migration. |
+| `tests-old/` | Per-tool / per-workflow pytest suites pre-reorg. Migrating to `tests/` one-by-one as we re-author them in the new shape. |
+| `Dockerfile` + `.dockerignore` | Single-`COPY .` overlay image. The `.dockerignore` is the source of truth for what does **not** ship. |
+| `pyproject.toml` + `uv.lock` | Single-root uv project: aggregated dev/test deps and a single `.venv` at the repo root. Per-tool `pyproject.toml` files are still authoritative for runtime dep resolution inside the API pod. |
 | `values.org.yaml` | Org chart overlay: harness, Slackbot, Slack ETL, overlay repo name, repoCache. |
 | `values.local.yaml` | Laptop-only overrides: image pull policies, warm pool off, Docker Desktop paths. |
-| `infra/` | Prod GitOps skeleton (Argo CD + pinned image tags). Not used locally — see [`infra/README.md`](infra/README.md). |
-| `Justfile` | Thin wrapper over `.centaur/Justfile`. Owns `up`, `deploy`, `reload`, and org overlay recipes. `just --list` shows everything grouped. |
-| `.env.example` | Template for the shell env vars `bootstrap-secrets` reads. |
-| `cloudflared/` | Cloudflare Tunnel routing, launchd agent template, and per-machine setup README. Tunnel auto-starts via `just cloudflared::install-service`. |
-| `docs/TODO.md` | Actionable backlog (infra fixes, deletion notes). |
-| `docs/superpowers/` | Design spec + deploy alignment plan. |
+| `clusters/centaur-lab/` | Prod GitOps skeleton (Argo CD + pinned image tags), shaped to match [`paradigmxyz/centaur-acme-infra`](https://github.com/paradigmxyz/centaur-acme-infra). Cluster lifecycle and deploy orchestration ultimately live here, not in the overlay repo. |
+| `.centaur/` | Git submodule pinned at a specific `paradigmxyz/centaur` SHA. The base platform. |
+| `.scientist/` | Git submodule pinning [Sakana AI-Scientist-v2](https://github.com/SakanaAI/AI-Scientist-v2) for research-flow experiments. |
+| `db/` | Local helpers for poking at the centaur Postgres (`centaur_db.py`, notebooks). Cluster-only — not packaged into the overlay image. |
+| `cloudflared/` | Cloudflare Tunnel routing, launchd agent template, and per-machine setup README. Has its own standalone `Justfile` (`cd cloudflared && just install-service`). |
+| `docs/superpowers/` | Design specs + implementation plans. |
+| `docs/TODO.md` | Actionable backlog. |
+| `.env.example` | Template for the shell env vars the cluster bootstrap script reads. |
+
+The overlay image build context is the entire repo. `.dockerignore`
+excludes everything that isn't an overlay extension point — submodules,
+`db/`, `cloudflared/`, `docs/`, `clusters/`, Helm values, lockfiles, the
+root `.venv/`, and README-style markdown — while allow-listing the
+runtime-loaded markdown under `.agents/skills/**` and
+`services/**/SYSTEM_PROMPT.md`.
 
 ## Prerequisites
 
@@ -31,7 +51,7 @@ Deploy alignment plan: [`docs/superpowers/plans/2026-05-26-centaur-lab-deploy-al
 - A local Kubernetes cluster reachable from `kubectl`. Docker Desktop with
   Kubernetes enabled is the simplest path; `kind`, `k3d`, and `minikube` also
   work — the upstream chart targets generic local k8s.
-- `brew install just kubectl helm jq` (or your distro's equivalents)
+- `brew install uv kubectl helm jq` (or your distro's equivalents)
 - An Anthropic API key (Claude Code is the default harness)
 
 ## Setup
@@ -44,10 +64,19 @@ Deploy alignment plan: [`docs/superpowers/plans/2026-05-26-centaur-lab-deploy-al
    git submodule update --init --recursive
    ```
 
-   If you forget the submodule init, `just up` will fail with a missing
-   `.centaur/Justfile` error.
+2. **Create the root `.venv`.**
 
-2. **Pull the chart's subchart tarballs.** The chart declares the 1Password
+   ```bash
+   uv sync
+   ```
+
+   Installs the aggregated runtime deps (every tool's runtime
+   requirements) plus the dev group (pytest, pytest-asyncio, ruff) into
+   `.venv/` at the repo root. From here, `uv run pytest tests/`,
+   `uv run ruff check .`, or `uv run python -m tools.semantic_scholar.cli ...`
+   all work without per-tool venvs.
+
+3. **Pull the chart's subchart tarballs.** The chart declares the 1Password
    Connect subchart even though we run in env-secret mode; Helm still
    requires it locally. One-time per checkout:
 
@@ -57,7 +86,7 @@ Deploy alignment plan: [`docs/superpowers/plans/2026-05-26-centaur-lab-deploy-al
    helm dependency build .centaur/contrib/chart
    ```
 
-3. **Create your local `.env`.**
+4. **Create your local `.env`.**
 
    ```bash
    cp .env.example .env
@@ -72,152 +101,131 @@ Deploy alignment plan: [`docs/superpowers/plans/2026-05-26-centaur-lab-deploy-al
    | `SLACK_BOT_TOKEN` | Yes (Slackbot is enabled) | Slack App -> OAuth & Permissions -> Bot User OAuth Token |
    | `SLACK_SIGNING_SECRET` | Yes (Slackbot is enabled) | Slack App -> Basic Information -> App Credentials |
    | `SLACK_ETL_TOKEN` | Yes (Slack ETL is enabled) | Slack user token with `conversations.*` + `users.list` scopes |
-   | `SEMANTIC_SCHOLAR_API_KEY` | Optional (boosts quota for the `semantic_scholar` overlay tool) | [Semantic Scholar API form](https://www.semanticscholar.org/product/api#api-key-form) |
+   | `SEMANTIC_SCHOLAR_API_KEY` | Optional (boosts quota for the `semantic_scholar` tool) | [Semantic Scholar API form](https://www.semanticscholar.org/product/api#api-key-form) |
    | `OP_SERVICE_ACCOUNT_TOKEN` / `OP_VAULT` / `SLACKBOT_API_KEY` | Yes (ceremonial) | `openssl rand -hex 32` each |
 
-   The upstream script generates `SANDBOX_SIGNING_KEY` and
-   `IRON_MANAGEMENT_API_KEY` itself and persists them across subsequent
-   `just up` runs, so you don't need to set them.
-
-   No `source .env` step: the Justfile sets `dotenv-load := true` (matching
-   upstream's `.centaur/Justfile`), so every recipe loads `.env` automatically.
-
-## Boot the stack
+## Build the overlay image locally
 
 ```bash
-just up
+docker build -t centaur-overlay:dev .
 ```
 
-This runs in order:
+Build context is the whole repo; `.dockerignore` keeps it small (~150 KB).
+Image content is `/overlay/{tools,workflows,.agents,services}` plus a few
+small static files. Inspect with:
 
-1. `bootstrap-secrets` — creates the `centaur-infra-env` Kubernetes Secret
-   in the `centaur-system` namespace from your shell env.
-2. `build` — builds the upstream `centaur-api`, `centaur-iron-proxy`, and
-   `centaur-agent` Docker images.
-3. `helm upgrade --install` — deploys the chart with
-   `.centaur/contrib/chart/values.dev.yaml` plus `values.org.yaml` and
-   `values.local.yaml`. Overlay tag is set from `overlay/.tag` (written by
-   `just overlay::build`) or `sha-<git-short>` as fallback.
+```bash
+docker run --rm centaur-overlay:dev sh -c 'ls /overlay && ls /overlay/tools /overlay/workflows /overlay/.agents/skills /overlay/services'
+```
+
+## Deploying to a local cluster
+
+> **Note:** The cluster-orchestration recipes (Helm install/uninstall,
+> kubectl rollout, sandbox cleanup, deployed-API smoke harness, the
+> `bootstrap-secrets` script that patches `centaur-infra-env`) used to
+> live in a root `Justfile`. They were removed to align this repo with
+> the [`paradigmxyz/centaur-acme`](https://github.com/paradigmxyz/centaur-acme)
+> overlay shape — cluster lifecycle ultimately lives in
+> [`clusters/centaur-lab/argocd/`](clusters/centaur-lab/) (Argo CD)
+> or in a sibling infra repo. The git history of `Justfile` on the
+> `chore/reorganize` branch is the canonical reference for any recipe
+> you want to bring back.
+
+For local laptop-cluster boot, the upstream submodule's `Justfile` covers
+most of what's needed:
+
+```bash
+cd .centaur
+just bootstrap-secrets        # creates centaur-infra-env from your shell env
+just build                    # builds the upstream Centaur images
+cd ..
+docker build -t centaur-overlay:dev .
+helm dependency update .centaur/contrib/chart
+helm upgrade --install centaur .centaur/contrib/chart \
+    --namespace centaur-system --create-namespace \
+    -f .centaur/contrib/chart/values.dev.yaml \
+    -f values.org.yaml \
+    -f values.local.yaml \
+    --set overlay.image.tag=dev \
+    --set overlay.image.repository=centaur-overlay
+```
 
 Verify the pods are healthy:
 
 ```bash
 kubectl get pods -n centaur-system
-# or, against the submodule's status recipe:
-cd .centaur && just status
 ```
 
 Expected: `centaur-centaur-api`, `centaur-iron-proxy`, `centaur-centaur-slackbot`,
 and Postgres pods are running.
 
-For Slack — and for any workflow webhook (GitHub, etc.) — to reach the
-cluster, the Cloudflare Tunnel must be live and two local ports must be
-forwarded:
+For Slack and workflow webhooks (GitHub, etc.) to reach the cluster, the
+Cloudflare Tunnel must be live and two local ports must be forwarded:
 
 | Public path | Forwarded port | Backend |
 |---|---|---|
 | `/api/webhooks/slack` | `localhost:3001` | Slackbot pod |
-| everything else | `localhost:8000` | Centaur API pod (workflow webhooks, `/workflows/runs`, `/agent/*`) |
+| everything else | `localhost:8000` | Centaur API pod |
 
-The tunnel runs as a launchd user agent (`com.local-labs.centaur-tunnel`)
-installed once via `just cloudflared::install-service` — it auto-starts on
-login and restarts on crash. Both port-forwards are per-session and bundled
-with the Slackbot log tail in:
+The tunnel runs as a launchd user agent installed once via the
+[`cloudflared/`](cloudflared/) Justfile (`cd cloudflared && just install-service`).
+Per-session port-forward + log-tail commands live in the same directory's
+README.
 
-```bash
-just dev
-```
-
-Ctrl-C `just dev` to stop the port-forwards; the tunnel keeps running.
-
-One-time per-machine setup (`brew install cloudflared`, `cloudflared tunnel
-login`, `cloudflared tunnel create centaur-dev`, DNS routing, and
-`just cloudflared::install-service`) lives in
-[`cloudflared/README.md`](cloudflared/README.md), which also documents how
-to add or reorder ingress rules.
-
-## Run the smoke test
+## Smoke test
 
 ```bash
-just smoke
-```
-
-Expected (final JSON shape):
-
-```json
-{
-  "status": "completed",
-  "result_text": "...PONG..."
+thread_key="smoke-$(date +%s)"
+api_deploy="deploy/centaur-centaur-api"
+exec_curl() {
+  kubectl exec -n centaur-system "$api_deploy" -- sh -c \
+    'curl -s "$@" -H "X-Api-Key: $SLACKBOT_API_KEY"' -- "$@"
 }
+spawn=$(exec_curl -X POST http://localhost:8000/agent/spawn \
+  -H 'Content-Type: application/json' \
+  -d "{\"thread_key\":\"${thread_key}\"}")
+# ... see git log for the full smoke driver
 ```
 
-To exercise the Codex harness instead, mention the bot in Slack with the
-selector: `@centaur --codex reply with exactly PONG`. Requires `OPENAI_API_KEY`
-in `.env` so `bootstrap-secrets` can patch it into the Secret.
+The full deployed-smoke driver was previously the root `Justfile`'s
+`just smoke` recipe — recover it from git history if you need it back.
 
-## Tear down
+## Local checks
 
 ```bash
-just down            # prompts for confirmation (safety net)
-just --yes down      # skip the prompt; useful in scripts/CI
+uv run pytest tests/         # ACME-style suite at the root
+uv run ruff check .          # lint everything
+docker build -t centaur-overlay:dev .  # build the overlay image
 ```
 
-This uninstalls the Helm release but leaves the `centaur-system` namespace
-intact, so the next `just up` is a clean re-install. To fully remove:
+## Tools
 
-```bash
-kubectl delete namespace centaur-system
-```
-
-## Troubleshooting
-
-| Symptom | What to check |
-|---------|---------------|
-| `just up` fails with "Justfile not found" inside `.centaur/` | Run `git submodule update --init --recursive`. |
-| `bootstrap-secrets` complains about missing variables | Did you fill in `ANTHROPIC_API_KEY` in `.env`? The Justfile auto-loads `.env` via `dotenv-load`; no `source` step needed, but the variables must actually be set. |
-| `ImagePullBackOff` on `centaur-centaur-api`, `centaur-api-proxy`, or a sandbox pod | The chart defaults locally-built `:latest` images to `pullPolicy: Always`; `values.local.yaml` overrides for `api`, `ironProxy`, `sandbox`. Re-run `just up`. |
-| Slack URL verification fails ("didn't respond with the value of the challenge parameter") | `SLACK_SIGNING_SECRET` in `.env` does not match the value in the Slack app's Basic Information page. |
-| Pods crash-loop with `OOMKilled` | Local cluster is too small. Bump CPU/memory in Docker Desktop or kind config. |
-| Smoke test never completes | `cd .centaur && just logs api` for the API container; `kubectl get pods -n centaur-system -l centaur.ai/managed=true` for sandbox state. |
-| Smoke fails with `Missing API key` | You're running upstream's `just smoke` (e.g. `cd .centaur && just smoke`). The current chart's API rejects all unauthenticated calls; our root `just smoke` injects `X-Api-Key: $SLACKBOT_API_KEY` to compensate. Always invoke from the repo root. |
-| `helm get values` does not show `defaultHarness` | The pinned base SHA may not expose the key yet — see [open question 2 in the spec](docs/superpowers/specs/2026-05-25-centaur-lab-mvp-design.md#open-questions-for-implementation). Pass `--claude` manually in the smoke prompt as a workaround. |
-| Slack ETL workflows log token errors | `SLACK_ETL_TOKEN` unset or wrong; or its Slack user lacks `conversations.*` / `users.list` scopes. See [Slack ETL docs](https://centaur.run/operate/slack-etl). |
-| Overlay tools/workflows/skills look stale after a code edit | **`just reload`** — rebuild overlay, `helm deploy` with new `overlay.image.tag`, restart API, delete Slack Sandbox CRDs. |
-
-## Tools (in `overlay/`)
-
-The `overlay/` directory is packaged into a local Docker image
-(`centaur-overlay:sha-<git-short>`) and mounted into the API + sandbox pods at
-`/app/overlay/org` and `/home/agent/overlay/org` respectively. The Helm
-chart adds the overlay path to `TOOL_DIRS` so the API discovers anything
-under `overlay/tools/` at startup; sandbox pods receive
-`overlay/.agents/skills/` so Claude Code loads them as workspace skills.
-
-The image is rebuilt as part of `just up` (`just overlay::build` writes
-`overlay/.tag` before `just deploy`). After editing overlay code on a running
-cluster, use **`just reload`** — rebuild, deploy with the new sha tag (rolls
-API pods via Helm), and delete Slack Sandbox CRDs. The next Slack turn
-cold-spawns with the new overlay. For demo/smoke leftovers:
-`just clean-sandboxes` (all) or `just clean-sandboxes slack`.
+The repo root `tools/` directory is mounted into the API + sandbox pods at
+`/app/overlay/org/tools` and `/home/agent/overlay/org/tools` respectively.
+The Helm chart adds the overlay path to `TOOL_DIRS` so the API discovers
+anything under `tools/` at startup.
 
 | Tool | Purpose |
 |------|---------|
-| [`overlay/tools/semantic_scholar`](overlay/tools/semantic_scholar) | Search papers, fetch metadata, walk the citation graph, and build persisted research briefs via the [Semantic Scholar Graph API](https://api.semanticscholar.org/api-docs/graph). Usable anonymously; set `SEMANTIC_SCHOLAR_API_KEY` in `.env` for higher quota. Discoverable methods include `search_papers` / `get_paper` / `get_references` (live API), `search` (agent-facing live search with an error envelope), and `research_brief` (one-call S2 search + Markdown lit-review render + upsert of the brief plus each underlying paper as parent/child rows). Companion playbook in `overlay/.agents/skills/academic-research/SKILL.md`. |
+| [`tools/semantic_scholar`](tools/semantic_scholar) | Search papers, fetch metadata, walk the citation graph, and build persisted research briefs via the [Semantic Scholar Graph API](https://api.semanticscholar.org/api-docs/graph). Discoverable methods include `search_papers` / `get_paper` / `get_references` (live API), `search` (agent-facing live search with an error envelope), and `research_brief` (one-call S2 search + Markdown lit-review render + upsert of the brief plus each underlying paper as parent/child rows). Companion playbook in `.agents/skills/academic-research/SKILL.md`. |
+| [`tools/pdf`](tools/pdf) | Fetch + parse open-access PDFs to Markdown for full-text indexing (pymupdf4llm → pymupdf → pypdf fallback chain). |
 
 For background on the overlay model, see [Using an overlay](https://centaur.run/extend/overlay) and [Creating tools](https://centaur.run/extend/tools).
 
-## Workflows (in `overlay/`)
+## Workflows
 
-Overlay workflows are durable, checkpoint-replayable handlers shipped via
-the same `centaur-overlay:sha-*` image as the tools. They're auto-discovered
+Workflows are durable, checkpoint-replayable handlers shipped via the
+same `centaur-overlay:sha-*` image as the tools. They're auto-discovered
 on API startup from `WORKFLOW_DIRS=/app/workflows:/app/overlay/org/workflows`,
-so dropping a new file in `overlay/workflows/` and rebuilding the image is
+so dropping a new file in `workflows/` and rebuilding the image is
 all that's needed to register one.
 
 | Workflow | Purpose |
 |----------|---------|
-| [`overlay/workflows/save_papers.py`](overlay/workflows/save_papers.py) | Upsert one or more Semantic Scholar paper IDs into `company_context_documents` as `source_type="paper"` rows; idempotent on content hash. |
-| [`overlay/workflows/research_brief.py`](overlay/workflows/research_brief.py) | Search Semantic Scholar, render a Markdown lit-review brief, and upsert the brief plus each underlying paper as parent/child rows in `company_context_documents`. |
+| [`workflows/save_papers.py`](workflows/save_papers.py) | Upsert one or more Semantic Scholar paper IDs into `company_context_documents` as `source_type="paper"` rows; idempotent on content hash. |
+| [`workflows/research_brief.py`](workflows/research_brief.py) | Search Semantic Scholar, render a Markdown lit-review brief, and upsert the brief plus each underlying paper as parent/child rows in `company_context_documents`. |
+| [`workflows/archive_papers.py`](workflows/archive_papers.py) | Fetch the open-access PDF for a paper, parse to Markdown, persist to `paper_archives` and `company_context_documents` for full-text retrieval. |
+| [`workflows/search_and_archive_papers.py`](workflows/search_and_archive_papers.py) | Atomic search-then-archive-everything-matched: searches S2, dispatches `archive_papers` as a child run for every matched ID. |
 
 ### Triggering workflows
 
@@ -228,52 +236,42 @@ call workflow run '{"workflow_name":"save_papers","input":{"paper_ids":["..."]}}
 call workflow run '{"workflow_name":"research_brief","input":{"query":"...","limit":5}}'
 ```
 
-From the host (against the live cluster), the overlay Justfile wraps the
-same POST against the in-pod API:
+From the host (against the live cluster), POST directly via `kubectl exec` so
+the in-pod `$SLACKBOT_API_KEY` covers auth:
 
 ```bash
-just overlay::smoke-save-papers <paper_id>
-just overlay::smoke-research-brief-deployed "<query>"
+kubectl exec -n centaur-system deploy/centaur-centaur-api -- sh -c \
+  'curl -sS -X POST http://localhost:8000/workflows/runs \
+    -H "X-Api-Key: $SLACKBOT_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d "{\"workflow_name\":\"save_papers\",\"input\":{\"paper_ids\":[\"<paper_id>\"]}}"' | jq .
 ```
 
-For a lighter local loop that drives the same `research_brief` tool
-method without going through the workflow router or the cluster, run
-`just overlay::smoke-research-brief "<query>"` — it shells out to the
-standalone semantic_scholar CLI subcommand and persists against
-whatever `DATABASE_URL` is in scope (port-forward to `centaur_test`
-recommended).
-
 Both workflows write to `company_context_documents`, which is BM25-indexed
-via paradedb and has a GIN index on `metadata` — so persisted papers and
-briefs are immediately future-RAG-ready for retrieval across turns.
+via paradedb — so persisted papers and briefs are immediately
+future-RAG-ready for retrieval across turns.
 
-### Testing workflows locally
+## Migrating tests from `tests-old/`
 
-Unit tests for `save_papers` and `research_brief` mock the database and
-S2 client and run via `just overlay::test-workflows`. A separate
-`just overlay::test-workflows-integration` recipe exercises the same
-handlers against a real Postgres (with the centaur schema and `pg_search`
-migrations applied), gated on `CENTAUR_TEST_DATABASE_URL`. Point that env
-var at a port-forwarded cluster Postgres (recipe in
-[`db/README.md`](db/README.md)) and the integration tests run; leave it
-unset and they skip cleanly.
+The pre-reorg per-tool/per-workflow test suites are staged in
+[`tests-old/`](tests-old/). To migrate one:
 
-## CI and production
+1. Copy the test file to `tests/`.
+2. Update its imports to be repo-rooted: `from tools.semantic_scholar.client import ...`,
+   `from workflows.research_brief import handler`.
+3. Run `uv run pytest tests/<file>::<test>` and fix anything that breaks.
+4. `git rm` the old copy from `tests-old/`.
 
-| Path | Purpose |
-|------|---------|
-| `.github/workflows/overlay.yml` | Lint, test, and on merge to `main` push `ghcr.io/<repo>/centaur-overlay:sha-*`. |
-| `infra/` | Argo CD Application template + prod `centaur.yaml` values (placeholders). Laptop dev does not use this. |
+The smoke test in [`tests/test_smoke.py`](tests/test_smoke.py) is the
+ACME-style template — keep new tests small, well-isolated, and prefer
+the same import shape.
 
-## What this repo intentionally defers
+## CI
 
-| Future milestone | What it adds |
-|------------------|--------------|
-| Filled prod infra | Replace `<PLACEHOLDER>` tags in `infra/` and apply via Argo CD. |
-| Alternative harnesses | Either swap default harness to `pi-mono` or wire pi.dev RPC SDK as a tool. |
-
-Each is one focused PR away on top of the current state. See the spec for
-the full deferred-work table.
+`.github/workflows/overlay.yml` runs on push to `main` and on PRs that
+touch overlay code. It's now a single `uv sync && uv run ruff check . &&
+uv run pytest tests/` against the root `.venv`, then a `docker build`
++ GHCR push on merges to `main`.
 
 ## License
 
