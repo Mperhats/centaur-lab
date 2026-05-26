@@ -15,7 +15,15 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from _bfts_state import fetch_best_node_for_run, update_node_metric
+from _bfts_state import (
+    fetch_best_node_for_run,
+    insert_node,
+    list_recent_node_summaries,
+    list_seed_children,
+    mark_node_failed,
+    update_node_aggregate_metric,
+    update_node_metric,
+)
 
 from ._mocks import MockPool as FakePool
 
@@ -207,3 +215,195 @@ async def test_fetch_best_node_for_run_returns_none_when_unset() -> None:
     out = await fetch_best_node_for_run(pool, run_id="run-incomplete")
 
     assert out is None
+
+
+# ---------------------------------------------------------------------------
+# F.1: mark_node_failed marks a placeholder buggy after child workflow fails.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_mark_node_failed_emits_update_with_synthetic_fields() -> None:
+    """One UPDATE that sets ``is_buggy=TRUE``, fills ``exc_type`` /
+    ``exc_info_json`` (json-encoded dict) / ``analysis``, and bumps
+    ``updated_at``. The COALESCE on ``exc_info_json`` preserves any
+    pre-existing value the executor might have written."""
+    pool = FakePool()
+
+    await mark_node_failed(
+        pool,
+        node_id="n1",
+        exc_type="ChildWorkflowFailed",
+        exc_info={"child_status": "failed", "error": "executor pod evicted"},
+        analysis="bfts_expand_one terminated with status=failed",
+    )
+
+    assert len(pool.execute_calls) == 1
+    query, args = pool.execute_calls[0]
+    assert "UPDATE bfts_nodes" in query
+    assert "is_buggy = TRUE" in query
+    assert "COALESCE($3::jsonb, exc_info_json)" in query
+    # Positional args: (node_id, exc_type, exc_info_json (json string), analysis).
+    assert args[0] == "n1"
+    assert args[1] == "ChildWorkflowFailed"
+    assert json.loads(args[2]) == {
+        "child_status": "failed",
+        "error": "executor pod evicted",
+    }
+    assert args[3] == "bfts_expand_one terminated with status=failed"
+
+
+@pytest.mark.asyncio
+async def test_mark_node_failed_handles_none_exc_info() -> None:
+    """``exc_info=None`` → SQL NULL (no JSON ``"null"`` literal). The
+    COALESCE keeps any pre-existing exc_info_json the executor wrote."""
+    pool = FakePool()
+
+    await mark_node_failed(
+        pool,
+        node_id="n2",
+        exc_type="ChildWorkflowFailed",
+        exc_info=None,
+        analysis="no detail available",
+    )
+
+    _query, args = pool.execute_calls[0]
+    assert args[2] is None
+
+
+# ---------------------------------------------------------------------------
+# F.2: list_recent_node_summaries (DAO contract).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_list_recent_node_summaries_filters_and_limits() -> None:
+    """SQL excludes placeholder rows (``is_buggy IS NOT NULL``), excludes
+    the current node, orders most-recent-first, and forwards ``limit`` as
+    the SQL ``LIMIT $3`` parameter."""
+    expected_rows = [
+        {"node_id": "n2", "stage_name": "draft", "plan": "p2",
+         "is_buggy": False, "analysis": "ran clean"},
+        {"node_id": "n1", "stage_name": "draft", "plan": "p1",
+         "is_buggy": True, "analysis": "syntax error"},
+    ]
+    pool = FakePool(fetch_result=expected_rows)
+
+    out = await list_recent_node_summaries(
+        pool, run_id="r1", limit=2, exclude_node_id="n3",
+    )
+
+    assert out == expected_rows
+    assert len(pool.fetch_calls) == 1
+    query, args = pool.fetch_calls[0]
+    assert "is_buggy IS NOT NULL" in query
+    assert "node_id <> $2" in query
+    assert "ORDER BY created_at DESC" in query
+    assert args == ("r1", "n3", 2)
+
+
+@pytest.mark.asyncio
+async def test_list_recent_node_summaries_clamps_negative_limit() -> None:
+    """``limit <= 0`` clamps to 0 so callers can disable memory injection
+    by setting ``prior_attempts_window=0`` without separate branching."""
+    pool = FakePool(fetch_result=[])
+
+    await list_recent_node_summaries(
+        pool, run_id="r1", limit=-5, exclude_node_id=None,
+    )
+
+    _query, args = pool.fetch_calls[0]
+    assert args == ("r1", None, 0)
+
+
+# ---------------------------------------------------------------------------
+# F.4: insert_node forwards seed columns; list_seed_children DAO;
+# update_node_aggregate_metric merges into metric_json.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_insert_node_forwards_seed_columns_by_default_false() -> None:
+    """Phase 0-4 callers that omit ``is_seed_node`` / ``seed`` still produce a
+    valid INSERT — the schema default ``FALSE`` / NULL applies."""
+    pool = FakePool()
+
+    await insert_node(
+        pool,
+        node_id="n1",
+        run_id="r1",
+        parent_node_id=None,
+        step=0,
+        stage_name="draft",
+        plan="",
+        code="",
+    )
+
+    _query, args = pool.execute_calls[0]
+    # The DAO passes positional args in declared order:
+    # (node_id, run_id, parent_node_id, step, stage_name,
+    #  plan, code, debug_depth, is_seed_node, seed).
+    assert args == ("n1", "r1", None, 0, "draft", "", "", 0, False, None)
+
+
+@pytest.mark.asyncio
+async def test_insert_node_passes_through_seed_args() -> None:
+    """F.4 callers set ``is_seed_node=True`` + ``seed=K``; the values reach
+    the SQL parameter list."""
+    pool = FakePool()
+
+    await insert_node(
+        pool,
+        node_id="seed-0",
+        run_id="r1",
+        parent_node_id="parent",
+        step=99000,
+        stage_name="seed",
+        plan="seed re-eval 0",
+        code="print(1)",
+        is_seed_node=True,
+        seed=0,
+    )
+
+    _query, args = pool.execute_calls[0]
+    assert args[-2:] == (True, 0)
+
+
+@pytest.mark.asyncio
+async def test_list_seed_children_filters_by_parent_and_seed_flag() -> None:
+    """SQL filters ``parent_node_id`` AND ``is_seed_node = TRUE`` and orders
+    by ``seed`` so callers can iterate deterministically by seed index."""
+    rows = [
+        {"node_id": "s0", "seed": 0, "metric_json": None, "is_buggy": False},
+        {"node_id": "s1", "seed": 1, "metric_json": None, "is_buggy": False},
+    ]
+    pool = FakePool(fetch_result=rows)
+
+    out = await list_seed_children(pool, parent_node_id="best-1")
+
+    assert out == rows
+    query, args = pool.fetch_calls[0]
+    assert "is_seed_node = TRUE" in query
+    assert "ORDER BY seed" in query
+    assert args == ("best-1",)
+
+
+@pytest.mark.asyncio
+async def test_update_node_aggregate_metric_merges_via_jsonb_concat() -> None:
+    """The UPDATE uses ``COALESCE(metric_json, '{}'::jsonb) || $2::jsonb``
+    so an aggregate sub-dict is shallow-merged into the existing metric.
+    JSON-encoded dict reaches the parameter list."""
+    pool = FakePool()
+
+    await update_node_aggregate_metric(
+        pool,
+        node_id="best-1",
+        aggregate={"aggregate_mean": 0.32, "aggregate_std": 0.04, "aggregate_n": 3.0},
+    )
+
+    query, args = pool.execute_calls[0]
+    assert "metric_json = COALESCE(metric_json, '{}'::jsonb) || $2::jsonb" in query
+    assert args[0] == "best-1"
+    parsed = json.loads(args[1])
+    assert parsed["aggregate_mean"] == pytest.approx(0.32)
+    assert parsed["aggregate_n"] == pytest.approx(3.0)

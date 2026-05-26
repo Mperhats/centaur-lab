@@ -424,3 +424,118 @@ async def test_handler_propagates_expand_node_exception(
     # Neither persistence step ran because the failure was upstream.
     assert update_stub.await_count == 0
     assert mark_stub.await_count == 0
+
+
+# ---------------------------------------------------------------------------
+# F.2: prior_attempts memory loaded from DB and forwarded to ExpandContext.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_handler_loads_prior_attempts_and_forwards_to_expand(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The handler calls ``list_recent_node_summaries`` with the
+    run_id + this node's id (excluded) + the configured window, then
+    passes the returned summaries to ExpandContext."""
+    import bfts_expand_one
+
+    expand_stub, _update_stub, _mark_stub = _patch_handler_deps(
+        monkeypatch, expand_result=_good_expand_result()
+    )
+    fake_summaries = [
+        {"node_id": "older", "stage_name": "draft", "plan": "p",
+         "is_buggy": False, "analysis": "ok"},
+    ]
+    list_mock = AsyncMock(return_value=fake_summaries)
+    monkeypatch.setattr(bfts_expand_one, "list_recent_node_summaries", list_mock)
+
+    ctx = _FakeCtx()
+    await bfts_expand_one.handler(
+        _make_input(prior_attempts_window=5), ctx
+    )
+
+    assert list_mock.await_count == 1
+    kw = list_mock.await_args.kwargs
+    assert kw["run_id"] == "r-1"
+    assert kw["limit"] == 5
+    assert kw["exclude_node_id"] == "n-deadbeef0001"
+
+    expand_ctx = expand_stub.await_args.kwargs["expand_ctx"]
+    assert expand_ctx.prior_attempts == fake_summaries
+
+
+@pytest.mark.asyncio
+async def test_handler_skips_prior_attempts_lookup_when_window_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``prior_attempts_window=0`` disables the memory feature; the DAO
+    is still called but ``limit=0`` so the SQL returns no rows. (We
+    centralize the clamp inside the DAO, not the handler.)"""
+    import bfts_expand_one
+
+    _expand_stub, _u, _m = _patch_handler_deps(
+        monkeypatch, expand_result=_good_expand_result()
+    )
+    list_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(bfts_expand_one, "list_recent_node_summaries", list_mock)
+
+    ctx = _FakeCtx()
+    await bfts_expand_one.handler(_make_input(prior_attempts_window=0), ctx)
+
+    assert list_mock.await_count == 1
+    assert list_mock.await_args.kwargs["limit"] == 0
+
+
+# ---------------------------------------------------------------------------
+# F.4: seed_override + is_seed_node forwarded into ExpandContext.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_handler_forwards_seed_override_to_expand_ctx(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``Input.seed_override=K`` must reach ``ExpandContext.seed_override``
+    so the expand pipeline routes through ``_seed_propose`` and uses
+    the parent's code with the deterministic seeding preamble."""
+    import bfts_expand_one
+
+    # A seed node still produces an ExecutionResult-shape return; the
+    # canned result here is the good-path shape since the handler's
+    # persistence logic doesn't care about the seed branch.
+    expand_stub, _u, _m = _patch_handler_deps(
+        monkeypatch, expand_result=_good_expand_result()
+    )
+
+    ctx = _FakeCtx()
+    await bfts_expand_one.handler(
+        _make_input(
+            parent_node={"code": "PARENT", "is_buggy": False},
+            seed_override=2,
+            is_seed_node=True,
+        ),
+        ctx,
+    )
+
+    expand_ctx = expand_stub.await_args.kwargs["expand_ctx"]
+    assert expand_ctx.seed_override == 2
+
+
+@pytest.mark.asyncio
+async def test_handler_default_seed_override_is_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-seed expansions must reach ExpandContext with
+    ``seed_override=None`` so the LLM propose path is taken."""
+    import bfts_expand_one
+
+    expand_stub, _u, _m = _patch_handler_deps(
+        monkeypatch, expand_result=_good_expand_result()
+    )
+
+    ctx = _FakeCtx()
+    await bfts_expand_one.handler(_make_input(), ctx)
+
+    expand_ctx = expand_stub.await_args.kwargs["expand_ctx"]
+    assert expand_ctx.seed_override is None

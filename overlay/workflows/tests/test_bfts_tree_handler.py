@@ -185,12 +185,22 @@ class _TreeCtx:
     so the value is never dereferenced.
     """
 
-    def __init__(self, *, run_id: str = "r-tree-1") -> None:
+    def __init__(
+        self,
+        *,
+        run_id: str = "r-tree-1",
+        wait_results: dict[str, dict[str, Any]] | None = None,
+    ) -> None:
         self.run_id = run_id
         self._pool = object()
         self.calls: list[str] = []
         self.start_workflow_calls: list[dict[str, Any]] = []
         self.wait_for_workflow_calls: list[str] = []
+        # Optional override map: {child_run_id: {"status": "failed", ...}}.
+        # When set, ``wait_for_workflow`` returns the matched entry instead
+        # of the default ``status="completed"``. Lets F.1 tests simulate
+        # ``bfts_expand_one`` permafails without rewiring the whole stub.
+        self.wait_results = wait_results or {}
 
     async def step(self, name: str, fn: Any) -> Any:
         self.calls.append(name)
@@ -223,6 +233,8 @@ class _TreeCtx:
     async def wait_for_workflow(self, name: str, *, run_id: str) -> dict[str, Any]:
         self.calls.append(name)
         self.wait_for_workflow_calls.append(run_id)
+        if run_id in self.wait_results:
+            return {"run_id": run_id, **self.wait_results[run_id]}
         return {"run_id": run_id, "status": "completed"}
 
     def log(self, *_a: Any, **_kw: Any) -> None:
@@ -249,6 +261,19 @@ def _patch_fanout_deps(
     monkeypatch.setattr(bfts_tree, "insert_run", AsyncMock(return_value=None))
     monkeypatch.setattr(bfts_tree, "insert_node", AsyncMock(return_value=None))
     monkeypatch.setattr(bfts_tree, "set_best_node", AsyncMock(return_value=None))
+    # F.1: mark_node_failed is only invoked on a failed-child path; tests
+    # without ``wait_results`` overrides never reach it but we patch it
+    # for the same reason as the other DAOs — keep the ``object()`` pool
+    # sentinel from leaking into a real asyncpg call.
+    monkeypatch.setattr(bfts_tree, "mark_node_failed", AsyncMock(return_value=None))
+    # F.4 seed fan-out DAOs. ``select_best`` is patched to ``None`` below
+    # so the seed branch never fires in the existing tests; but the
+    # patches must exist for the imports to resolve when seed tests
+    # opt-in by overriding ``select_best``.
+    monkeypatch.setattr(bfts_tree, "list_seed_children", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        bfts_tree, "update_node_aggregate_metric", AsyncMock(return_value=None)
+    )
 
     queue = list(list_nodes_returns or [[]])
     if not queue:
@@ -693,3 +718,373 @@ async def test_handler_persists_sources_in_config_json(
     assert sources["num_drafts"] == "input"  # _input passes num_drafts=1
     assert sources["max_debug_depth"] == "default"
     assert sources["metric_reducer"] == "default"
+
+
+# ---------------------------------------------------------------------------
+# F.1: a failed bfts_expand_one child must result in mark_node_failed
+# being called on its placeholder row so the next iteration's selector
+# treats it as a buggy leaf rather than a stalled draft slot.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_failed_expand_child_marks_node_buggy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One ``start_workflow`` per draft selection; ``wait_for_workflow``
+    returns ``status="failed"`` for one child; the handler must dispatch
+    a ``mark_failed_<node_id>`` step that calls ``mark_node_failed`` with
+    ``exc_type='ChildWorkflowFailed'`` + the child's error excerpt."""
+    import bfts_tree
+
+    _patch_fanout_deps(monkeypatch)
+    mark_mock = AsyncMock(return_value=None)
+    monkeypatch.setattr(bfts_tree, "mark_node_failed", mark_mock)
+
+    ctx = _TreeCtx()
+    # First child fails permanently; second completes normally. The
+    # handler runs both starts before issuing any wait, so we don't know
+    # the child trigger_keys up front — patch them after the fact by
+    # mutating ``ctx.wait_results`` once the first ``start_workflow``
+    # records its trigger_key.
+
+    original_start = ctx.start_workflow
+
+    async def _start(*args, **kwargs):
+        child = await original_start(*args, **kwargs)
+        if len(ctx.start_workflow_calls) == 1:
+            ctx.wait_results[child["run_id"]] = {
+                "status": "failed",
+                "error": "executor pod evicted",
+            }
+        return child
+
+    ctx.start_workflow = _start
+
+    await bfts_tree.handler(
+        _input(num_drafts=2, num_workers=2, max_iters=1), ctx
+    )
+
+    # Exactly one ``mark_failed_<node_id>`` step recorded on ctx.calls,
+    # AFTER the matching ``wait_expand_<node_id>``.
+    mark_steps = [c for c in ctx.calls if c.startswith("mark_failed_")]
+    assert len(mark_steps) == 1, ctx.calls
+    mark_idx = ctx.calls.index(mark_steps[0])
+    failed_node_id = mark_steps[0][len("mark_failed_") :]
+    wait_idx = ctx.calls.index(f"wait_expand_{failed_node_id}")
+    assert wait_idx < mark_idx
+
+    # The DAO was called with the synthetic exc_type + the child error.
+    assert mark_mock.await_count == 1
+    kw = mark_mock.await_args.kwargs
+    assert kw["node_id"] == failed_node_id
+    assert kw["exc_type"] == "ChildWorkflowFailed"
+    assert kw["exc_info"]["child_status"] == "failed"
+    assert kw["exc_info"]["error"] == "executor pod evicted"
+    assert "status=failed" in kw["analysis"]
+
+
+@pytest.mark.asyncio
+async def test_completed_children_do_not_call_mark_node_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default path: every child returns ``status="completed"`` →
+    ``mark_node_failed`` must not be called. Locks in that the F.1
+    branch only fires on real failures (no false positives)."""
+    import bfts_tree
+
+    _patch_fanout_deps(monkeypatch)
+    mark_mock = AsyncMock(return_value=None)
+    monkeypatch.setattr(bfts_tree, "mark_node_failed", mark_mock)
+
+    ctx = _TreeCtx()
+    await bfts_tree.handler(
+        _input(num_drafts=3, num_workers=3, max_iters=1), ctx
+    )
+
+    assert mark_mock.await_count == 0
+    assert not any(c.startswith("mark_failed_") for c in ctx.calls)
+
+
+# ---------------------------------------------------------------------------
+# F.3: tree.dot artifact is written at the end of every run.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tree_dot_artifact_is_written_when_run_has_nodes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Even with no best node selected, ``write_tree_dot_artifact`` must
+    fire with the final ``list_nodes_for_run`` snapshot anchored on the
+    first node (so an operator can debug a failed run too)."""
+    import _bfts_export
+    import bfts_tree
+
+    final_nodes = [
+        {
+            "node_id": "n-only", "parent_node_id": None,
+            "stage_name": "draft", "is_buggy": True, "is_buggy_plots": None,
+            "metric_json": None, "debug_depth": 0,
+        }
+    ]
+    _patch_fanout_deps(monkeypatch, list_nodes_returns=[final_nodes, final_nodes])
+    write_dot_mock = AsyncMock(return_value=None)
+    monkeypatch.setattr(_bfts_export, "write_tree_dot_artifact", write_dot_mock)
+
+    ctx = _TreeCtx()
+    await bfts_tree.handler(
+        _input(num_drafts=1, num_workers=1, max_iters=1), ctx
+    )
+
+    assert "write_tree_dot" in ctx.calls
+    write_dot_mock.assert_awaited_once()
+    kw = write_dot_mock.await_args.kwargs
+    assert kw["run_id"] == "r-tree-1"
+    assert kw["anchor_node_id"] == "n-only"
+    assert "digraph" in kw["dot_text"]
+
+
+@pytest.mark.asyncio
+async def test_tree_dot_skipped_when_run_has_zero_nodes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Zero rows → no anchor → ``write_tree_dot_artifact`` skipped
+    silently (the FK on bfts_artifacts.node_id would otherwise crash)."""
+    import _bfts_export
+    import bfts_tree
+
+    _patch_fanout_deps(monkeypatch, list_nodes_returns=[[]])
+    write_dot_mock = AsyncMock(return_value=None)
+    monkeypatch.setattr(_bfts_export, "write_tree_dot_artifact", write_dot_mock)
+
+    ctx = _TreeCtx()
+    # max_iters=0 short-circuits the outer loop so we exit with zero
+    # placeholders. (max_iters=1 + num_drafts=1 would insert 1
+    # placeholder and we'd take the anchor branch.)
+    inp = Input(
+        run_id="r-tree-1",
+        parent_run_id=None,
+        idea={"name": "x"},
+        num_drafts=1,
+        num_workers=1,
+        max_iters=0,
+        debug_prob=0.5,
+        sandbox_id="bfts-r-tree-1-tree-0",
+        draft_model="claude-draft-test",
+        feedback_model="claude-feedback-test",
+        vlm_model="claude-vision-test",
+        llm_api_key_secret="TEST_API_KEY",
+    )
+    await bfts_tree.handler(inp, ctx)
+
+    write_dot_mock.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# F.4: multi-seed re-eval fan-out + aggregate write.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_num_seeds_triggers_seed_fan_out_after_best(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``num_seeds=3`` + a best node selected → 3 seed children fanned
+    out (deterministic IDs, ``seed_override`` set per index), waited on,
+    then ``write_aggregate_metric`` step writes the aggregate."""
+    import _bfts_export
+    import bfts_tree
+
+    best_row = {
+        "node_id": "best-1",
+        "code": "print('hi')",
+        "is_buggy": False,
+        "is_buggy_plots": False,
+    }
+    _patch_fanout_deps(monkeypatch, list_nodes_returns=[[], [best_row]])
+    # Override the patched ``select_best`` to actually pick our best row.
+    monkeypatch.setattr(_bfts_export, "select_best", lambda _nodes, **_kw: best_row)
+    # Provide synthetic seed children with concrete final_value scalars
+    # so the aggregator computes a non-None result.
+    seed_rows = [
+        {"node_id": "s-0", "seed": 0,
+         "metric_json": {"final_value": 0.4}, "is_buggy": False},
+        {"node_id": "s-1", "seed": 1,
+         "metric_json": {"final_value": 0.6}, "is_buggy": False},
+        {"node_id": "s-2", "seed": 2,
+         "metric_json": {"final_value": 0.5}, "is_buggy": False},
+    ]
+    monkeypatch.setattr(
+        bfts_tree, "list_seed_children", AsyncMock(return_value=seed_rows)
+    )
+    update_agg = AsyncMock(return_value=None)
+    monkeypatch.setattr(bfts_tree, "update_node_aggregate_metric", update_agg)
+
+    ctx = _TreeCtx()
+    inp = Input(
+        run_id="r-tree-1",
+        parent_run_id=None,
+        idea={"name": "x"},
+        num_drafts=1,
+        num_workers=1,
+        max_iters=1,
+        debug_prob=0.5,
+        num_seeds=3,
+        sandbox_id="bfts-r-tree-1-tree-0",
+        draft_model="claude-draft-test",
+        feedback_model="claude-feedback-test",
+        vlm_model="claude-vision-test",
+        llm_api_key_secret="TEST_API_KEY",
+    )
+    await bfts_tree.handler(inp, ctx)
+
+    seed_starts = [
+        c for c in ctx.start_workflow_calls
+        if c["name"].startswith("start_seed_")
+    ]
+    assert len(seed_starts) == 3
+    seed_indices = []
+    for call in seed_starts:
+        ri = call["run_input"]
+        assert ri["is_seed_node"] is True
+        assert ri["seed_override"] == int(call["name"].split("_")[-1])
+        assert ri["parent_node"] == best_row
+        seed_indices.append(ri["seed_override"])
+    assert sorted(seed_indices) == [0, 1, 2]
+
+    # write_aggregate_metric fires with the computed mean/std/n.
+    update_agg.assert_awaited_once()
+    kw = update_agg.await_args.kwargs
+    assert kw["node_id"] == "best-1"
+    agg = kw["aggregate"]
+    assert agg["aggregate_n"] == 3.0
+    assert agg["aggregate_mean"] == pytest.approx(0.5)
+    assert agg["aggregate_std"] > 0
+
+
+@pytest.mark.asyncio
+async def test_num_seeds_zero_skips_seed_fan_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default ``num_seeds=0`` → no ``start_seed_*`` calls, no aggregate
+    write. Preserves the Phase 0-4 contract on the happy path."""
+    import _bfts_export
+    import bfts_tree
+
+    best_row = {
+        "node_id": "best-1",
+        "code": "print('hi')",
+        "is_buggy": False,
+        "is_buggy_plots": False,
+    }
+    _patch_fanout_deps(monkeypatch, list_nodes_returns=[[], [best_row]])
+    monkeypatch.setattr(_bfts_export, "select_best", lambda _nodes, **_kw: best_row)
+    update_agg = AsyncMock(return_value=None)
+    monkeypatch.setattr(bfts_tree, "update_node_aggregate_metric", update_agg)
+
+    ctx = _TreeCtx()
+    await bfts_tree.handler(
+        _input(num_drafts=1, num_workers=1, max_iters=1), ctx
+    )
+
+    assert not any(c["name"].startswith("start_seed_") for c in ctx.start_workflow_calls)
+    update_agg.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_num_seeds_with_no_best_skips_seed_fan_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``num_seeds=3`` but ``select_best`` returns None → no seed
+    fan-out (no parent code to re-execute)."""
+    import bfts_tree
+
+    _patch_fanout_deps(monkeypatch)
+    update_agg = AsyncMock(return_value=None)
+    monkeypatch.setattr(bfts_tree, "update_node_aggregate_metric", update_agg)
+
+    ctx = _TreeCtx()
+    await bfts_tree.handler(
+        Input(
+            run_id="r-tree-1",
+            parent_run_id=None,
+            idea={"name": "x"},
+            num_drafts=1,
+            num_workers=1,
+            max_iters=1,
+            debug_prob=0.5,
+            num_seeds=3,
+            sandbox_id="bfts-r-tree-1-tree-0",
+            draft_model="claude-draft-test",
+            feedback_model="claude-feedback-test",
+            vlm_model="claude-vision-test",
+            llm_api_key_secret="TEST_API_KEY",
+        ),
+        ctx,
+    )
+
+    assert not any(c["name"].startswith("start_seed_") for c in ctx.start_workflow_calls)
+    update_agg.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# F.4: ``_aggregate_seed_metrics`` aggregator helper unit tests.
+# ---------------------------------------------------------------------------
+
+
+def test_aggregate_seed_metrics_skips_buggy_children() -> None:
+    """A buggy seed child is excluded so a single crash doesn't poison
+    the mean; one healthy child is enough to produce an aggregate
+    (``std=0``)."""
+    from bfts_tree import _aggregate_seed_metrics
+
+    out = _aggregate_seed_metrics(
+        [
+            {"is_buggy": True, "metric_json": {"final_value": 0.0}},
+            {"is_buggy": False, "metric_json": {"final_value": 0.5}},
+        ]
+    )
+
+    assert out is not None
+    assert out["aggregate_n"] == 1.0
+    assert out["aggregate_mean"] == pytest.approx(0.5)
+    assert out["aggregate_std"] == pytest.approx(0.0)
+
+
+def test_aggregate_seed_metrics_handles_nested_schema() -> None:
+    """The newer ``metric_names[*].data[*].final_value`` shape is read
+    correctly so seed nodes whose parse step emitted the multi-metric
+    payload still contribute to the aggregate."""
+    from bfts_tree import _aggregate_seed_metrics
+
+    nested = {
+        "metric_names": [
+            {"data": [{"final_value": 0.3}, {"final_value": 0.9}]}
+        ]
+    }
+    out = _aggregate_seed_metrics(
+        [
+            {"is_buggy": False, "metric_json": nested},
+            {"is_buggy": False, "metric_json": nested},
+        ]
+    )
+
+    assert out is not None
+    assert out["aggregate_n"] == 2.0
+    assert out["aggregate_mean"] == pytest.approx(0.3)
+
+
+def test_aggregate_seed_metrics_returns_none_when_no_usable_value() -> None:
+    """All children buggy → no usable scalar → ``None`` so the caller
+    skips the aggregate write."""
+    from bfts_tree import _aggregate_seed_metrics
+
+    out = _aggregate_seed_metrics(
+        [
+            {"is_buggy": True, "metric_json": {"final_value": 0.0}},
+            {"is_buggy": True, "metric_json": None},
+        ]
+    )
+
+    assert out is None

@@ -9,9 +9,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from _bfts_export import (
+    render_tree_dot,
     select_best,
     write_best_node_id_artifact,
     write_references_artifact,
+    write_tree_dot_artifact,
 )
 
 from ._mocks import MockPool as FakePool
@@ -161,3 +163,118 @@ async def test_write_references_artifact_overwrites_existing() -> None:
     upper = query.upper()
     assert "ON CONFLICT" in upper
     assert "DO UPDATE" in upper
+
+
+# ---------------------------------------------------------------------------
+# F.3: render_tree_dot + write_tree_dot_artifact.
+# ---------------------------------------------------------------------------
+
+
+def test_render_tree_dot_colors_node_states() -> None:
+    """Three-node tree: root good → child buggy_plots → grandchild best.
+    Assert dot structure, all node ids present, edges correct, colors
+    match the legend, ``best`` overrides ``good``."""
+    nodes = [
+        {"node_id": "root", "parent_node_id": None, "stage_name": "draft",
+         "is_buggy": False, "is_buggy_plots": False,
+         "metric_json": {"final_value": 0.5}},
+        {"node_id": "mid", "parent_node_id": "root", "stage_name": "improve",
+         "is_buggy": False, "is_buggy_plots": True,
+         "metric_json": {"final_value": 0.4}},
+        {"node_id": "best", "parent_node_id": "mid", "stage_name": "improve",
+         "is_buggy": False, "is_buggy_plots": False,
+         "metric_json": {"final_value": 0.3}},
+    ]
+    dot = render_tree_dot(nodes, run_id="r1", best_node_id="best")
+    assert dot.startswith("digraph BFTS_r1 {")
+    assert dot.rstrip().endswith("}")
+    for nid in ("root", "mid", "best"):
+        assert f'"{nid}"' in dot
+    assert '"root" -> "mid"' in dot
+    assert '"mid" -> "best"' in dot
+    assert 'fillcolor="gold"' in dot      # best
+    assert 'fillcolor="yellow"' in dot    # buggy_plots
+    assert 'fillcolor="green"' in dot     # good non-best
+
+
+def test_render_tree_dot_handles_pending_and_buggy_nodes() -> None:
+    """Pending (``is_buggy is None``) and buggy nodes get the right colors;
+    legend subgraph carries every state name."""
+    nodes = [
+        {"node_id": "p", "parent_node_id": None, "stage_name": "draft",
+         "is_buggy": None, "is_buggy_plots": None, "metric_json": None},
+        {"node_id": "b", "parent_node_id": "p", "stage_name": "debug",
+         "is_buggy": True, "is_buggy_plots": None, "metric_json": None},
+    ]
+    dot = render_tree_dot(nodes, run_id="r2", best_node_id=None)
+    assert 'fillcolor="lightgray"' in dot  # pending
+    assert 'fillcolor="red"' in dot        # buggy
+    for state in ("best", "good", "buggy", "buggy_plots", "pending"):
+        assert f'"legend_{state}"' in dot
+
+
+def test_render_tree_dot_sanitizes_colon_run_id() -> None:
+    """The digraph identifier sanitizer must not break on
+    ``wfr_<hex>:tree:0`` (colons are illegal unquoted in dot)."""
+    nodes = [{"node_id": "n1", "parent_node_id": None, "stage_name": "draft",
+              "is_buggy": False, "is_buggy_plots": False,
+              "metric_json": {"final_value": 0.1}}]
+    dot = render_tree_dot(nodes, run_id="wfr_abc:tree:0", best_node_id=None)
+    header = dot.splitlines()[0]
+    assert ":" not in header
+    assert header.startswith("digraph BFTS_")
+
+
+def test_render_tree_dot_handles_nested_metric_schema() -> None:
+    """Nested ``metric_names[*].data[*].final_value`` shape is read for
+    the score-label suffix so multi-metric runs still show a score."""
+    nodes = [{
+        "node_id": "n1", "parent_node_id": None, "stage_name": "draft",
+        "is_buggy": False, "is_buggy_plots": False,
+        "metric_json": {
+            "metric_names": [
+                {"data": [{"final_value": 0.4242}]}
+            ]
+        },
+    }]
+    dot = render_tree_dot(nodes, run_id="r3", best_node_id=None)
+    assert "0.4242" in dot
+
+
+def test_render_tree_dot_metric_json_string_payload_is_tolerated() -> None:
+    """``metric_json`` arriving as a raw JSON string (asyncpg jsonb return)
+    is parsed before label generation; an unparseable string just yields
+    a node without a score suffix instead of crashing."""
+    import json as _json
+    nodes = [
+        {"node_id": "n1", "parent_node_id": None, "stage_name": "draft",
+         "is_buggy": False, "is_buggy_plots": False,
+         "metric_json": _json.dumps({"final_value": 0.123})},
+        {"node_id": "n2", "parent_node_id": None, "stage_name": "draft",
+         "is_buggy": False, "is_buggy_plots": False,
+         "metric_json": "not valid json"},
+    ]
+    dot = render_tree_dot(nodes, run_id="r4", best_node_id=None)
+    assert "0.123" in dot
+    assert '"n2"' in dot
+
+
+@pytest.mark.asyncio
+async def test_write_tree_dot_artifact_upserts_with_run_id_keyed_artifact_id() -> None:
+    """The artifact_id is ``<run_id>:tree.dot`` so replay overwrites
+    the previous render rather than colliding on the unique
+    ``(node_id, relative_path)`` constraint."""
+    pool = FakePool()
+
+    artifact_id = await write_tree_dot_artifact(
+        pool, run_id="r1", dot_text="digraph X {}", anchor_node_id="n1"
+    )
+
+    assert artifact_id == "r1:tree.dot"
+    query, args = pool.execute_calls[0]
+    assert "tree.dot" in query
+    assert "tree_viz" in query
+    assert "ON CONFLICT" in query.upper()
+    assert args[0] == "r1:tree.dot"
+    assert args[1] == "n1"
+    assert args[2] == b"digraph X {}"

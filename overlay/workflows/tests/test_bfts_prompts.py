@@ -15,6 +15,7 @@ from _bfts_prompts import (
     REVIEW_FUNC_SPEC,
     VLM_FEEDBACK_SPEC,
     compile_prompt_to_md,
+    prior_attempts_section,
 )
 
 
@@ -127,3 +128,55 @@ def test_function_spec_names_are_unique() -> None:
         PLOT_SELECTION_SPEC["function"]["name"],
     }
     assert len(names) == 4
+
+
+# ---------------------------------------------------------------------------
+# F.2: prior_attempts_section markdown rendering.
+# ---------------------------------------------------------------------------
+
+
+def test_prior_attempts_section_renders_bullets_oldest_first() -> None:
+    """``summaries`` arrives most-recent-first from
+    ``list_recent_node_summaries``; the renderer reverses so the LLM
+    reads chronologically. Each bullet carries the 8-char node id
+    prefix, stage, buggy flag, plan first-line, and analysis."""
+    summaries = [
+        {"node_id": "node-newer-001", "stage_name": "improve",
+         "plan": "scale lr by 10x\nthen something else",
+         "is_buggy": True, "analysis": "diverged after 50 steps"},
+        {"node_id": "node-older-002", "stage_name": "draft",
+         "plan": "baseline", "is_buggy": False, "analysis": "ran clean"},
+    ]
+    out = prior_attempts_section(summaries)
+
+    assert "## Prior attempts" in out
+    n_older_idx = out.index("node-old")
+    n_newer_idx = out.index("node-new")
+    assert n_older_idx < n_newer_idx, (
+        "newest summary must appear LAST in the rendered prompt body"
+    )
+    assert "buggy: yes" in out  # newer
+    assert "buggy: no" in out   # older
+    # Plan is truncated to first line; the multiline part doesn't leak.
+    assert "then something else" not in out
+    assert "diverged after 50 steps" in out
+    assert "ran clean" in out
+
+
+def test_prior_attempts_section_returns_empty_for_no_summaries() -> None:
+    """Empty list → empty string so callers can append the section
+    unconditionally without a stray ``## Prior attempts`` header."""
+    assert prior_attempts_section([]) == ""
+
+
+def test_prior_attempts_section_tolerates_missing_optional_fields() -> None:
+    """Rows missing ``plan`` / ``analysis`` / ``stage_name`` get
+    placeholder strings rather than crashing on KeyError. The DB row
+    schema technically NOT-NULLs these, but a defensive renderer
+    survives a future loose-schema migration."""
+    summaries = [{"node_id": "n-1", "is_buggy": False}]
+    out = prior_attempts_section(summaries)
+
+    assert "## Prior attempts" in out
+    assert "(no plan recorded)" in out
+    assert "(no analysis)" in out
