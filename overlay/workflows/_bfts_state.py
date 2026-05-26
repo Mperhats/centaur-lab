@@ -73,10 +73,16 @@ async def update_node_metric(
 ) -> None:
     """Write the post-execution result for a node.
 
-    Nullable params (``exc_info``, ``exc_stack``, ``metric``,
-    ``analysis``, ``plan``, ``code``): pass ``None`` to leave the column
-    unchanged (= absent update); pass an empty container (``[]`` / ``{}`` /
-    ``""``) to record empty-but-present. Callers MUST NOT conflate the two.
+    Two distinct null-handling contracts:
+
+    - ``exc_info``, ``exc_stack``, ``metric``, ``analysis``: passing ``None``
+      writes SQL ``NULL`` to the column; pass an empty container
+      (``[]`` / ``{}`` / ``""``) to record empty-but-present. Callers MUST
+      NOT conflate the two.
+    - ``plan``, ``code``: passing ``None`` leaves the column unchanged
+      (``COALESCE`` semantics) — useful when the caller only has the
+      post-execution result and wants to preserve the value written by
+      ``insert_node``. Pass an explicit string to overwrite.
     """
     await pool.execute(
         """
