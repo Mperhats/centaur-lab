@@ -1,4 +1,19 @@
-"""Research brief rendering and persistence for company_context_documents."""
+"""Project a Semantic Scholar paper list into a research-brief row.
+
+Two pure projection helpers:
+
+* :func:`render_brief` — Markdown view over a paper list. Re-used by
+  both the ``research_brief`` tool method (returned to the agent in the
+  response) and ``save_papers`` (persisted as ``body``).
+* :func:`build_brief_document` — assemble the ``company_context_documents``
+  row dict for the brief.
+
+Persistence lives in the call site
+(``tools/semantic_scholar/client.research_brief`` and
+``workflows/save_papers.handler``); both inline the ``_upsert_document``
+SQL + ``vm_metrics`` shim that mirrors upstream's
+``company_context_documents`` convention.
+"""
 
 from __future__ import annotations
 
@@ -6,13 +21,7 @@ import hashlib
 from datetime import UTC, datetime
 from typing import Any
 
-from centaur_lab.metrics import observe_document_size, record_document_change
-from centaur_lab.paper_document import (
-    _canonical_json,
-    _content_hash,
-    build_paper_document,
-    upsert_document,
-)
+from tools.semantic_scholar.utils import canonical_json, content_hash
 
 _BRIEF_ABSTRACT_TRUNCATE = 500
 _BRIEF_TITLE_QUERY_TRUNCATE = 80
@@ -22,7 +31,7 @@ _BRIEF_MAX_AUTHORS_INLINE = 3
 
 def brief_id_for(query: str, year_from: int | None) -> str:
     """Stable, case-insensitive id suffix for the brief document."""
-    canonical = _canonical_json([query.strip().lower(), year_from])
+    canonical = canonical_json([query.strip().lower(), year_from])
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:_BRIEF_ID_HEX_LEN]
 
 
@@ -142,56 +151,6 @@ def build_brief_document(
         "access_scope": "company",
         "occurred_at": None,
         "source_updated_at": datetime.now(UTC),
-        "content_hash": _content_hash(title, markdown, "", metadata),
+        "content_hash": content_hash(title, markdown, "", metadata),
         "metadata": metadata,
-    }
-
-
-async def persist_research_brief_from_papers(
-    pool: Any,
-    *,
-    query: str,
-    papers: list[dict[str, Any]],
-    year_from: int | None = None,
-    limit: int | None = None,
-) -> dict[str, Any]:
-    """Upsert a research brief and link each paper row to it."""
-    effective_limit = limit if limit is not None else len(papers)
-    markdown = render_brief(query, year_from, papers)
-    brief_doc = build_brief_document(query, year_from, effective_limit, papers, markdown)
-
-    observe_document_size(brief_doc)
-    brief_action = await upsert_document(pool, brief_doc)
-    record_document_change(brief_doc, brief_action)
-
-    papers_inserted = 0
-    papers_updated = 0
-    papers_noop = 0
-    for paper in papers:
-        try:
-            paper_doc = build_paper_document(paper, query=query)
-        except ValueError:
-            continue
-        observe_document_size(paper_doc)
-        action = await upsert_document(
-            pool,
-            paper_doc,
-            parent_document_id=brief_doc["document_id"],
-        )
-        record_document_change(paper_doc, action)
-        if action == "inserted":
-            papers_inserted += 1
-        elif action == "updated":
-            papers_updated += 1
-        else:
-            papers_noop += 1
-
-    return {
-        "brief_document_id": brief_doc["document_id"],
-        "brief_action": brief_action,
-        "results_count": len(papers),
-        "papers_inserted": papers_inserted,
-        "papers_updated": papers_updated,
-        "papers_noop": papers_noop,
-        "markdown": markdown,
     }

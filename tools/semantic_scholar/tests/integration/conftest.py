@@ -39,7 +39,7 @@ import asyncpg
 import pytest
 import pytest_asyncio
 
-from centaur_lab.integration_db import (
+from tools.semantic_scholar.tests.integration._db import (
     can_connect,
     dsn_with_db,
     ensure_database,

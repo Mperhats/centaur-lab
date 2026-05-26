@@ -33,21 +33,16 @@ populated SCHEDULE would fire orphan runs on a timer with no run_id.
 """
 from __future__ import annotations
 
-import sys
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 if TYPE_CHECKING:
     from api.workflow_engine import WorkflowContext
 
-from _bfts_config import resolve_llm_api_key, resolve_llm_settings
-from _bfts_export import write_references_artifact
-from _bfts_llm import LLMCall, call_with_function
-from _bfts_state import fetch_best_node_for_run
-
+from bfts.config import resolve_llm_api_key, resolve_llm_settings
+from bfts.export import write_references_artifact
+from bfts.llm import LLMCall, call_with_function
+from bfts.state import fetch_best_node_for_run
 from tools.semantic_scholar.client import BIBTEX_PAPER_FIELDS
 
 WORKFLOW_NAME = "gather_citations"
@@ -286,7 +281,7 @@ def _to_bibtex(results: list[list[dict[str, Any]]]) -> tuple[str, int, int]:
     return "\n\n".join(entries), len(entries), skipped
 
 
-async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
+async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     if not inp.run_id or not inp.run_id.strip():
         msg = "run_id cannot be empty"
         raise ValueError(msg)

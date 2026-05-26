@@ -18,25 +18,22 @@ See ``docs/superpowers/plans/2026-05-26-bfts-phase4.md`` (Phase 4c.3).
 from __future__ import annotations
 
 import os
-import sys
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 if TYPE_CHECKING:
     from api.workflow_engine import WorkflowContext
 
 import asyncpg
-from _bfts_config import (
+
+from bfts.config import (
     DEFAULT_DEBUG_PROB,
     DEFAULT_MAX_DEBUG_DEPTH,
     DEFAULT_METRIC_REDUCER,
     DEFAULT_NUM_DRAFTS,
     DEFAULT_NUM_WORKERS,
 )
-from _bfts_hyperparams import insert_hyperparams, latest_hyperparams
+from bfts.hyperparams import insert_hyperparams, latest_hyperparams
 
 WORKFLOW_NAME = "bfts_reflection_nightly"
 
@@ -78,7 +75,7 @@ def _env_flag_enabled(name: str) -> bool:
     the overlay must not depend on Centaur ETL helpers, and inlining the
     three-string check keeps the schedule's enabled-flag self-contained.
     """
-    return str(os.getenv(name, "")).strip().lower() in ("1", "true", "yes")
+    return str(os.getenv(name, "")).strip().lower() in ("1", "true", "yes")  # noqa: TID251 - non-secret BFTS_* cron-gate from Helm api.extraEnv
 
 
 # NOTE: ``enabled`` only gates the scheduler's cron tick. Manual POSTs
@@ -110,7 +107,7 @@ class Input:
     lookback_runs: int = 50
 
 
-async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
+async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     pool = ctx._pool
 
     # v1 heuristic only inspects ``best_node_id`` (truthy ⇒ "good run").

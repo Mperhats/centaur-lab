@@ -26,16 +26,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
-from _bfts_config import (
+from bfts.config import (
     DEFAULT_DRAFT_MODEL,
     DEFAULT_FEEDBACK_MODEL,
-    DEFAULT_LLM_API_KEY_SECRET,
     DEFAULT_VLM_MODEL,
 )
-from _bfts_llm import LLMCall, call_for_text, call_with_function, extract_code
-from _bfts_prompts import (
+from bfts.llm import LLMCall, call_for_text, call_with_function, extract_code
+from bfts.prompts import (
     METRIC_PARSE_SPEC,
     PROMPT_IMPL_GUIDELINE,
     PROMPT_RESP_FMT,
@@ -94,7 +93,7 @@ def _coerce_exec_result(result: Any) -> dict[str, Any]:
 @dataclass
 class ExpandContext:
     sandbox_id: str
-    parent_node: Optional[dict[str, Any]]   # row dict from bfts_nodes; None = new draft
+    parent_node: dict[str, Any] | None   # row dict from bfts_nodes; None = new draft
     idea: dict[str, Any]
     llm_api_key: str
     node_id: str
@@ -130,7 +129,7 @@ class ExpandContext:
     seed_override: int | None = None
 
 
-def _branch(parent: Optional[dict[str, Any]]) -> str:
+def _branch(parent: dict[str, Any] | None) -> str:
     if parent is None:
         return "draft"
     return "debug" if parent.get("is_buggy") else "improve"

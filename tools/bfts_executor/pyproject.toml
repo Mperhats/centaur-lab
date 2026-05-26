@@ -1,0 +1,15 @@
+[project]
+name = "bfts_executor"
+description = "Best-First Tree Search executor: drives a Sandbox CR through the experiment-exec contract (Sakana AI Scientist-v2 parity)"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "kubernetes-asyncio>=29.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.centaur]
+module = "client.py"

@@ -1,0 +1,19 @@
+[project]
+name = "bfts_vlm"
+description = "VLM review of BFTS plots (Sakana _analyze_plots_with_vlm parity, OpenAI / Anthropic vision)"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.centaur]
+module = "client.py"
+optional_secrets = [
+    {type = "http", name = "ANTHROPIC_API_KEY", match_headers = ["x-api-key"], hosts = ["api.anthropic.com"]},
+    {type = "http", name = "OPENAI_API_KEY", match_headers = ["Authorization"], hosts = ["api.openai.com"]},
+]

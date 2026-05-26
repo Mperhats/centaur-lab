@@ -15,25 +15,21 @@ from __future__ import annotations
 
 import json
 import random
-import sys
 import uuid
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 if TYPE_CHECKING:
     from api.workflow_engine import WorkflowContext
 
-from _bfts_config import (
+from bfts.config import (
     DEFAULT_METRIC_REDUCER,
     resolve_llm_settings,
     resolve_search_settings,
 )
-from _bfts_metric import score
-from _bfts_select import NodeRef, SearchConfig, select_next
-from _bfts_state import (
+from bfts.metric import score
+from bfts.select import NodeRef, SearchConfig, select_next
+from bfts.state import (
     insert_node,
     insert_run,
     list_nodes_for_run,
@@ -404,7 +400,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     final_nodes = await ctx.step(
         "list_nodes_final", lambda: list_nodes_for_run(pool, run_id=inp.run_id)
     )
-    from _bfts_export import (  # local import keeps top tidy
+    from bfts.export import (  # local import keeps top tidy
         render_tree_dot,
         select_best,
         write_best_artifact,

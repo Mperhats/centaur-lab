@@ -283,7 +283,7 @@ class BFTSExecutor:
     async def collect_artifacts(
         self,
         sandbox_id: str,
-        dest_dir: "Path",
+        dest_dir: Path,
         node_id: str,
         working_dir: str = _DEFAULT_WORKING_DIR,
     ) -> list[str]:
@@ -350,7 +350,7 @@ class _KubernetesSandboxAPI:
         self.networking_api = networking_api
         self.ws_core_api = ws_core_api
         self.ws_api_client = ws_api_client
-        self.namespace = namespace or os.getenv("KUBERNETES_NAMESPACE", "centaur-system")
+        self.namespace = namespace or os.getenv("KUBERNETES_NAMESPACE", "centaur-system")  # noqa: TID251 - K8s namespace from pod env, not a secret
 
     async def _ensure_clients(self) -> None:
         # Per-attribute lazy init: only load kubeconfig + construct a real

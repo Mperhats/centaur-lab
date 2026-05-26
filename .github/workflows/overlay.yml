@@ -6,27 +6,27 @@ on:
     paths:
       - tools/**
       - workflows/**
+      - bfts/**
       - .agents/**
       - services/**
-      - tests/**
-      - centaur_lab/**
       - Dockerfile
       - .dockerignore
       - pyproject.toml
       - uv.lock
+      - ruff.toml
       - .github/workflows/overlay.yml
   pull_request:
     paths:
       - tools/**
       - workflows/**
+      - bfts/**
       - .agents/**
       - services/**
-      - tests/**
-      - centaur_lab/**
       - Dockerfile
       - .dockerignore
       - pyproject.toml
       - uv.lock
+      - ruff.toml
       - .github/workflows/overlay.yml
   workflow_dispatch:
 

@@ -20,13 +20,11 @@
 # into sandbox pods at ``/home/agent/overlay/org``. Alpine is
 # sufficient — the overlay only ships static files; tool and workflow
 # handlers are .py modules the API pod discovers via TOOL_DIRS /
-# WORKFLOW_DIRS at startup, and tool deps are aggregated in the root
-# ``pyproject.toml`` (per-tool pyprojects were dropped to match the
-# centaur-acme example layout — note that this also drops the
-# ``[tool.centaur]`` blocks the upstream API pod's ``tool_manager``
-# reads at startup, so the overlay registers zero tools at runtime
-# until a minimal per-tool pyproject is restored or upstream lands
-# root-aggregated discovery; see ``AGENTS.md`` "Conventions").
+# WORKFLOW_DIRS at startup. Each ``tools/<name>/pyproject.toml`` carries
+# the ``[tool.centaur]`` block the upstream API pod's ``tool_manager``
+# reads to register the tool and bind iron-proxy secret headers; the
+# root ``pyproject.toml`` only aggregates dev/test deps for the shared
+# ``uv`` venv (see ``AGENTS.md`` "Conventions").
 FROM alpine:3.20
 WORKDIR /overlay
 COPY . /overlay

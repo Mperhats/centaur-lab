@@ -8,17 +8,13 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 import uuid
-from pathlib import Path
 
 import asyncpg
 import pytest
 import pytest_asyncio
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
-from _bfts_state import insert_node, insert_run, list_nodes_for_run, update_node_metric
+from bfts.state import insert_node, insert_run, list_nodes_for_run, update_node_metric
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("CENTAUR_TEST_DATABASE_URL"),

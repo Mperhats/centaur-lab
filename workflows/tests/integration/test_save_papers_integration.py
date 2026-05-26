@@ -70,8 +70,7 @@ _PAPER_173BA: dict[str, Any] = {
 async def test_save_papers_writes_paper_row_with_full_shape(
     db_pool: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import save_papers
-
+    from workflows import save_papers
     monkeypatch.setattr(
         save_papers,
         "SemanticScholarClient",
@@ -115,8 +114,7 @@ async def test_save_papers_writes_paper_row_with_full_shape(
 async def test_save_papers_is_idempotent_on_rerun(
     db_pool: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import save_papers
-
+    from workflows import save_papers
     monkeypatch.setattr(
         save_papers,
         "SemanticScholarClient",
@@ -144,8 +142,7 @@ async def test_save_papers_is_idempotent_on_rerun(
 async def test_save_papers_partial_failure_writes_successful_papers(
     db_pool: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import save_papers
-
+    from workflows import save_papers
     monkeypatch.setattr(
         save_papers,
         "SemanticScholarClient",

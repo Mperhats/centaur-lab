@@ -11,8 +11,35 @@ from typing import Any
 import asyncpg
 import httpx
 
-from centaur_lab.brief import persist_research_brief_from_papers
 from centaur_sdk import secret
+from tools.semantic_scholar.projections.brief import build_brief_document, render_brief
+from tools.semantic_scholar.projections.paper import build_paper_document
+from tools.semantic_scholar.utils import canonical_json, content_hash
+
+# vm_metrics shim. Inside the API pod ``api.vm_metrics`` resolves
+# cleanly and emission lands in real Prometheus counters; outside the
+# pod (local pytest, ``uvx ruff``, the bare ``python -m`` smoke test)
+# the import fails and the fallback no-op stubs take over so this file
+# imports without `ImportError`. Mirrors the convention used by
+# upstream's ``company_context_documents`` workflow and (verbatim) by
+# the sibling ``workflows/save_papers.py`` handler — that duplication
+# is the upstream pattern (see
+# ``.centaur/workflows/company_context_documents.py``).
+try:
+    from api.vm_metrics import (
+        observe_company_context_document_size as _observe_document_size,
+    )
+    from api.vm_metrics import (
+        record_company_context_documents_changed as _record_document_change,
+    )
+except ImportError:
+
+    def _observe_document_size(source: str, source_type: str, chars: int) -> None: ...
+
+    def _record_document_change(
+        source: str, source_type: str, action: str, count: int = 1
+    ) -> None: ...
+
 
 log = logging.getLogger(__name__)
 
@@ -41,14 +68,117 @@ MAX_RESEARCH_BRIEF_LIMIT = 20
 RESEARCH_BRIEF_EMPTY_QUERY_ERROR = "query cannot be empty"
 RESEARCH_BRIEF_INVALID_LIMIT_ERROR = "limit must be positive"
 
-# Brief markdown rendering lives in ``centaur_lab.brief`` (shared with
-# ``save_papers``). Input-validation error strings below are imported by
-# ``workflows/research_brief.py`` for its error → skipped table.
+# Brief markdown rendering lives in ``projections/brief.py``; paper
+# projection lives in ``projections/paper.py``. Input-validation error
+# strings above are imported by ``workflows/research_brief.py`` for its
+# error → skipped table.
 
 
 def _clamp(value: int, *, minimum: int, maximum: int) -> int:
     """Clamp integer tool inputs to predictable output bounds."""
     return max(minimum, min(int(value), maximum))
+
+
+def _observe_doc_size(document: dict[str, Any]) -> None:
+    """Forward a doc's body size to the API pod's Prometheus counter."""
+    _observe_document_size(
+        str(document.get("source", "")),
+        str(document.get("source_type", "")),
+        len(str(document.get("body") or "")),
+    )
+
+
+def _record_doc_change(document: dict[str, Any], action: str) -> None:
+    """Forward a doc's inserted/updated/noop verdict to the API pod's counter."""
+    _record_document_change(
+        str(document.get("source", "")),
+        str(document.get("source_type", "")),
+        action,
+    )
+
+
+async def _upsert_document(
+    conn: Any,
+    document: dict[str, Any],
+    *,
+    parent_document_id: str | None = None,
+) -> str:
+    """Upsert a projected document; return ``inserted`` / ``updated`` / ``noop``.
+
+    Verbatim duplicate of the same helper in ``workflows/save_papers.py``
+    — that duplication is upstream's ``company_context_documents``
+    convention (see ``.centaur/workflows/company_context_documents.py``)
+    and is deliberate, not an oversight. The compound-hash logic
+    (intrinsic hash + ``effective_parent``) ensures a paper first saved
+    without a parent and later surfaced via a brief becomes an
+    ``UPDATE`` rather than a silent noop, even when the intrinsic
+    content hasn't changed.
+
+    ``conn`` is an ``asyncpg.Connection`` (this tool opens a fresh
+    connection per call rather than sharing a pool, so concurrent
+    invocations don't fight over a single workflow-pool slot during S2
+    round trips).
+    """
+    effective_parent = (
+        parent_document_id
+        if parent_document_id is not None
+        else document.get("parent_document_id")
+    )
+    effective_hash = content_hash(document["content_hash"], effective_parent)
+
+    existing_hash = await conn.fetchval(
+        "SELECT content_hash FROM company_context_documents WHERE document_id = $1",
+        document["document_id"],
+    )
+    if existing_hash == effective_hash:
+        return "noop"
+
+    status = await conn.execute(
+        "INSERT INTO company_context_documents ("
+        "document_id, source, source_type, source_document_id, source_chunk_id, "
+        "parent_document_id, title, body, url, author_id, author_name, access_scope, "
+        "occurred_at, source_updated_at, content_hash, metadata, updated_at"
+        ") VALUES ("
+        "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, "
+        "$15, $16::jsonb, NOW()"
+        ") ON CONFLICT (document_id) DO UPDATE SET "
+        "source = EXCLUDED.source, "
+        "source_type = EXCLUDED.source_type, "
+        "source_document_id = EXCLUDED.source_document_id, "
+        "source_chunk_id = EXCLUDED.source_chunk_id, "
+        "parent_document_id = EXCLUDED.parent_document_id, "
+        "title = EXCLUDED.title, "
+        "body = EXCLUDED.body, "
+        "url = EXCLUDED.url, "
+        "author_id = EXCLUDED.author_id, "
+        "author_name = EXCLUDED.author_name, "
+        "access_scope = EXCLUDED.access_scope, "
+        "occurred_at = EXCLUDED.occurred_at, "
+        "source_updated_at = EXCLUDED.source_updated_at, "
+        "content_hash = EXCLUDED.content_hash, "
+        "metadata = EXCLUDED.metadata, "
+        "updated_at = NOW() "
+        "WHERE company_context_documents.content_hash IS DISTINCT FROM EXCLUDED.content_hash",
+        document["document_id"],
+        document["source"],
+        document["source_type"],
+        document["source_document_id"],
+        document["source_chunk_id"],
+        effective_parent,
+        document["title"],
+        document["body"],
+        document["url"],
+        document["author_id"],
+        document["author_name"],
+        document["access_scope"],
+        document["occurred_at"],
+        document["source_updated_at"],
+        effective_hash,
+        canonical_json(document["metadata"]),
+    )
+    if not status.endswith(" 1"):
+        return "noop"
+    return "updated" if existing_hash else "inserted"
 
 
 class SemanticScholarClient:
@@ -475,16 +605,46 @@ class SemanticScholarClient:
             year_from=year_from,
         )
 
+        effective_limit = limit if limit is not None else len(papers)
+        markdown = render_brief(query, year_from, papers)
+        brief_doc = build_brief_document(query, year_from, effective_limit, papers, markdown)
+
         conn = await self._connect()
         try:
-            result = await persist_research_brief_from_papers(
-                conn,
-                query=query,
-                papers=papers,
-                year_from=year_from,
-                limit=limit,
-            )
-            return {"status": "completed", **result}
+            _observe_doc_size(brief_doc)
+            brief_action = await _upsert_document(conn, brief_doc)
+            _record_doc_change(brief_doc, brief_action)
+
+            papers_inserted = 0
+            papers_updated = 0
+            papers_noop = 0
+            for paper in papers:
+                try:
+                    paper_doc = build_paper_document(paper, query=query)
+                except ValueError:
+                    continue
+                _observe_doc_size(paper_doc)
+                action = await _upsert_document(
+                    conn, paper_doc, parent_document_id=brief_doc["document_id"]
+                )
+                _record_doc_change(paper_doc, action)
+                if action == "inserted":
+                    papers_inserted += 1
+                elif action == "updated":
+                    papers_updated += 1
+                else:
+                    papers_noop += 1
+
+            return {
+                "status": "completed",
+                "brief_document_id": brief_doc["document_id"],
+                "brief_action": brief_action,
+                "results_count": len(papers),
+                "papers_inserted": papers_inserted,
+                "papers_updated": papers_updated,
+                "papers_noop": papers_noop,
+                "markdown": markdown,
+            }
         finally:
             await conn.close()
 

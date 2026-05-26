@@ -12,17 +12,13 @@ See docs/superpowers/plans/2026-05-25-bfts-on-centaur.md (Phase 2).
 """
 from __future__ import annotations
 
-import sys
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 if TYPE_CHECKING:
     from api.workflow_engine import WorkflowContext
 
-from _bfts_config import resolve_llm_settings, resolve_search_config
+from bfts.config import resolve_llm_settings, resolve_search_config
 
 WORKFLOW_NAME = "bfts_root"
 
@@ -139,7 +135,7 @@ def _sandbox_id(*, run_id: str, tree_idx: int) -> str:
     return f"bfts-{safe_run_id}-tree-{tree_idx}"
 
 
-async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
+async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     # Idea resolution happens BEFORE anything else: a defaulted toy idea
     # should win every downstream prompt the same way an operator-supplied
     # idea would, and the substitution must be visible in workflow logs so
@@ -263,7 +259,7 @@ async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
                         sandbox_id=sid
                     ),
                 )
-            except Exception as exc:  # noqa: BLE001 — aggregated below
+            except Exception as exc:
                 teardown_errors.append((tree_index, exc))
 
         if teardown_errors:

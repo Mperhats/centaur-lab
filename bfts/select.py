@@ -13,16 +13,15 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from random import Random
-from typing import Optional, Union
 
 
 @dataclass(frozen=True)
 class NodeRef:
     node_id: str
-    parent_id: Optional[str]
+    parent_id: str | None
     root_id: str                       # id of the root (draft) ancestor
-    is_buggy: Optional[bool]            # None == not yet executed
-    is_buggy_plots: Optional[bool]      # None == VLM not yet run
+    is_buggy: bool | None            # None == not yet executed
+    is_buggy_plots: bool | None      # None == VLM not yet run
     debug_depth: int
     # _bfts_metric.score result; lower is better. Scalar for the
     # ``mean`` / ``min`` / ``weighted_mean`` reducers; tuple for
@@ -31,7 +30,7 @@ class NodeRef:
     # All nodes in one ``select_next`` call share the same reducer
     # (enforced by ``bfts_tree.handler``); mixed ``float`` / ``tuple``
     # never appears in ``good_sorted``.
-    metric_score: Union[float, tuple[float, ...]]
+    metric_score: float | tuple[float, ...]
     stage_name: str
     is_leaf: bool
     # F.4: ``True`` means this node was produced by a seed re-evaluation
@@ -93,7 +92,7 @@ def select_next(
     nodes: list[NodeRef],
     cfg: SearchConfig,
     rng: Random,
-) -> list[Optional[NodeRef]]:
+) -> list[NodeRef | None]:
     """Return ``cfg.num_workers`` selections.
 
     Each entry is either:
@@ -101,7 +100,7 @@ def select_next(
       - ``NodeRef`` → expand THIS node next (debug or improve depending on
         the node's ``is_buggy``)
     """
-    selected: list[Optional[NodeRef]] = []
+    selected: list[NodeRef | None] = []
     processed_roots: set[str] = set()
 
     drafts = _draft_nodes(nodes)

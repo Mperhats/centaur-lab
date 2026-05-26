@@ -35,20 +35,29 @@ centaur-scientist/
 ├── Dockerfile                       # `COPY . /overlay` alpine image
 ├── Dockerfile.bfts-executor         # python:3.11-slim image used by BFTS sandbox pods
 ├── .dockerignore                    # what the overlay image does NOT ship
-├── centaur_lab/                     # shared persistence/metrics helpers
+├── bfts/                            # BFTS controller internals shared by bfts_* workflows
+│   ├── config.py                    #   Input → hyperparams → BFTS_* env → defaults resolver
+│   ├── state.py                     #   asyncpg DAO for bfts_runs / bfts_nodes / hyperparams
+│   ├── expand.py + select.py        #   per-node LLM pipeline + UCB-1 selector
+│   ├── llm.py + prompts.py          #   OpenAI/Anthropic clients + prompt builders
+│   ├── metric.py + export.py        #   Sakana metric reducer + best/dot/run artifacts
+│   └── hyperparams.py               #   reflection-tuned policy round-trip
 ├── centaur_sdk -> .centaur/centaur_sdk  # dev-only symlink (see "Conventions" below)
 ├── pyproject.toml + uv.lock         # single-root uv project (aggregated tool + workflow deps)
 ├── ruff.toml                        # lint + banned-api rules (no os.getenv, no requests)
 ├── services/
 │   ├── api/db/migrations/           # overlay-owned dbmate migrations (bfts_runs, bfts_nodes, …)
 │   └── sandbox/SYSTEM_PROMPT.md     # overlay sandbox prompt (when present)
-├── tests/                           # ACME-style root pytest smoke suite
 ├── tools/
-│   ├── bfts_executor/               # Drives agent-sandbox Sandbox CRs for BFTS experiment exec
-│   ├── bfts_vlm/                    # VLM plot review for BFTS analysis nodes
-│   └── semantic_scholar/            # S2 Graph API client + research-brief renderer
+│   ├── bfts_executor/               #   Drives agent-sandbox Sandbox CRs (pyproject + client.py)
+│   ├── bfts_vlm/                    #   VLM plot review (pyproject declares optional A/OAI keys)
+│   └── semantic_scholar/            #   S2 Graph API client + research-brief renderer
+│       ├── client.py + cli.py       #     public tool surface
+│       ├── utils.py                 #     canonical_json + content_hash (pure helpers)
+│       └── projections/             #     pure doc-row builders for company_context_documents
+│           ├── paper.py             #       single-paper → row
+│           └── brief.py             #       paper-list → brief-row + markdown render
 └── workflows/                       # auto-discovered durable handlers
-    ├── _bfts_*.py                   # BFTS internals (leading `_` skipped by loader)
     ├── bfts_root.py                 # entry workflow, takes an `idea` dict
     ├── bfts_tree.py                 # tree-driver dispatcher
     ├── bfts_expand_one.py           # single-node expansion handler
@@ -70,13 +79,33 @@ PR.
 - `tools/` and `workflows/` are implicit namespace packages (no
   `__init__.py` at the directory root) so the API pod can merge them with
   the upstream `/app/tools` and `/app/workflows` package roots at runtime.
+  `bfts/` is a regular package (`bfts/__init__.py` is present) because
+  it is overlay-owned and never merged with an upstream namespace.
 - Per-tool/per-workflow test files use absolute imports
   (`from workflows.tests._mocks import ...`) rather than relative
   (`from ._mocks import ...`) so pytest's `--import-mode=importlib` does
   not collide the leaf `tests` package across sibling test trees.
-- `centaur_lab/` is the shared overlay helper package (renderer +
-  persistence + metrics). Named `centaur_lab` (not `shared`) because
-  upstream reserves the `shared.*` namespace for its tools runtime.
+- BFTS controller internals live in the `bfts/` package at the repo
+  root. The repo root is on `sys.path` for pytest, `uv run python -m …`,
+  IDE tooling and the API pod's runtime, so `from bfts.config import …`
+  resolves identically across all entrypoints — no `sys.path.insert`
+  shims and no per-workflow path bootstraps.
+- Document persistence follows the upstream `company_context_documents`
+  pattern: pure projections live in `tools/semantic_scholar/projections/`
+  (`paper.py`, `brief.py`), pure hash/JSON helpers in
+  `tools/semantic_scholar/utils.py`, and the `_upsert_document` SQL +
+  `vm_metrics` `try/except ImportError` shim are **inlined verbatim**
+  per consumer (`tools/semantic_scholar/client.py` for the
+  `research_brief` tool method, `workflows/save_papers.py` for the
+  durable handler). The duplication is the upstream convention —
+  upstream's own `company_context_documents.py` repeats the same SQL
+  rather than sharing through a sibling module — and it keeps the
+  per-consumer parent-linkage / retry semantics local to the consumer.
+- Each `tools/<name>/` directory has its own `pyproject.toml` with a
+  `[tool.centaur]` block. This is how the upstream `tool_manager`
+  discovers tools and binds iron-proxy headers — without it the API
+  pod registers zero tools at runtime. The root `pyproject.toml` is
+  separate (single shared `uv` venv for dev + test).
 - `centaur_sdk` resolves through a tracked symlink at the repo root
   pointing into `.centaur/centaur_sdk`. Upstream's wheel-packaging
   declares `[tool.hatch.build.targets.wheel] packages = ["."]` which
@@ -85,20 +114,20 @@ PR.
   every entrypoint (pytest, `uv run python -m ...`, IDEs). The overlay
   image excludes the symlink — the API pod ships its own
   `/app/centaur_sdk/`.
-- Per-tool `pyproject.toml` files were dropped to match the centaur-acme
-  layout: the root `pyproject.toml` is the single source of truth for
-  dev/test deps. Note that the upstream `tool_manager` discovers tools
-  by scanning each `tools/<name>/pyproject.toml` for a `[tool.centaur]`
-  block, so the overlay registers zero tools at runtime until per-tool
-  pyprojects are restored (minimal `[tool.centaur]` blocks only) or
-  upstream lands root-aggregated discovery. `bfts_vlm` will specifically
-  need its `optional_secrets` block back so the iron-proxy Anthropic /
-  OpenAI binding still works.
 - Secrets resolve via `from centaur_sdk import secret; secret("KEY")` —
-  `os.getenv` is banned for API keys (lint-enforced in `ruff.toml`). The
-  one exception is non-secret `BFTS_*` config flags consumed by
-  `workflows/_bfts_config.py`, which are still ruff-flagged today and
-  ride this branch as known pre-existing lint debt.
+  `os.getenv` is banned for API keys (lint-enforced in `ruff.toml`).
+  Non-secret `BFTS_*` operator knobs (model names, debug-prob caps,
+  etc.) go through `bfts.config._env_knob`, the single annotated
+  wrapper that documents the suppression in one place rather than
+  scattering `# noqa: TID251` across the call sites.
+- Only **integration** tests live in-tree right now
+  (`tools/semantic_scholar/tests/integration/`,
+  `workflows/tests/integration/`). The previous unit-test suite was
+  parked under the gitignored `tmp/test-old/` mirror during the
+  `centaur_lab` → S2 dispersal because the projections + workflow
+  handlers were rewritten; unit coverage gets rebuilt incrementally
+  against the new `projections/` + inlined-persistence shape rather
+  than ported file-by-file from a structure that no longer matches.
 - The full project conventions, architecture, and operational guides live
   upstream in [`.centaur/AGENTS.md`](.centaur/AGENTS.md).
 

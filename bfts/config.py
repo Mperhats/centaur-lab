@@ -23,7 +23,7 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from _bfts_metric import DEFAULT_REDUCER, REDUCERS
+from bfts.metric import DEFAULT_REDUCER, REDUCERS
 
 if TYPE_CHECKING:
     import asyncpg
@@ -74,6 +74,22 @@ ENV_PRIOR_ATTEMPTS_WINDOW = "BFTS_PRIOR_ATTEMPTS_WINDOW"
 ENV_NUM_SEEDS = "BFTS_NUM_SEEDS"
 
 
+def _env_knob(name: str) -> str | None:
+    """Read a non-secret ``BFTS_*`` operator knob from the API pod env.
+
+    Ruff's ``TID251`` (see ``ruff.toml``) bans bare ``os.getenv`` on
+    the assumption every env read is a credential — wrong here. These
+    are non-secret config tuners (``BFTS_DEBUG_PROB``,
+    ``BFTS_DRAFT_MODEL`` and friends) injected via Helm
+    ``api.extraEnv``, and the deployment env is the canonical source
+    for them. Centralizing the read here is preferable to scattering
+    ``# noqa: TID251`` across seven call sites: one annotated function
+    instead of seven annotated lines, and the rationale lives next to
+    the suppression.
+    """
+    return os.getenv(name)  # noqa: TID251
+
+
 @dataclass(frozen=True)
 class LLMSettings:
     """Resolved LLM configuration for one tree run."""
@@ -99,17 +115,17 @@ def resolve_llm_settings(
     return LLMSettings(
         llm_api_key_secret=(
             llm_api_key_secret
-            or os.getenv(ENV_LLM_API_KEY_SECRET)
+            or _env_knob(ENV_LLM_API_KEY_SECRET)
             or DEFAULT_LLM_API_KEY_SECRET
         ),
         draft_model=(
-            draft_model or os.getenv(ENV_DRAFT_MODEL) or DEFAULT_DRAFT_MODEL
+            draft_model or _env_knob(ENV_DRAFT_MODEL) or DEFAULT_DRAFT_MODEL
         ),
         feedback_model=(
-            feedback_model or os.getenv(ENV_FEEDBACK_MODEL) or DEFAULT_FEEDBACK_MODEL
+            feedback_model or _env_knob(ENV_FEEDBACK_MODEL) or DEFAULT_FEEDBACK_MODEL
         ),
         vlm_model=(
-            vlm_model or os.getenv(ENV_VLM_MODEL) or DEFAULT_VLM_MODEL
+            vlm_model or _env_knob(ENV_VLM_MODEL) or DEFAULT_VLM_MODEL
         ),
     )
 
@@ -263,7 +279,7 @@ async def resolve_search_config(
     """
     db_row: dict[str, Any] | None = None
     if pool is not None:
-        from _bfts_hyperparams import latest_hyperparams
+        from bfts.hyperparams import latest_hyperparams
 
         db_row = await latest_hyperparams(pool)
 
@@ -321,7 +337,7 @@ def _resolve_float(
 ) -> tuple[float, str]:
     if input_val is not None:
         return float(input_val), SOURCE_INPUT
-    env = os.getenv(env_var)
+    env = _env_knob(env_var)
     if env is not None:
         return float(env), SOURCE_ENV
     return float(default), SOURCE_DEFAULT
@@ -332,7 +348,7 @@ def _resolve_int(
 ) -> tuple[int, str]:
     if input_val is not None:
         return int(input_val), SOURCE_INPUT
-    env = os.getenv(env_var)
+    env = _env_knob(env_var)
     if env is not None:
         return int(env), SOURCE_ENV
     return int(default), SOURCE_DEFAULT
@@ -343,7 +359,7 @@ def _resolve_str(
 ) -> tuple[str, str]:
     if input_val is not None:
         return input_val, SOURCE_INPUT
-    env = os.getenv(env_var)
+    env = _env_knob(env_var)
     if env is not None:
         return env, SOURCE_ENV
     return default, SOURCE_DEFAULT

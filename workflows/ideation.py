@@ -26,18 +26,14 @@ firing orphan runs on a timer with no topic.
 """
 from __future__ import annotations
 
-import sys
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 if TYPE_CHECKING:
     from api.workflow_engine import WorkflowContext
 
-from _bfts_config import resolve_llm_api_key, resolve_llm_settings
-from _bfts_llm import LLMCall, call_with_function
+from bfts.config import resolve_llm_api_key, resolve_llm_settings
+from bfts.llm import LLMCall, call_with_function
 
 WORKFLOW_NAME = "ideation"
 SCHEDULE: dict[str, Any] = {}

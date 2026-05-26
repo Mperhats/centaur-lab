@@ -36,23 +36,19 @@ the module by its top-level name (no leading underscore) and
 """
 from __future__ import annotations
 
-import sys
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 if TYPE_CHECKING:
     from api.workflow_engine import WorkflowContext
 
-from _bfts_config import (
+from bfts.config import (
     DEFAULT_PRIOR_ATTEMPTS_WINDOW,
     resolve_llm_api_key,
     resolve_llm_settings,
 )
-from _bfts_expand import ExpandContext, expand_node
-from _bfts_state import (
+from bfts.expand import ExpandContext, expand_node
+from bfts.state import (
     list_recent_node_summaries,
     mark_buggy_plots,
     update_node_metric,
@@ -106,7 +102,7 @@ class Input:
     is_seed_node: bool = False
 
 
-async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
+async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     llm = resolve_llm_settings(
         draft_model=inp.draft_model,
         feedback_model=inp.feedback_model,

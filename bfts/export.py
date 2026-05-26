@@ -11,7 +11,8 @@ import uuid
 from typing import Any
 
 import asyncpg
-from _bfts_metric import DEFAULT_REDUCER, ScoreResult, score
+
+from bfts.metric import DEFAULT_REDUCER, ScoreResult, score
 
 
 def select_best(

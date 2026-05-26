@@ -5,20 +5,14 @@ description = "centaur-scientist organization overlay for Centaur (BFTS / AI-Sci
 requires-python = ">=3.11"
 license = "Apache-2.0 OR MIT"
 
-# Single source of truth for every dep used by ``tools/`` and
-# ``workflows/``. Per-tool ``pyproject.toml`` files have been removed —
-# matching the centaur-acme example layout — so this list is what
-# ``uv sync`` installs into the root ``.venv`` and what CI verifies.
-#
-# NOTE: dropping per-tool pyprojects also drops the ``[tool.centaur]``
-# blocks the upstream API pod's ``tool_manager`` reads at startup
-# (see ``.centaur/services/api/api/tool_manager.py:1574-1683``). The
-# overlay as packaged today therefore registers zero tools at deploy
-# time — known regression to be resolved before the first cluster
-# publish (either by restoring a minimal pyproject per tool or by
-# landing root-aggregated tool discovery upstream). ``bfts_vlm`` will
-# specifically need its ``optional_secrets`` block back so the
-# iron-proxy Anthropic / OpenAI binding still works.
+# Aggregated dev/test deps for ``tools/``, ``workflows/``, and the
+# ``bfts/`` controller package — one ``uv sync`` provisions a single
+# ``.venv`` that every per-tool / per-workflow test file can resolve
+# against. Per-tool ``pyproject.toml`` files (``tools/<name>/pyproject.toml``)
+# still exist and own their ``[tool.centaur]`` blocks (this is how the
+# upstream API pod's ``tool_manager`` discovers tools at startup, see
+# ``.centaur/services/api/api/tool_manager.py:1574-1683``); they are not
+# the source of dev deps.
 #
 # ``centaur_sdk`` is intentionally not listed here: upstream's
 # ``centaur_sdk/pyproject.toml`` declares ``packages = ["."]`` which
@@ -53,17 +47,20 @@ dev = [
 package = false
 
 [tool.pytest.ini_options]
-# ``tests`` is the ACME-style root smoke suite; ``tools`` and
-# ``workflows`` pick up every per-tool / per-workflow test file that
-# lives next to the code under test. A single ``uv run pytest`` from
-# the repo root walks all three.
-testpaths = ["tests", "tools", "workflows"]
-# Repo root on the path so ``from tools.bfts_executor.client import …``
-# and ``from workflows.bfts_tree import …`` resolve as namespace
-# packages — byte-identical to how the API pod sets up TOOL_DIRS /
-# WORKFLOW_DIRS at startup. ``centaur_sdk`` resolves through the symlink
-# at the repo root (see the ``dependencies`` comment above), so we don't
-# need ``.centaur`` on the path here anymore.
+# Only integration tests live in-tree right now (see
+# ``tools/semantic_scholar/tests/integration/`` and
+# ``workflows/tests/integration/``); the unit-test suite was moved into
+# the gitignored ``tmp/test-old/`` mirror during the centaur_lab → S2
+# dispersal and will be reinstated incrementally as projections and
+# workflow handlers stabilize. A single ``uv run pytest`` from the
+# repo root walks both integration trees.
+testpaths = ["tools", "workflows"]
+# Repo root on the path so ``from tools.bfts_executor.client import …``,
+# ``from workflows.bfts_tree import …``, and ``from bfts.config import …``
+# all resolve identically — byte-identical to how the API pod sets up
+# TOOL_DIRS / WORKFLOW_DIRS at startup. ``centaur_sdk`` resolves through
+# the symlink at the repo root (see the ``dependencies`` comment above),
+# so we don't need ``.centaur`` on the path here anymore.
 pythonpath = ["."]
 asyncio_mode = "strict"
 # ``importlib`` is required because we have multiple sibling

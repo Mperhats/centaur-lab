@@ -10,7 +10,8 @@ Underscore-prefixed: workflow loader skips it.
 """
 from __future__ import annotations
 
-from typing import Any, Iterable, Union
+from collections.abc import Iterable
+from typing import Any, Union
 
 PromptType = Union[str, dict, list]
 
@@ -223,13 +224,13 @@ def prior_attempts_section(summaries: list[dict[str, Any]]) -> str:
 
 
 __all__: Iterable[str] = (
-    "compile_prompt_to_md",
-    "render_prompts",
-    "prior_attempts_section",
-    "REVIEW_FUNC_SPEC",
     "METRIC_PARSE_SPEC",
-    "VLM_FEEDBACK_SPEC",
     "PLOT_SELECTION_SPEC",
     "PROMPT_IMPL_GUIDELINE",
     "PROMPT_RESP_FMT",
+    "REVIEW_FUNC_SPEC",
+    "VLM_FEEDBACK_SPEC",
+    "compile_prompt_to_md",
+    "prior_attempts_section",
+    "render_prompts",
 )
