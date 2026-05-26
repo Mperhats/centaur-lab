@@ -152,9 +152,15 @@ runner has already chdir'd you into a per-node workspace). Specifically:
 - ``*.png`` — every plot you want reviewed. Use ``plt.savefig('foo.png')``
   rather than ``plt.show()``; the runner is headless.
 
-Use ``device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')``;
-fall back to CPU silently. Don't print large blobs to stdout — the
-workflow caps captured output at ~5KB.
+Available packages in the sandbox runtime (bfts-executor image):
+``numpy``, ``scipy``, ``scikit-learn``, ``matplotlib``. Other libraries
+(``torch``, ``tensorflow``, ``transformers``, ``jax``, …) are NOT
+installed — prefer sklearn / numpy / scipy for toy experiments.
+If you genuinely need a deep-learning library, ``pip install`` it at
+the top of your script (the sandbox has network egress for PyPI).
+
+Don't print large blobs to stdout — the workflow caps captured
+output at ~5KB.
 
 Path note: Phase 4h placed each expansion in its own per-node working
 directory (``/workspace/<node_id>/``) and the runner ``cd``'s into
