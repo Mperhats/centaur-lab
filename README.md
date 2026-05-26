@@ -229,8 +229,15 @@ same POST against the in-pod API:
 
 ```bash
 just overlay::smoke-save-papers <paper_id>
-just overlay::smoke-research-brief "<query>"
+just overlay::smoke-research-brief-deployed "<query>"
 ```
+
+For a lighter local loop that drives the same `research_brief` tool
+method without going through the workflow router or the cluster, run
+`just overlay::smoke-research-brief "<query>"` — it shells out to the
+standalone semantic_scholar CLI subcommand and persists against
+whatever `DATABASE_URL` is in scope (port-forward to `centaur_test`
+recommended).
 
 Both workflows write to `company_context_documents`, which is BM25-indexed
 via paradedb and has a GIN index on `metadata` — so persisted papers and
