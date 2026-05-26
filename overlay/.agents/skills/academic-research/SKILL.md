@@ -12,10 +12,36 @@ literature: arXiv, NeurIPS, biology/chem journals, etc.
 
 ## When to use
 
-- "Find papers about X" → `semantic_scholar.search(query=X, limit=10)` — checks `company_context_documents` first for cached papers, then tops up via the live API for anything published after the cache's cutoff year. Falls through cleanly when the cache is empty. Prefer this over `search_papers` for any query that might overlap previous research.
-- "Find papers strictly newer than my cache" / "what's been published this month" → `semantic_scholar.search_papers(query=X, year_from=<recent year>)` directly. The hybrid `search` is cache-aware, so use the raw live call only when you specifically want to ignore the cache.
-- "Summarize this paper" given a DOI / arXiv ID / S2 ID → `semantic_scholar.get_paper(paper_id=...)`
-- "What does this paper cite?" / building a related-work list → `semantic_scholar.get_references(paper_id=..., limit=20)`
+**Default flow: search-then-save.** Persistence is on by default — every
+academic-research turn grows the cache so future turns find the same papers
+in the indexed lane without an API call. Skip the `save_papers` follow-up
+ONLY when the user explicitly says "just search", "don't save",
+"exploratory only", or otherwise signals they don't want the result
+remembered.
+
+- "Find papers about X" → `semantic_scholar.search(query=X, limit=10)` to
+  look up cached + live results, then **immediately follow up with
+  `save_papers`** on the live-lane `paperId`s. The hybrid path checks
+  `company_context_documents` first and tops up via the live API for
+  anything newer than the cache's cutoff year; the save step turns those
+  fresh hits into permanent cache. Prefer this over `search_papers` for
+  any query that might overlap previous research.
+- "Find papers strictly newer than my cache" / "what's been published this
+  month" → `semantic_scholar.search_papers(query=X, year_from=<recent year>)`
+  directly, then `save_papers` on the IDs. Use the raw live call only when
+  you specifically want to ignore the cache; the save follow-up still applies.
+- "Summarize this paper" given a DOI / arXiv ID / S2 ID →
+  `semantic_scholar.get_paper(paper_id=...)`, then `save_papers` with
+  `[paper_id]` so the next turn can find it cached.
+- "What does this paper cite?" / building a related-work list →
+  `semantic_scholar.get_references(paper_id=..., limit=20)`. References are
+  good `save_papers` candidates when the user is doing follow-up research
+  on the citation network; for a one-off "what does this paper cite"
+  question, skip the save.
+- "Build me a brief / lit review / writeup on X" → `research_brief`
+  workflow. It bundles search + render + save into one atomic call and is
+  the right tool whenever the user wants a synthesized document, not just
+  a list.
 
 ## Cache-aware search (`semantic_scholar.search`)
 
@@ -26,7 +52,7 @@ The hybrid `search` method returns two ranked lanes in one response:
 
 The response shape is `{status, query, limit, year_from, indexed_count, live_count, count, indexed_cutoff_year, live_year_from, live_error, results}`. The `results` array is `[*indexed, *live]` in that order. `live_error` is set (and `live_count: 0`) when the live API call fails — the indexed lane still returns successfully.
 
-If the user is doing follow-up research on a topic and the live lane returned new papers worth keeping, run `save_papers` on those `paperId`s as a follow-up. The hybrid method does not auto-persist — that's deliberate, so cheap exploratory queries don't bloat the document table. Persistence remains opt-in via `save_papers` / `research_brief`.
+The hybrid method does not auto-persist — that's a code-level boundary so the tool stays pure (find data) and persistence stays in workflows (write data). The expected agent flow is to call `save_papers` immediately after `search` on the live-lane `paperId`s so the cache grows over time; saving is the default unless the user opted out. The indexed lane never needs a `save_papers` follow-up — those rows are already in `company_context_documents`.
 
 ## Output expectations
 
@@ -62,17 +88,22 @@ saved something.
 
 ### `save_papers` — remember specific papers
 
-Use after `search_papers` (or whenever the user gives you paper IDs) to
-persist papers as standalone context for future turns. Trigger phrases:
-"save these papers", "remember these for later", "add these to context".
+The implicit default after every `search` / `search_papers` / `get_paper`
+turn (see "Default flow: search-then-save" above). Also fires on explicit
+asks: "save these papers", "remember these for later", "add these to context".
 
 ```
-call workflow run '{"workflow_name":"save_papers","input":{"paper_ids":["173ba8ae...","abcd1234..."]}}'
+call workflow run '{"workflow_name":"save_papers","input":{"paper_ids":["173ba8ae...","abcd1234..."],"query":"diffusion models"}}'
 ```
 
 Returns `{status, papers_inserted, papers_updated, papers_noop, papers_failed, results}`.
-The optional `query` field on the input is recorded as traceability metadata
-on each row.
+Pass the original user query in the optional `query` field — it's recorded
+as traceability metadata on each row, so future BM25 retrievals can still
+surface the matched-against question, not just the paper text.
+
+Idempotency means the save call is cheap to make even when the agent
+isn't sure whether the papers are already cached: re-saving an unchanged
+paper returns `noop` and writes nothing.
 
 ### `research_brief` — synthesized lit review, persisted
 
