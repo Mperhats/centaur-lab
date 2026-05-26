@@ -37,6 +37,7 @@ from _bfts_state import (
     insert_node,
     insert_run,
     list_nodes_for_run,
+    mark_node_failed,
     set_best_node,
 )
 
@@ -295,25 +296,47 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         # writes ``update_node_metric`` (and optionally
         # ``mark_buggy_plots``) before returning, so the controller
         # re-queries the DB on the next iteration to see the results.
-        # The child's return-value envelope is logging-only — the DB
-        # row is the source of truth.
+        # The child's return-value envelope is logging-only on the
+        # happy path — the DB row is the source of truth.
         #
-        # NOTE: ``wait_for_workflow`` returns the child record even for
-        # failed/cancelled children. We do not inspect status here, which
-        # means a permanently-failed child leaves its placeholder row with
-        # NULL ``is_buggy`` / ``code`` / ``metric_json`` in the DB. Such a
-        # row is invisible to ``_buggy_leaf_nodes`` (checks ``is True``) and
-        # ``_good_nodes`` (checks ``is False``), but a draft-stage failure
-        # still occupies a slot in ``select_next``'s ``len(drafts)`` count
-        # and can stall the selector below ``num_drafts``. A follow-up will
-        # add bounded waits + explicit failure inspection (tracked alongside
-        # the same gap in ``bfts_root.py``).
+        # F.1: ``wait_for_workflow`` returns the child record even for
+        # failed/cancelled children, leaving the placeholder row with
+        # NULL ``is_buggy`` / ``code`` / ``metric_json``. Such a row is
+        # invisible to ``_buggy_leaf_nodes`` (checks ``is True``) AND
+        # ``_good_nodes`` (checks ``is False``), but a draft-stage
+        # failure still occupies a slot in ``select_next``'s
+        # ``len(drafts) < num_drafts`` accounting and stalls the
+        # selector. So if the child terminated non-completed we route
+        # the placeholder through ``mark_node_failed`` to flip
+        # ``is_buggy=TRUE`` with a synthetic ``ChildWorkflowFailed``
+        # exception — the next iteration's selector then treats it as
+        # a buggy leaf eligible for debug or replacement.
         for node_id, child in children:
             # Step name suffix matches the ``start_expand_{node_id}`` above
             # so start/wait pairs share a node_id for easy correlation.
-            await ctx.wait_for_workflow(
+            result = await ctx.wait_for_workflow(
                 f"wait_expand_{node_id}", run_id=child["run_id"]
             )
+            child_status = (result or {}).get("status")
+            if child_status in ("failed", "failed_permanent", "cancelled"):
+                child_error = (result or {}).get("error") or (result or {}).get(
+                    "error_text"
+                )
+                await ctx.step(
+                    f"mark_failed_{node_id}",
+                    lambda nid=node_id, st=child_status, err=child_error: (
+                        mark_node_failed(
+                            pool,
+                            node_id=nid,
+                            exc_type="ChildWorkflowFailed",
+                            exc_info={"child_status": st, "error": err},
+                            analysis=(
+                                f"bfts_expand_one terminated with "
+                                f"status={st}"
+                            ),
+                        )
+                    ),
+                )
         iters_used += 1
 
     final_nodes = await ctx.step(

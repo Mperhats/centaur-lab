@@ -134,6 +134,48 @@ async def update_node_metric(
     )
 
 
+async def mark_node_failed(
+    pool: asyncpg.Pool,
+    *,
+    node_id: str,
+    exc_type: str,
+    exc_info: dict[str, Any] | None,
+    analysis: str,
+) -> None:
+    """Mark a placeholder node as buggy after its expansion workflow failed.
+
+    Used by ``bfts_tree`` when ``wait_for_workflow`` returns a non-completed
+    status (e.g. ``failed`` / ``failed_permanent`` / ``cancelled``). Fills
+    in the minimum fields the selector needs:
+
+    - ``is_buggy=True`` so ``_buggy_leaf_nodes`` sees it.
+    - ``exc_type`` sentinel (typically ``"ChildWorkflowFailed"``) so
+      operators can grep for orphaned-child rows.
+    - ``exc_info_json`` carrying the child's status + error excerpt for
+      postmortem (COALESCE preserves any pre-existing value).
+    - ``analysis`` human-readable string for the dot artifact + UI.
+
+    Closes the in-code TODO at ``bfts_tree.py:301-310`` (which would
+    otherwise leave failed children as NULL placeholders that stall the
+    selector's ``len(drafts) < num_drafts`` accounting).
+    """
+    await pool.execute(
+        """
+        UPDATE bfts_nodes
+        SET is_buggy = TRUE,
+            exc_type = $2,
+            exc_info_json = COALESCE($3::jsonb, exc_info_json),
+            analysis = $4,
+            updated_at = NOW()
+        WHERE node_id = $1
+        """,
+        node_id,
+        exc_type,
+        json.dumps(exc_info) if exc_info is not None else None,
+        analysis,
+    )
+
+
 async def mark_buggy_plots(
     pool: asyncpg.Pool,
     *,
