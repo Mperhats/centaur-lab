@@ -220,11 +220,17 @@ async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
     final_nodes = await ctx.step(
         "list_nodes_final", lambda: list_nodes_for_run(pool, run_id=inp.run_id)
     )
-    good = [n for n in final_nodes if n.get("is_buggy") is False and n.get("is_buggy_plots") is not True]
-    best = min(good, key=lambda n: score(_parse_metric_json(n.get("metric_json")))) if good else None
+    from _bfts_export import select_best, write_best_artifact   # local import keeps top tidy
+
+    best = select_best(final_nodes)
     if best is not None:
         await ctx.step(
-            "set_best", lambda: set_best_node(pool, run_id=inp.run_id, best_node_id=best["node_id"])
+            "write_best_artifact",
+            lambda: write_best_artifact(pool, node_id=best["node_id"], code=best["code"]),
+        )
+        await ctx.step(
+            "set_best",
+            lambda: set_best_node(pool, run_id=inp.run_id, best_node_id=best["node_id"]),
         )
 
     return {
