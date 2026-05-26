@@ -181,9 +181,10 @@ async def upsert_document(
     """Upsert a projected paper document and return inserted/updated/noop.
 
     Mirrors `_upsert_document` from the upstream `company_context_documents`
-    workflow. The `parent_document_id` kwarg overrides whatever is in
-    `document` so callers can link papers to a brief after the fact (e.g. the
-    research-brief workflow stamps each paper row with the brief's id).
+    workflow. Callers must pass `parent_document_id` as a kwarg to link a
+    child to a parent (e.g. the research-brief workflow stamps each paper
+    row with the brief's id); any `parent_document_id` field on `document`
+    itself is ignored.
 
     The persisted `content_hash` combines the document's intrinsic hash with
     the effective parent. Without this, re-parenting an otherwise-unchanged
@@ -191,9 +192,7 @@ async def upsert_document(
     `research_brief`) would silently no-op because the intrinsic hash hadn't
     changed — leaving the paper's `parent_document_id` stale.
     """
-    effective_parent = parent_document_id if parent_document_id is not None else document.get(
-        "parent_document_id"
-    )
+    effective_parent = parent_document_id
     # OVERLAY: compound hash (intrinsic + effective_parent) — diverges from
     # upstream's raw intrinsic-hash convention to make re-parenting trigger
     # UPDATE even when content is unchanged. See function docstring for why.
