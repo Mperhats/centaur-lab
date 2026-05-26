@@ -21,25 +21,116 @@ up: bootstrap-secrets
     just overlay::build
     just deploy
 
+# Deploy the chart with three overlay-image modes (precedence top-down):
+#
+#   1. $OVERLAY_TAG          — explicit pin, e.g. `OVERLAY_TAG=sha-1b6cb08 just deploy`
+#                              Uses values.org.yaml's GHCR repository as-is.
+#   2. overlay/.tag          — written by `just overlay::build`. Local Docker
+#                              Desktop image; we override the repository back
+#                              to bare `centaur-overlay` so the kubelet finds
+#                              the host-cached image instead of trying GHCR.
+#   3. sha-<origin/main>     — default. `git fetch origin main` + short sha
+#                              matches the tag CI publishes on every merge.
+#                              `just refresh-overlay` is the one-command
+#                              "pull latest main + roll API" version of this.
+#
+# GHCR is private — the chart's pods reference `ghcr-pull` via global.imagePullSecrets
+# in values.org.yaml. Run `just bootstrap-ghcr-pull-secret` once (or just
+# `just bootstrap-secrets`, which calls it) before mode 3 will work.
+#
+# Deploy the chart; resolves overlay image tag from $OVERLAY_TAG > overlay/.tag > origin/main sha.
 [group('lifecycle')]
 [working-directory('.centaur')]
 deploy:
     #!/usr/bin/env bash
     set -euo pipefail
-    if [[ -f ../overlay/.tag ]]; then
+    set_overrides=()
+    if [[ -n "${OVERLAY_TAG:-}" ]]; then
+      overlay_tag="$OVERLAY_TAG"
+      mode="explicit \$OVERLAY_TAG"
+    elif [[ -f ../overlay/.tag ]]; then
       overlay_tag=$(tr -d '[:space:]' < ../overlay/.tag)
+      # Local-build mode: image lives only in host Docker daemon, never GHCR.
+      set_overrides+=(--set "overlay.image.repository=centaur-overlay")
+      mode="local build (overlay/.tag)"
     else
-      overlay_tag="sha-$(git -C .. rev-parse --short HEAD)"
+      # Default: pull whatever sha the latest publish job pushed to GHCR.
+      git -C .. fetch origin main --quiet 2>/dev/null || true
+      overlay_tag="sha-$(git -C .. rev-parse --short=7 origin/main)"
+      mode="GHCR (origin/main)"
     fi
+    echo "Deploying overlay image tag=${overlay_tag}  mode=${mode}"
     helm dependency update contrib/chart >/dev/null
     helm upgrade --install $CENTAUR_RELEASE contrib/chart \
         --namespace $CENTAUR_NAMESPACE --create-namespace \
         -f contrib/chart/values.dev.yaml \
         -f ../values.org.yaml \
         -f ../values.local.yaml \
-        --set "overlay.image.tag=${overlay_tag}"
+        --set "overlay.image.tag=${overlay_tag}" \
+        "${set_overrides[@]}"
 
-# Run upstream bootstrap, then patch in keys it does not handle.
+# Fetch the latest centaur-overlay image published to GHCR for origin/main
+# and roll the API + recycle Slack sandboxes so the next agent turn picks
+# it up. This is the standard post-merge workflow:
+#
+#     # after PR is squash-merged to main and the Overlay workflow goes green
+#     just refresh-overlay
+#
+# Removes overlay/.tag (the local-build sentinel) so a stale build from a
+# sibling worktree can't pin the deploy to an image that isn't in GHCR.
+#
+# Pull the latest GHCR overlay image for origin/main, roll the API, recycle Slack sandboxes.
+[group('lifecycle')]
+refresh-overlay:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rm -f overlay/.tag
+    just deploy
+    deploy="${CENTAUR_RELEASE}-centaur-api"
+    echo "Restarting API deployment/${deploy} so it pulls the new overlay image …"
+    kubectl rollout restart "deployment/${deploy}" -n "$CENTAUR_NAMESPACE"
+    kubectl rollout status "deployment/${deploy}" -n "$CENTAUR_NAMESPACE" --timeout=120s
+    just overlay::clean-sandboxes slack
+    echo ""
+    echo "Verify in-cluster:"
+    echo "  kubectl describe deployment/${deploy} -n $CENTAUR_NAMESPACE | grep -A1 'overlay-bootstrap'"
+
+# Materialise (or refresh) the docker-registry secret the chart references
+# as `ghcr-pull` (see global.imagePullSecrets in values.org.yaml). Required
+# because the centaur-overlay GHCR package is private.
+#
+# Reads from env:
+#   GHCR_USERNAME — GitHub username (defaults to Mperhats)
+#   GHCR_TOKEN    — PAT with read:packages scope
+#
+# Both come from .env (see .env.example). Idempotent — re-run after rotating
+# the PAT and the imagePullSecret on every overlay-using pod refreshes
+# automatically on the next rollout.
+#
+# Materialise (or refresh) the ghcr-pull docker-registry secret from GHCR_USERNAME / GHCR_TOKEN.
+[group('lifecycle')]
+bootstrap-ghcr-pull-secret:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    user="${GHCR_USERNAME:-Mperhats}"
+    token="${GHCR_TOKEN:-}"
+    if [[ -z "$token" ]]; then
+      echo "skip ghcr-pull (GHCR_TOKEN unset — overlay image pulls from GHCR will 401)"
+      exit 0
+    fi
+    kubectl get namespace "$CENTAUR_NAMESPACE" >/dev/null 2>&1 \
+      || kubectl create namespace "$CENTAUR_NAMESPACE" >/dev/null
+    kubectl create secret docker-registry ghcr-pull \
+        --namespace "$CENTAUR_NAMESPACE" \
+        --docker-server=ghcr.io \
+        --docker-username="$user" \
+        --docker-password="$token" \
+        --dry-run=client -o yaml \
+      | kubectl apply -f - >/dev/null
+    echo "applied ghcr-pull (user=${user}) in namespace ${CENTAUR_NAMESPACE}"
+
+# Run upstream bootstrap, patch in keys it does not handle, then ensure the
+# GHCR pull secret exists so the overlay initContainer can pull from GHCR.
 [group('lifecycle')]
 bootstrap-secrets:
     #!/usr/bin/env bash
@@ -66,6 +157,7 @@ bootstrap-secrets:
     patch_key GITHUB_TOKEN
     patch_key SEMANTIC_SCHOLAR_API_KEY
     patch_key LOCAL_DEV_API_KEY
+    just bootstrap-ghcr-pull-secret
 
 [group('lifecycle')]
 [confirm("Uninstall " + CENTAUR_RELEASE + " from " + CENTAUR_NAMESPACE + "? Pass --yes to skip this prompt. ")]
