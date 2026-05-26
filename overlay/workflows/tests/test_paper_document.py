@@ -15,8 +15,7 @@ from centaur_lab.paper_document import (
     build_paper_document,
     upsert_document,
 )
-
-from ._mocks import EXECUTE_ARG_INDEX, MockPool
+from centaur_lab.testing import EXECUTE_ARG_INDEX, MockPool
 
 # ``build_paper_document`` stamps ``source_updated_at`` with
 # ``datetime.now(UTC)`` at projection time. Tests treat that as

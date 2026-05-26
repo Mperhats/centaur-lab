@@ -9,8 +9,7 @@ import pytest
 import save_papers
 
 from centaur_lab.paper_document import _content_hash, build_paper_document
-
-from ._mocks import MockContext, MockPool
+from centaur_lab.testing import MockContext, MockPool
 
 
 class MetricsRecorder:

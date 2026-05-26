@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from tests._mocks import MockContext
+from centaur_lab.testing import MockContext
 
 
 class FakeS2Client:
