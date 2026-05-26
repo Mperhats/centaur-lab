@@ -1,6 +1,6 @@
 ---
 name: academic-research
-description: Use when answering questions about academic papers, citations, or research literature — search Semantic Scholar, surface paper metadata, walk the citation graph.
+description: Use when answering questions about academic papers, citations, literature reviews, or research briefs — search Semantic Scholar, build persisted lit-review briefs, surface paper metadata, walk the citation graph. Triggers on peer-reviewed papers, preprints, arXiv, NeurIPS, biology/chemistry journals, ML/AI research topics, "research brief", "lit review", "literature review", or "what does the literature say about X".
 ---
 
 # academic-research
@@ -38,10 +38,12 @@ remembered.
   good `save_papers` candidates when the user is doing follow-up research
   on the citation network; for a one-off "what does this paper cite"
   question, skip the save.
-- "Build me a brief / lit review / writeup on X" → `research_brief`
-  workflow. It bundles search + render + save into one atomic call and is
-  the right tool whenever the user wants a synthesized document, not just
-  a list.
+- "Build me a brief / lit review / writeup on X" / "what does the literature say about Y" →
+  `semantic_scholar.research_brief(query=X, limit=5, year_from=<optional>)`.
+  One call: S2 search + Markdown brief + upsert brief + upsert child papers
+  with `parent_document_id`. The `markdown` field is the renderable output —
+  post that back to Slack as your reply. **Do NOT use `call workflow run` for
+  briefs anymore — the tool method is the canonical surface.**
 
 ## Cache-aware search (`semantic_scholar.search`)
 
@@ -52,7 +54,7 @@ The hybrid `search` method returns two ranked lanes in one response:
 
 The response shape is `{status, query, limit, year_from, indexed_count, live_count, count, indexed_cutoff_year, live_year_from, live_error, results}`. The `results` array is `[*indexed, *live]` in that order. `live_error` is set (and `live_count: 0`) when the live API call fails — the indexed lane still returns successfully.
 
-The hybrid method does not auto-persist — that's a code-level boundary so the tool stays pure (find data) and persistence stays in workflows (write data). The expected agent flow is to call `save_papers` immediately after `search` on the live-lane `paperId`s so the cache grows over time; saving is the default unless the user opted out. The indexed lane never needs a `save_papers` follow-up — those rows are already in `company_context_documents`.
+Hybrid `search` does not auto-persist — that's intentional so the agent has explicit control of when to grow the cache. **`research_brief` does write** (brief + child papers) — that's its whole point. So the tool/workflow split is no longer "tools find, workflows write"; it's "use whichever surface fits the affordance." When the user asks for a list, `search` + `save_papers`. When they ask for a brief, `research_brief`. The expected agent flow after `search` is still to call `save_papers` on the live-lane `paperId`s so the cache grows over time; saving is the default unless the user opted out. The indexed lane never needs a `save_papers` follow-up — those rows are already in `company_context_documents`.
 
 ## Output expectations
 
@@ -73,18 +75,23 @@ results.
   `search_papers` first and only fetch full metadata for the few you'll
   cite.
 - Don't manually concatenate paper summaries into a Slack reply when the
-  user asked for a brief / lit review / writeup — use the `research_brief`
-  workflow below so the brief is also persisted in `company_context_documents`
-  and BM25-searchable across future turns.
+  user asked for a brief / lit review / writeup — use
+  `semantic_scholar.research_brief` so the brief is also persisted in
+  `company_context_documents` and BM25-searchable across future turns.
+- Don't fall back to `call workflow run` for `research_brief` — the
+  workflow handler is now a thin back-compat wrapper around the tool method.
+  External `/workflows/runs` callers (Justfile cluster smoke, etc.) still
+  work, but in-Slack agent turns should always go through the tool.
 - Don't reach for `search_papers` when `search` will do. The hybrid path is strictly cheaper for any query that overlaps prior research (cached results return without an API call), and it gracefully falls through to live when the cache is empty. Use raw `search_papers` only when you specifically need to bypass the cache.
 
-## Persisting research with workflows
+## Persisting research
 
-Two on-demand workflows turn ad-hoc Semantic Scholar lookups into durable
-knowledge by upserting rows into `company_context_documents`. Both are
-content-hash idempotent — re-running with the same input is safe and cheap
-(returns `noop` actions), so you don't have to track whether you've already
-saved something.
+Two on-demand surfaces turn ad-hoc Semantic Scholar lookups into durable
+knowledge by upserting rows into `company_context_documents`: the
+`save_papers` workflow and the `semantic_scholar.research_brief` tool
+method. Both are content-hash idempotent — re-running with the same input
+is safe and cheap (returns `noop` actions), so you don't have to track
+whether you've already saved something.
 
 ### `save_papers` — remember specific papers
 
@@ -109,19 +116,21 @@ paper returns `noop` and writes nothing.
 
 Use when the user wants a writeup, not just a list. Trigger phrases:
 "build a research brief", "give me a literature summary", "do a lit review
-on X", "summary of what's known about X". Prefer this over chaining
-`search_papers` + `save_papers` — it does both atomically: searches S2,
-renders a structured Markdown brief, upserts the brief as one row, and
-upserts each underlying paper as a child row pointing at the brief.
+on X", "summary of what's known about X", "what does the literature say
+about Y". Prefer this over chaining `search_papers` + `save_papers` — it
+does both atomically: searches S2, renders a structured Markdown brief,
+upserts the brief as one row, and upserts each underlying paper as a child
+row pointing at the brief.
 
-```
-call workflow run '{"workflow_name":"research_brief","input":{"query":"active inference world models","limit":5}}'
-```
+The tool method is what `call discover semantic_scholar` surfaces; invoke
+it directly via the tool surface (no `call workflow run` needed):
 
-Returns `{status, brief_document_id, brief_action, results_count, papers_inserted, papers_updated, papers_noop, markdown}`.
-The `markdown` field is the full rendered brief — post that back to Slack
-as your reply. The `brief_document_id` is stable for the same query +
-`year_from` (case-insensitive), so re-running updates the same row instead
-of accruing duplicates; surface it for traceability so a future turn (or
-a RAG retrieval over `company_context_documents`) can pivot back to the
-exact brief.
+`semantic_scholar.research_brief(query="active inference world models", limit=5)`
+
+Returns `{status, brief_document_id, brief_action, results_count,
+papers_inserted, papers_updated, papers_noop, markdown}`. The `markdown`
+field is the full rendered brief — post that back to Slack as your reply.
+The `brief_document_id` is stable for the same query + `year_from`
+(case-insensitive), so re-running updates the same row instead of accruing
+duplicates; surface it for traceability so a future turn (or a RAG retrieval
+over `company_context_documents`) can pivot back to the exact brief.

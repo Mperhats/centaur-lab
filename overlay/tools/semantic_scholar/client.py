@@ -834,7 +834,7 @@ class SemanticScholarClient:
         year_from: int | None = None,
     ) -> dict[str, Any]:
         """Build a persisted research brief on a topic — searches Semantic Scholar,
-        renders a Markdown lit-review, and writes the brief plus its citing papers
+        renders a Markdown lit review, and writes the brief plus its citing papers
         to ``company_context_documents`` for future RAG retrieval.
 
         Use this when a user asks for a literature review, a research summary,

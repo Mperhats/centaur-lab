@@ -101,10 +101,12 @@ def _render_papers(papers: list[dict], title: str) -> None:
 
 @app.command()
 def search(
-    query: str = typer.Argument(..., help="Free-text search query"),
-    limit: int = typer.Option(10, "--limit", "-n", help="Max results (1..100)"),
-    year_from: int = typer.Option(None, "--year-from", "-y", help="Inclusive lower year bound"),
-    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+    query: str = typer.Argument(..., help="Free-text search query."),
+    limit: int = typer.Option(10, "--limit", "-n", help="Max results (1..100)."),
+    year_from: int | None = typer.Option(
+        None, "--year-from", "-y", help="Inclusive lower year bound."
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON."),
 ):
     """Search papers by query."""
     with _make_client() as client:
@@ -117,8 +119,8 @@ def search(
 
 @app.command()
 def paper(
-    paper_id: str = typer.Argument(..., help="Paper ID (S2, DOI:..., arXiv:...)"),
-    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+    paper_id: str = typer.Argument(..., help="Paper ID (S2, DOI:..., arXiv:...)."),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON."),
 ):
     """Fetch metadata for a single paper."""
     with _make_client() as client:
@@ -139,9 +141,9 @@ def paper(
 
 @app.command()
 def references(
-    paper_id: str = typer.Argument(..., help="Paper ID (S2, DOI:..., arXiv:...)"),
-    limit: int = typer.Option(20, "--limit", "-n", help="Max references"),
-    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+    paper_id: str = typer.Argument(..., help="Paper ID (S2, DOI:..., arXiv:...)."),
+    limit: int = typer.Option(20, "--limit", "-n", help="Max references."),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON."),
 ):
     """List the papers cited by the given paper."""
     with _make_client() as client:

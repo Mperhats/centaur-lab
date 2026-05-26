@@ -1,6 +1,6 @@
 [project]
 name = "semantic_scholar"
-description = "Semantic Scholar academic paper search, lookup, and citation graph"
+description = "Search Semantic Scholar, fetch paper metadata, walk the citation graph, and build persisted research briefs (lit-review writeups upserted into company_context_documents)."
 version = "0.1.0"
 requires-python = ">=3.11"
 # python-dotenv is only used by the standalone CLI entrypoint, but listing it
