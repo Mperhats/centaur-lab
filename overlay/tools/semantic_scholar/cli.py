@@ -187,12 +187,8 @@ def research_brief_cmd(
         "-y",
         help="Restrict results to papers published from this year onward.",
     ),
-    json_output: bool = typer.Option(
-        False, "--json", help="Print the full result dict as JSON."
-    ),
-    pretty: bool = typer.Option(
-        False, "--pretty", help="Print only the rendered Markdown brief."
-    ),
+    json_output: bool = typer.Option(False, "--json", help="Print the full result dict as JSON."),
+    pretty: bool = typer.Option(False, "--pretty", help="Print only the rendered Markdown brief."),
 ) -> None:
     """Build and persist a research brief on a topic.
 
@@ -208,9 +204,7 @@ def research_brief_cmd(
     # the operator's intent. Mirror upstream's deep-research pattern of
     # explicit single-flag selection.
     if pretty and json_output:
-        raise typer.BadParameter(
-            "--pretty and --json are mutually exclusive; pick one."
-        )
+        raise typer.BadParameter("--pretty and --json are mutually exclusive; pick one.")
 
     with _make_client() as client:
         result = client.research_brief(query=query, limit=limit, year_from=year_from)
@@ -237,6 +231,58 @@ def research_brief_cmd(
         return
 
     _render_research_brief_summary(query, result)
+
+
+@app.command("archive")
+def archive_cmd(
+    paper_id: str = typer.Argument(..., help="Paper ID (S2, DOI:..., arXiv:...)."),
+    source_url: str | None = typer.Option(
+        None,
+        "--source-url",
+        help="Override PDF URL (defaults to openAccessPdf.url with arxiv fallback).",
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit raw JSON instead of a summary table."
+    ),
+) -> None:
+    """Download, parse, and archive a paper PDF into paper_archives + company_context_documents.
+
+    Requires DATABASE_URL to point at a Centaur DB with the
+    20260526000001_add_paper_archives migration applied. ``just db::port-forward``
+    plus ``just db::fetch-secret`` gives you a local DSN.
+    """
+    with _make_client() as client:
+        result = client.archive_paper(paper_id, source_url=source_url)
+
+    if json_output:
+        print(json.dumps(result, indent=2))
+        return
+
+    status = str(result.get("status", "unknown"))
+    color_for_status = {
+        "completed": "green",
+        "noop": "yellow",
+        "skipped": "yellow",
+        "error": "red",
+    }
+    color = color_for_status.get(status, "white")
+    console.print(f"[{color}]status={status}[/]")
+    for key in (
+        "paper_id",
+        "source_url",
+        "parser_used",
+        "pdf_sha256",
+        "size_bytes",
+        "paper_document_id",
+        "paper_action",
+        "fulltext_document_id",
+        "fulltext_action",
+        "archive_action",
+        "reason",
+        "error",
+    ):
+        if key in result:
+            console.print(f"  {key} = {result[key]}")
 
 
 if __name__ == "__main__":
