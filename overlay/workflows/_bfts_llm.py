@@ -33,6 +33,7 @@ class LLMCall:
     api_key: str
     prompt: str
     max_tokens: int = 8192
+    timeout: float = 120.0
 
 
 async def call_with_function(
@@ -54,7 +55,7 @@ async def call_with_function(
             "function": {"name": function_spec["function"]["name"]},
         },
     }
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    async with httpx.AsyncClient(timeout=call.timeout) as client:
         resp = await client.post(
             "https://api.openai.com/v1/chat/completions",
             json=body,
@@ -70,7 +71,12 @@ async def call_with_function(
     if not tool_calls:
         raise RuntimeError("LLM did not invoke the tool")
     args_str = tool_calls[0]["function"]["arguments"]
-    return json.loads(args_str)
+    try:
+        return json.loads(args_str)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"LLM returned malformed tool arguments: {e}; raw={args_str[:500]}"
+        ) from e
 
 
 async def call_for_text(call: LLMCall) -> str:
@@ -86,7 +92,7 @@ async def call_for_text(call: LLMCall) -> str:
         "max_tokens": call.max_tokens,
         "messages": [{"role": "user", "content": call.prompt}],
     }
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    async with httpx.AsyncClient(timeout=call.timeout) as client:
         resp = await client.post(
             "https://api.openai.com/v1/chat/completions",
             json=body,
@@ -95,7 +101,10 @@ async def call_for_text(call: LLMCall) -> str:
     if resp.status_code != 200:
         raise RuntimeError(f"LLM call failed: {resp.status_code} {resp.text[:500]}")
     data = resp.json()
-    return data["choices"][0]["message"]["content"] or ""
+    choices = data.get("choices") or []
+    if not choices:
+        raise RuntimeError("LLM returned no choices")
+    return choices[0].get("message", {}).get("content") or ""
 
 
 def extract_code(text: str) -> tuple[str, str]:
