@@ -265,6 +265,9 @@ def _patch_fanout_deps(
     monkeypatch.setattr(
         _bfts_export, "write_best_node_id_artifact", AsyncMock(return_value=None)
     )
+    monkeypatch.setattr(
+        _bfts_export, "write_tree_dot_artifact", AsyncMock(return_value=None)
+    )
 
 
 def _input(

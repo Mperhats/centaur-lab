@@ -343,9 +343,11 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         "list_nodes_final", lambda: list_nodes_for_run(pool, run_id=inp.run_id)
     )
     from _bfts_export import (  # local import keeps top tidy
+        render_tree_dot,
         select_best,
         write_best_artifact,
         write_best_node_id_artifact,
+        write_tree_dot_artifact,
     )
 
     best = select_best(final_nodes, reducer=search.metric_reducer)
@@ -367,6 +369,28 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             run_id=inp.run_id,
             best_node_id=best["node_id"],
             node_count=len(final_nodes),
+        )
+
+    # F.3: emit tree.dot visualization artifact. Anchor on the best
+    # node when present, else the first final_nodes row, so even runs
+    # with no good leaves get a queryable tree.dot for postmortem
+    # debugging. Skip silently when there are zero nodes (no anchor
+    # available — bfts_artifacts has FK on node_id).
+    anchor_node_id: str | None = (
+        best["node_id"] if best is not None
+        else (final_nodes[0]["node_id"] if final_nodes else None)
+    )
+    if anchor_node_id is not None:
+        dot_text = render_tree_dot(
+            final_nodes,
+            run_id=inp.run_id,
+            best_node_id=best["node_id"] if best else None,
+        )
+        await ctx.step(
+            "write_tree_dot",
+            lambda dt=dot_text, aid=anchor_node_id: write_tree_dot_artifact(
+                pool, run_id=inp.run_id, dot_text=dt, anchor_node_id=aid,
+            ),
         )
 
     return {
