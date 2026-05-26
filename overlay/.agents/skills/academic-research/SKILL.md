@@ -17,6 +17,13 @@ ONLY when the user explicitly says "just search", "don't save",
 "exploratory only", or otherwise signals they don't want the result
 remembered.
 
+**Pick the right surface:**
+
+- "Find papers about X" → `semantic_scholar.search` + `save_papers` follow-up
+- "Summarize this paper" / DOI / arXiv ID / S2 ID → `semantic_scholar.get_paper` + `save_papers` follow-up
+- "What does this paper cite?" → `semantic_scholar.get_references`
+- "Build a brief / lit review / writeup on X" → `semantic_scholar.research_brief` (atomic search + render + persist)
+
 ## Cache-Aware Search (`semantic_scholar.search`)
 
 The hybrid `search` method returns two ranked lanes in one response:
@@ -35,7 +42,7 @@ For each paper include: title, first author + et al., year, citation count,
 and one sentence on the contribution drawn from the abstract. Link to
 `url` (or `openAccessPdf.url` when present) so the human can dive in.
 
-Do NOT fabricate titles, authors, or DOIs. If `search_papers` returns
+Do NOT fabricate titles, authors, or DOIs. If `search` returns
 nothing, say so and offer alternative queries — don't substitute web
 results.
 
@@ -56,7 +63,7 @@ results.
   work, but in-Slack agent turns should always go through the tool.
 - Don't reach for `search_papers` when `search` will do. The hybrid path is strictly cheaper for any query that overlaps prior research (cached results return without an API call), and it gracefully falls through to live when the cache is empty. Use raw `search_papers` only when you specifically need to bypass the cache.
 
-## Persisting Research with Workflows
+## Persisting Research
 
 Two on-demand surfaces turn ad-hoc Semantic Scholar lookups into durable
 knowledge by upserting rows into `company_context_documents`: the
