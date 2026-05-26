@@ -53,6 +53,15 @@ class ExpandContext:
     idea: dict[str, Any]
     llm_api_key: str
     node_id: str
+    # Per-expansion subdirectory under the sandbox's /workspace PVC.
+    # Phase 4h: ``bfts_expand_one`` (and any controller that fans out
+    # parallel expansions inside the same sandbox) MUST pass a distinct
+    # ``working_dir`` per child so concurrent ``exec_python`` calls don't
+    # race on ``runfile.py`` / ``experiment_data.npy`` / ``*.png`` in the
+    # shared workspace. The default ``"working"`` keeps Phase 0-3
+    # sequential callers and existing tests on the original layout.
+    # The executor validates the value against ``^[A-Za-z0-9_-]+$``.
+    working_dir: str = "working"
     draft_model: str = DEFAULT_DRAFT_MODEL
     feedback_model: str = DEFAULT_FEEDBACK_MODEL
     vlm_model: str = DEFAULT_VLM_MODEL
@@ -159,6 +168,7 @@ async def expand_node(*, ctx: Any, expand_ctx: ExpandContext) -> dict[str, Any]:
             sandbox_id=expand_ctx.sandbox_id,
             code=proposed["code"],
             timeout_s=3600,
+            working_dir=expand_ctx.working_dir,
         ),
     )
 
@@ -195,7 +205,10 @@ async def expand_node(*, ctx: Any, expand_ctx: ExpandContext) -> dict[str, Any]:
     parse_exec = await ctx.step(
         "metric_parse_exec",
         lambda: ctx.tools.bfts_executor.exec_python(
-            sandbox_id=expand_ctx.sandbox_id, code=parse_code, timeout_s=300,
+            sandbox_id=expand_ctx.sandbox_id,
+            code=parse_code,
+            timeout_s=300,
+            working_dir=expand_ctx.working_dir,
         ),
     )
 
@@ -216,7 +229,10 @@ async def expand_node(*, ctx: Any, expand_ctx: ExpandContext) -> dict[str, Any]:
     plot_exec = await ctx.step(
         "plot_exec",
         lambda: ctx.tools.bfts_executor.exec_python(
-            sandbox_id=expand_ctx.sandbox_id, code=plot_code, timeout_s=300,
+            sandbox_id=expand_ctx.sandbox_id,
+            code=plot_code,
+            timeout_s=300,
+            working_dir=expand_ctx.working_dir,
         ),
     )
 
@@ -226,6 +242,7 @@ async def expand_node(*, ctx: Any, expand_ctx: ExpandContext) -> dict[str, Any]:
             sandbox_id=expand_ctx.sandbox_id,
             dest_dir=Path(f"/tmp/bfts/{expand_ctx.node_id}"),
             node_id=expand_ctx.node_id,
+            working_dir=expand_ctx.working_dir,
         ),
     )
     plot_paths = [
