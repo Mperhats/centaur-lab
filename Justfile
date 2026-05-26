@@ -12,6 +12,10 @@ mod cloudflared 'cloudflared/Justfile'
 # org-overlay recipes stay in one place; reachable as `just overlay::<recipe>`.
 mod overlay 'overlay/Justfile'
 
+# Refresh markdown mirrors of upstream docs via curl.md. Reachable as
+# `just docs::refresh`, `just docs::diff`, `just docs::refresh-fresh`.
+mod docs 'docs/Justfile'
+
 default:
     just --list
 
