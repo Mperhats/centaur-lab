@@ -15,7 +15,36 @@ import save_papers
 
 from centaur_lab.paper_document import _content_hash, build_paper_document
 
-from ._mocks import MetricsRecorder, MockContext, MockPool
+from ._mocks import MockContext, MockPool
+
+
+class MetricsRecorder:
+    """Lightweight stand-in for the metrics shim used by tests.
+
+    Records ``observe_document_size`` and ``record_document_change``
+    invocations against the same recorder so tests can assert both the
+    pre-upsert observation and the post-upsert change record without
+    mocking the real Prometheus machinery (which isn't on sys.path
+    during local runs anyway). ``observe_calls`` captures pre-upsert
+    size observations; ``change_calls`` captures post-upsert
+    ``(document, action)`` pairs. ``calls`` is preserved as an alias for
+    ``change_calls`` to keep older assertions on
+    ``MetricsRecorder.calls`` working without renames.
+    """
+
+    def __init__(self) -> None:
+        self.observe_calls: list[dict[str, Any]] = []
+        self.change_calls: list[tuple[dict[str, Any], str]] = []
+
+    @property
+    def calls(self) -> list[tuple[dict[str, Any], str]]:
+        return self.change_calls
+
+    def observe(self, document: dict[str, Any]) -> None:
+        self.observe_calls.append(document)
+
+    def record(self, document: dict[str, Any], action: str) -> None:
+        self.change_calls.append((document, action))
 
 
 class MockS2Client:

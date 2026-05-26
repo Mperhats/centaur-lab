@@ -25,7 +25,37 @@ _WORKFLOWS_DIR = Path(__file__).resolve().parent.parent.parent
 if str(_WORKFLOWS_DIR) not in sys.path:
     sys.path.insert(0, str(_WORKFLOWS_DIR))
 
-from tests._mocks import MockContext, MockSemanticScholarClient  # noqa: E402
+from tests._mocks import MockContext  # noqa: E402
+
+
+class FakeS2Client:
+    """Minimal ``SemanticScholarClient`` stand-in for integration tests.
+
+    ``save_papers.handler`` only calls ``get_paper`` and ``close`` on the
+    client; the context-manager hooks are included so the same stub keeps
+    working if the handler is later refactored to use ``with`` (mirroring
+    the unit-test stubs in ``test_save_papers.py``). Unknown ``paper_id``s
+    raise ``RuntimeError`` to exercise the handler's per-paper failure
+    branch.
+    """
+
+    def __init__(self, papers_by_id: dict[str, dict[str, Any]]) -> None:
+        self._papers_by_id = papers_by_id
+
+    def get_paper(self, paper_id: str) -> dict[str, Any]:
+        if paper_id not in self._papers_by_id:
+            raise RuntimeError(f"unknown paper id in stub: {paper_id}")
+        return dict(self._papers_by_id[paper_id])
+
+    def close(self) -> None:
+        pass
+
+    def __enter__(self) -> FakeS2Client:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
 
 _PAPER_173BA: dict[str, Any] = {
     "paperId": "173ba8ae4582b6f9f6919aa3f813579a5349f1f9",
@@ -53,7 +83,7 @@ async def test_save_papers_writes_paper_row_with_full_shape(
     monkeypatch.setattr(
         save_papers,
         "SemanticScholarClient",
-        lambda: MockSemanticScholarClient(
+        lambda: FakeS2Client(
             papers_by_id={_PAPER_173BA["paperId"]: _PAPER_173BA}
         ),
     )
@@ -98,7 +128,7 @@ async def test_save_papers_is_idempotent_on_rerun(
     monkeypatch.setattr(
         save_papers,
         "SemanticScholarClient",
-        lambda: MockSemanticScholarClient(
+        lambda: FakeS2Client(
             papers_by_id={_PAPER_173BA["paperId"]: _PAPER_173BA}
         ),
     )
@@ -127,7 +157,7 @@ async def test_save_papers_partial_failure_writes_successful_papers(
     monkeypatch.setattr(
         save_papers,
         "SemanticScholarClient",
-        lambda: MockSemanticScholarClient(
+        lambda: FakeS2Client(
             papers_by_id={_PAPER_173BA["paperId"]: _PAPER_173BA}
         ),
     )

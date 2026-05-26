@@ -3,9 +3,15 @@
 Test-internal helpers — the leading underscore mirrors the workflow loader's
 ``startswith("_")`` skip convention and signals that this module is not a
 workflow handler. Imported by sibling test modules
-(``test_paper_document.py``, ``test_save_papers.py``, etc.) so the same
-asyncpg pool mock and UPSERT argument-position map have a single source of
-truth.
+(``test_paper_document.py``, ``test_save_papers.py``,
+``test_research_brief.py``, and the integration suite under ``integration/``)
+so the same asyncpg pool mock, workflow context mock, and UPSERT
+argument-position map have a single source of truth.
+
+Doubles for third-party clients (e.g. ``SemanticScholarClient``) live inline
+next to the test that uses them — see upstream
+``.centaur/services/api/tests/test_company_context_documents.py`` for the
+self-contained convention.
 """
 
 from __future__ import annotations
@@ -76,77 +82,3 @@ class MockContext:
 
     def log(self, event: str, **kwargs: Any) -> None:
         self.logs.append((event, kwargs))
-
-
-class MetricsRecorder:
-    """Lightweight stand-in for the metrics shim used by tests.
-
-    Records ``observe_document_size`` and ``record_document_change``
-    invocations against the same recorder so tests can assert both the
-    pre-upsert observation and the post-upsert change record without
-    mocking the real Prometheus machinery (which isn't on sys.path
-    during local runs anyway). ``observe_calls`` captures
-    pre-upsert size observations; ``change_calls`` captures post-upsert
-    ``(document, action)`` pairs. ``calls`` is preserved as an alias
-    for ``change_calls`` to keep older tests that asserted on
-    ``MetricsRecorder.calls`` working without renames.
-    """
-
-    def __init__(self) -> None:
-        self.observe_calls: list[dict[str, Any]] = []
-        self.change_calls: list[tuple[dict[str, Any], str]] = []
-
-    @property
-    def calls(self) -> list[tuple[dict[str, Any], str]]:
-        return self.change_calls
-
-    def observe(self, document: dict[str, Any]) -> None:
-        self.observe_calls.append(document)
-
-    def record(self, document: dict[str, Any], action: str) -> None:
-        self.change_calls.append((document, action))
-
-
-class MockSemanticScholarClient:
-    """Mock of ``SemanticScholarClient`` supporting both lookup paths.
-
-    Real ``SemanticScholarClient`` exposes ``get_paper`` (used by
-    ``save_papers``) and ``search_papers`` (used by ``research_brief``);
-    this mock mirrors both so a single class can back integration tests
-    for either workflow. Configure whichever path the test exercises:
-    ``papers_by_id`` for ``get_paper`` calls, ``search_results`` for
-    ``search_papers`` calls. Calling an unconfigured path raises
-    ``RuntimeError`` so misuse fails loudly.
-    """
-
-    def __init__(
-        self,
-        *,
-        papers_by_id: dict[str, dict[str, Any]] | None = None,
-        search_results: list[dict[str, Any]] | None = None,
-    ) -> None:
-        self._papers_by_id = papers_by_id or {}
-        self._search_results = search_results
-
-    def get_paper(
-        self, paper_id: str, fields: Any = None
-    ) -> dict[str, Any]:
-        if paper_id not in self._papers_by_id:
-            raise RuntimeError(f"unknown paper id in mock: {paper_id}")
-        return dict(self._papers_by_id[paper_id])
-
-    def search_papers(
-        self,
-        query: str,
-        limit: int = 10,
-        year_from: int | None = None,
-        fields: str | None = None,
-    ) -> list[dict[str, Any]]:
-        if self._search_results is None:
-            raise RuntimeError(
-                "MockSemanticScholarClient: search_results not configured"
-            )
-        return [dict(p) for p in self._search_results]
-
-    def close(self) -> None:
-        pass
