@@ -4,6 +4,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from _bfts_config import (
@@ -103,3 +105,14 @@ def test_root_input_has_metric_reducer_field_defaulting_to_none() -> None:
 def test_tree_input_has_metric_reducer_field_defaulting_to_none() -> None:
     tree = TreeInput(run_id="r1", parent_run_id=None)
     assert tree.metric_reducer is None
+
+
+def test_resolve_search_settings_rejects_unknown_reducer(monkeypatch) -> None:
+    """Defense in depth: typos in the deployment env OR per-run Input must
+    fail at resolve time (not later inside the selector)."""
+    monkeypatch.delenv(ENV_METRIC_REDUCER, raising=False)
+    with pytest.raises(ValueError, match="metric_reducer"):
+        resolve_search_settings(metric_reducer="not_real")
+    monkeypatch.setenv(ENV_METRIC_REDUCER, "also_not_real")
+    with pytest.raises(ValueError, match="metric_reducer"):
+        resolve_search_settings()

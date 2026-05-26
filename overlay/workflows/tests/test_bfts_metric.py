@@ -251,3 +251,20 @@ def test_score_all_reducers_agree_worst_is_max_score() -> None:
     assert score(WORST_METRIC, reducer="lexicographic") > score(
         real, reducer="lexicographic"
     )
+
+
+def test_score_mean_empty_values_higher_is_better_returns_inf() -> None:
+    """Phase 4g.2 quietly corrected a Phase 0-3 latent bug: an empty-data
+    metric with lower_is_better=False used to collapse to -inf and be
+    picked as best. Lock the corrected behavior so we don't regress."""
+    m = {
+        "metric_names": [
+            {
+                "metric_name": "x",
+                "lower_is_better": False,
+                "description": "",
+                "data": [],
+            }
+        ]
+    }
+    assert score(m, reducer="mean") == float("inf")

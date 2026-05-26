@@ -28,6 +28,9 @@ class NodeRef:
     # ``mean`` / ``min`` / ``weighted_mean`` reducers; tuple for
     # ``lexicographic`` (Python tuple ordering is element-wise so
     # sorted(..., key=...) still picks the multi-objective best).
+    # All nodes in one ``select_next`` call share the same reducer
+    # (enforced by ``bfts_tree.handler``); mixed ``float`` / ``tuple``
+    # never appears in ``good_sorted``.
     metric_score: Union[float, tuple[float, ...]]
     stage_name: str
     is_leaf: bool

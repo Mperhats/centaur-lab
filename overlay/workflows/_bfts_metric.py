@@ -13,6 +13,16 @@ The ``lexicographic`` reducer (Phase 4g.2) is the only collapse that
 honors each metric's OWN ``lower_is_better`` flag, because tuple
 comparison naturally requires per-component direction.
 
+INTENTIONAL DEVIATION from pre-4g.2 behavior (``mean`` reducer): for an
+empty per-metric ``data`` list under ``lower_is_better=False``, Phase
+0–3 used to compute ``mean()`` → ``+inf`` and then sign-flip to
+``-inf``, causing the selector to pick the empty-data node as best (a
+latent bug). Phase 4g.2's ``score()`` short-circuits when the
+collapsed value is ``+inf`` BEFORE the sign flip, so empty-values
+nodes now correctly sort as worst regardless of direction. The fix is
+deliberate; see ``test_score_mean_empty_values_higher_is_better_returns_inf``
+for the regression lock.
+
 Underscore-prefixed module name so the API's workflow loader skips it
 (research 03 §Tool programming model).
 """
@@ -74,11 +84,15 @@ def score(
 
     Reducers (Phase 4g.2):
 
-    - ``mean`` (default, unchanged from Phase 0–3): average of all
-      ``final_value`` entries across every metric and dataset. The
-      first metric's ``lower_is_better`` flag governs sign for the
-      whole node (preserves Sakana's first-metric direction footgun;
-      see module docstring).
+    - ``mean`` (default): average of all ``final_value`` entries across
+      every metric and dataset. The first metric's ``lower_is_better``
+      flag governs sign for the whole node (preserves Sakana's
+      first-metric direction footgun; see module docstring). Note:
+      empty per-metric ``data`` under ``higher-is-better`` used to
+      return ``-inf`` in Phase 0–3 (picking the node as best — a
+      latent bug). Phase 4g.2 short-circuits ``+inf`` before the sign
+      flip, so empty-values nodes now correctly sort as worst (see
+      module docstring).
     - ``min``: best single dataset value across all metrics + datasets.
       Under the lower-is-better convention this is ``min(values)``;
       under higher-is-better it is ``-max(values)`` so the selector's
@@ -138,8 +152,10 @@ def _per_metric_means(
     """Return ``(entry, mean_value)`` for every metric with ≥1 numeric value.
 
     Carries the raw entry alongside its collapsed mean so callers
-    (``lexicographic``) can look up the per-metric ``lower_is_better``
-    flag without re-iterating.
+    (``_score_lexicographic`` for per-metric ``lower_is_better``;
+    ``_weighted_mean`` for parallel weight-list realignment via
+    ``e is entry`` identity) can look up entry-level state without
+    re-iterating ``metric_names``.
     """
     out: list[tuple[dict[str, Any], float]] = []
     for entry in metric.get("metric_names") or []:
@@ -217,6 +233,9 @@ def _score_lexicographic(metric: Mapping[str, Any]) -> tuple[float, ...]:
     if not pairs:
         return (float("inf"),)
 
+    # WORST sentinel ``(+inf,)`` is safe because ``_per_metric_means``
+    # guarantees every component of a real result is finite — non-numeric
+    # ``final_value`` entries are filtered earlier.
     ordered = sorted(pairs, key=lambda ep: ep[0].get("metric_name", ""))
     comps: list[float] = []
     for entry, avg in ordered:
