@@ -120,7 +120,7 @@ clean-sandboxes filter="all":
 # pods when overlay.image.tag changes. Local dev mirrors that: build writes
 # sha-<short> to overlay/.tag, deploy passes --set overlay.image.tag, and
 # the chart checksum/overlay restarts the API. Skills still require fresh
-# sandboxes — see reload-skills.
+# sandboxes — this recipe deletes Slack Sandbox CRDs after the API roll.
 #
 # This recipe is the local-dev loop after editing overlay/tools,
 # overlay/workflows, overlay/.agents/skills, or overlay/centaur_lab:
@@ -152,36 +152,10 @@ reload: build
     echo "Next Slack turn cold-spawns a sandbox with the rebuilt overlay."
     echo "To drop demo/smoke sandboxes too: just overlay::clean-sandboxes"
 
-# Rebuild overlay and deploy only — no sandbox delete. Use when tools/workflows
-# changed but skills did not.
-[group('lifecycle')]
-reload-api: build
-    #!/usr/bin/env bash
-    set -euo pipefail
-    cd .. && just deploy
-    deploy="{{release}}-centaur-api"
-    kubectl rollout restart "deployment/${deploy}" -n {{namespace}}
-    kubectl rollout status "deployment/${deploy}" -n {{namespace}} --timeout=120s
-
-# Delete Slack sandboxes only so the next turn picks up rebuilt overlay skills.
-[group('lifecycle')]
-reload-skills:
-    just clean-sandboxes slack
-
 # Lint every tool and workflow against the same ruff contract upstream uses.
 [group('dev')]
 lint:
     cd tools && uvx ruff check .
-    cd workflows && uvx ruff check .
-
-# Lint just the org tools (subset of `lint`).
-[group('dev')]
-lint-tools:
-    cd tools && uvx ruff check .
-
-# Lint just the org workflow handlers (subset of `lint`).
-[group('dev')]
-lint-workflows:
     cd workflows && uvx ruff check .
 
 # Run the workflow handler test suite locally. Workflows aren't packaged —

@@ -9,7 +9,7 @@ metadata:
   namespace: argocd
   # Optional: Argo CD Image Updater for overlay.image.tag once GHCR CI exists.
   # annotations:
-  #   argocd-image-updater.argoproj.io/image-list: overlay=ghcr.io/<ORG>/centaur-overlay
+  #   argocd-image-updater.argoproj.io/image-list: overlay=ghcr.io/Mperhats/centaur-lab/centaur-overlay
 spec:
   project: default
   sources:
@@ -21,7 +21,7 @@ spec:
           - $values/infra/argocd/values/centaur.yaml
         parameters:
           - name: overlay.image.repository
-            value: ghcr.io/<ORG>/centaur-overlay
+            value: ghcr.io/Mperhats/centaur-lab/centaur-overlay
             forceString: true
           - name: overlay.image.tag
             value: <OVERLAY_TAG>

@@ -34,7 +34,7 @@ slackbot:
 
 overlay:
   image:
-    repository: ghcr.io/Mperhats/centaur-overlay
+    repository: ghcr.io/Mperhats/centaur-lab/centaur-overlay
     tag: sha-PLACEHOLDER
     sourcePath: /overlay
 

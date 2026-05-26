@@ -4,26 +4,24 @@ Actionable items only. Completed audits and MVP plans live in git history.
 
 ## Infra / deploy
 
-- [ ] **Fix GHCR overlay image path in `infra/argocd/values/centaur.yaml`**
-  - Template currently says `ghcr.io/Mperhats/centaur-overlay` — **wrong**.
-  - CI (`.github/workflows/overlay.yml`) publishes `ghcr.io/${{ github.repository }}/centaur-overlay` → **`ghcr.io/Mperhats/centaur-lab/centaur-overlay`**.
-  - Package does **not exist** until workflow merges to `main` and a push touches `overlay/**`.
-  - Also fix the same placeholder in `infra/argocd/application.yaml` `overlay.image.repository` parameter.
+- [x] **Fix GHCR overlay image path in `infra/argocd/values/centaur.yaml`**
+  - CI publishes `ghcr.io/Mperhats/centaur-lab/centaur-overlay` (see `.github/workflows/overlay.yml`).
+  - Fixed in `infra/argocd/values/centaur.yaml` and `infra/argocd/application.yaml`.
 
-- [ ] **Merge `feat/deploy-alignment`** — values split, sha tags, CI, infra skeleton (worktree `.worktrees/deploy-alignment`).
+- [x] **Merge `feat/deploy-alignment`** — values split, sha tags, CI, infra skeleton.
 
 ## Safe to delete (done or recommended)
 
 | Item | Why |
 |------|-----|
-| `docs/review.md` | 762-line one-shot audit; critical API-key finding already fixed; `_fakes.py` already gone |
-| `docs/centaur/` | Offline mirror of `.centaur/docs/public/md/` — drifts on every submodule bump; link to [centaur.run](https://centaur.run) instead |
-| `docs/superpowers/plans/2026-05-25-centaur-lab-mvp.md` | 1000+ line completed plan; keep `specs/` + deploy alignment plan only |
+| ~~`docs/review.md`~~ | Deleted — one-shot audit; critical API-key finding already fixed |
+| ~~`docs/centaur/`~~ | Deleted — offline mirror of `.centaur/docs/public/md/`; link to [centaur.run](https://centaur.run) instead |
+| ~~`docs/superpowers/plans/2026-05-25-centaur-lab-mvp.md`~~ | Deleted — completed plan; keep `specs/` + deploy alignment plan only |
 
 ## Optional slim-down (only if annoying)
 
-- [ ] Drop `just overlay::lint-tools` / `lint-workflows` — `just overlay::lint` already covers both
-- [ ] Drop `just overlay::reload-api` / `reload-skills` — keep single `just reload` unless you use the split weekly
+- [x] Drop `just overlay::lint-tools` / `lint-workflows` — `just overlay::lint` already covers both
+- [x] Drop `just overlay::reload-api` / `reload-skills` — keep single `just reload` unless you use the split weekly
 - [ ] Rename test doubles `Mock*` → `Fake*` to match upstream — cosmetic, 5 files
 
 ## Do not build

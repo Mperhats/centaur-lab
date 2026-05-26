@@ -182,7 +182,7 @@ kubectl delete namespace centaur-system
 | Smoke fails with `Missing API key` | You're running upstream's `just smoke` (e.g. `cd .centaur && just smoke`). The current chart's API rejects all unauthenticated calls; our root `just smoke` injects `X-Api-Key: $SLACKBOT_API_KEY` to compensate. Always invoke from the repo root. |
 | `helm get values` does not show `defaultHarness` | The pinned base SHA may not expose the key yet — see [open question 2 in the spec](docs/superpowers/specs/2026-05-25-centaur-lab-mvp-design.md#open-questions-for-implementation). Pass `--claude` manually in the smoke prompt as a workaround. |
 | Slack ETL workflows log token errors | `SLACK_ETL_TOKEN` unset or wrong; or its Slack user lacks `conversations.*` / `users.list` scopes. See [Slack ETL docs](https://centaur.run/operate/slack-etl). |
-| Overlay tools/workflows/skills look stale after a code edit | **`just reload`** — rebuild overlay, `helm deploy` with new `overlay.image.tag`, delete Slack Sandbox CRDs. Tools-only: `just overlay::reload-api`. Skills-only: `just overlay::reload-skills`. |
+| Overlay tools/workflows/skills look stale after a code edit | **`just reload`** — rebuild overlay, `helm deploy` with new `overlay.image.tag`, restart API, delete Slack Sandbox CRDs. |
 
 ## Tools (in `overlay/`)
 
