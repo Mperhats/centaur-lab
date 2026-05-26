@@ -48,14 +48,22 @@ test-workflows:
 test-tools:
     cd tools/semantic_scholar && uv run --python 3.11 --with pytest --with pytest-asyncio --with asyncpg --with httpx --with python-dotenv pytest tests/ -v
 
-# Run integration tests for save_papers / research_brief against a real
+# Run integration tests for the save_papers workflow against a real
 # Postgres. Requires CENTAUR_TEST_DATABASE_URL to point at a centaur DB
 # with migrations applied (see db/README.md for the canonical port-forward
 # + secret-fetch recipe). When the env var is unset every test skips with
-# a clear reason rather than failing.
+# a clear reason rather than failing. The research_brief integration
+# contract now lives with its tool method — see `test-tools-integration`.
 [group('dev')]
 test-workflows-integration:
     cd workflows && uv run --python 3.11 --with pytest --with pytest-asyncio --with asyncpg pytest tests/integration/ -v
+
+# Run integration tests for the semantic_scholar tool methods (currently
+# `research_brief`) against a real Postgres. Same gate and skip semantics
+# as `test-workflows-integration` — set CENTAUR_TEST_DATABASE_URL to enable.
+[group('dev')]
+test-tools-integration:
+    cd tools/semantic_scholar && uv run --python 3.11 --with pytest --with pytest-asyncio --with asyncpg --with httpx --with python-dotenv pytest tests/integration/ -v
 
 # Smoke-test the CLI without spinning up a sandbox. Honors $SEMANTIC_SCHOLAR_API_KEY
 # from the root `.env` (auto-loaded above) but works without it (anonymous,
