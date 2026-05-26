@@ -6,6 +6,9 @@ import hashlib
 from datetime import UTC, datetime
 from typing import Any
 
+from semanticscholar.Author import Author
+from semanticscholar.Paper import Paper
+
 from centaur_lab.metrics import observe_document_size, record_document_change
 from centaur_lab.paper_document import (
     _canonical_json,
@@ -13,7 +16,6 @@ from centaur_lab.paper_document import (
     build_paper_document,
     upsert_document,
 )
-from centaur_lab.paper_models import Author, Paper
 
 _BRIEF_ABSTRACT_TRUNCATE = 500
 _BRIEF_TITLE_QUERY_TRUNCATE = 80

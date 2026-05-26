@@ -12,8 +12,8 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from semanticscholar.Paper import Paper
 
-from centaur_lab.paper_models import Paper
 from centaur_lab.testing import (
     EXECUTE_ARG_INDEX,
     MockAsyncpgConn,
@@ -77,7 +77,7 @@ def _install_metrics(monkeypatch: pytest.MonkeyPatch) -> MetricsRecorder:
 
 
 def _paper(paper_id: str) -> Paper:
-    return Paper.model_validate(
+    return Paper(
         {
             "paperId": paper_id,
             "title": f"Paper {paper_id}",

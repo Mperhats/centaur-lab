@@ -1,15 +1,30 @@
-"""Semantic Scholar Graph API client with live search and research-brief generation."""
+"""Semantic Scholar Graph API client with live search and research-brief generation.
+
+Graph API calls (``search_paper``, ``get_paper``, ``get_paper_references``)
+delegate to the upstream ``semanticscholar`` PyPI package — we no longer
+hand-roll the HTTP layer. The high-level orchestration methods
+(``search``, ``research_brief``, ``archive_paper``) keep their previous
+contracts so workflow handlers, the Slack tool runtime, and the CLI all
+keep working unchanged.
+
+The typed objects returned to callers are the upstream library's
+``semanticscholar.Paper.Paper``. Wire-shape consumers (``search``
+envelope, CLI ``--json``) get the original JSON dict back via
+``Paper.raw_data``; ``Paper(data)`` stores ``data`` by reference so a
+freshly-constructed paper round-trips byte-for-byte.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
-import time
 from typing import Any
 
 import asyncpg
-import httpx
+from semanticscholar import SemanticScholar
+from semanticscholar.Paper import Paper
+from semanticscholar.SemanticScholarException import SemanticScholarException
 
 from centaur_lab.brief import persist_research_brief_from_papers
 from centaur_lab.metrics import observe_document_size, record_document_change
@@ -19,14 +34,30 @@ from centaur_lab.paper_fulltext import (
     compute_pdf_sha256,
     upsert_paper_archive,
 )
-from centaur_lab.paper_models import Paper
 from centaur_sdk import secret
 from tools.semantic_scholar import pdf_fetch, pdf_parse
 
 log = logging.getLogger(__name__)
 
-DEFAULT_PAPER_FIELDS = "title,authors,year,abstract,citationCount,url,openAccessPdf"
-DEFAULT_REFERENCE_FIELDS = "title,authors,year,citationCount,url"
+# Field lists are passed to the library as ``list[str]`` (rather than a
+# comma-joined string) because that's the upstream library's signature.
+# Kept as module-level constants so the CLI and tests can reuse them.
+DEFAULT_PAPER_FIELDS: list[str] = [
+    "title",
+    "authors",
+    "year",
+    "abstract",
+    "citationCount",
+    "url",
+    "openAccessPdf",
+]
+DEFAULT_REFERENCE_FIELDS: list[str] = [
+    "title",
+    "authors",
+    "year",
+    "citationCount",
+    "url",
+]
 
 DEFAULT_SEARCH_LIMIT = 10
 MAX_SEARCH_LIMIT = 50
@@ -49,10 +80,6 @@ ARCHIVE_PARSER_MIN_SIZE = 100  # mirrors AI-Scientist-v2 load_paper min_size gua
 RESEARCH_BRIEF_EMPTY_QUERY_ERROR = "query cannot be empty"
 RESEARCH_BRIEF_INVALID_LIMIT_ERROR = "limit must be positive"
 
-# Brief markdown rendering lives in ``centaur_lab.brief`` (shared with
-# ``save_papers``). Input-validation error strings below are imported by
-# ``overlay/workflows/research_brief.py`` for its error → skipped table.
-
 
 def _clamp(value: int, *, minimum: int, maximum: int) -> int:
     """Clamp integer tool inputs to predictable output bounds."""
@@ -62,18 +89,19 @@ def _clamp(value: int, *, minimum: int, maximum: int) -> int:
 class SemanticScholarClient:
     """Search papers, fetch metadata, walk the citation graph, and build research briefs.
 
-    Wraps the Semantic Scholar Graph API
-    (https://api.semanticscholar.org/api-docs/graph), which is callable
+    Wraps the upstream ``semanticscholar`` library against the
+    Semantic Scholar Graph API
+    (https://api.semanticscholar.org/api-docs/graph). The API is callable
     anonymously (heavily rate-limited) or with an ``x-api-key`` for
-    higher quotas — the header is sent only when the secret is set so
-    anonymous calls don't accidentally hit a 401 on a stale placeholder.
+    higher quotas — the key is passed to the library only when the
+    secret is set so anonymous calls don't accidentally hit a 401 on a
+    stale placeholder.
+
+    The library handles HTTP, retries (exponential backoff on HTTP 429
+    by default), and typed-object parsing. This class adds DB
+    persistence (``research_brief``), the PDF archive flow
+    (``archive_paper``), and the agent-facing ``search`` envelope.
     """
-
-    BASE_URL = "https://api.semanticscholar.org/graph/v1"
-
-    # Anonymous Semantic Scholar IPs hit 429 quickly. A small bounded backoff
-    # smooths over the common case without masking real failures.
-    MAX_RETRIES = 4
 
     def __init__(
         self,
@@ -82,12 +110,13 @@ class SemanticScholarClient:
         database_url: str | None = None,
     ) -> None:
         # Store the constructor-injected key as-is; resolve any fallback
-        # lazily at request time. Eager resolution here runs during the
-        # ToolManager's _collect_methods() pass when ToolContext.secrets
-        # is still empty, so the per-call secret never lands in the header.
+        # lazily on first ``self.client`` access. Eager resolution here
+        # runs during the ToolManager's _collect_methods() pass when
+        # ToolContext.secrets is still empty, so the per-call secret
+        # never lands in the underlying SemanticScholar instance.
         self._api_key = api_key
         self._timeout = timeout
-        self._client: httpx.Client | None = None
+        self._client: SemanticScholar | None = None
         # DATABASE_URL is owned by the API process, not an agent-facing
         # secret; mirror the resolution chain upstream company_context uses
         # so a constructor arg can override env or secret for tests.
@@ -128,67 +157,40 @@ class SemanticScholarClient:
         return _ConnAsPool()
 
     def _get_api_key(self) -> str | None:
-        """Get API key from instance or env var."""
-        # The tool works anonymously; default to "" so callers don't have to
-        # branch on None. Iron-proxy only injects the real value when the
-        # header is actually present, so an empty string keeps requests
-        # anonymous instead of breaking them.
+        """Get API key from instance, then sidecar secret, then anonymous.
+
+        Returns ``None`` (not ``""``) when no key is available, so the
+        ``SemanticScholar`` library treats the call as anonymous rather
+        than sending an empty ``x-api-key`` header.
+        """
         if self._api_key:
             return self._api_key
-        return secret("SEMANTIC_SCHOLAR_API_KEY", "")
+        key = secret("SEMANTIC_SCHOLAR_API_KEY", "")
+        return key or None
 
     @property
-    def client(self) -> httpx.Client:
+    def client(self) -> SemanticScholar:
+        """Lazy-initialized upstream library client.
+
+        Built on first access so ``_get_api_key()`` resolves at request
+        time (when ``ToolContext.secrets`` is populated), not at
+        ``__init__`` time during the ToolManager's ``_collect_methods()``
+        discovery pass.
+        """
         if self._client is None:
-            self._client = httpx.Client(timeout=self._timeout)
+            self._client = SemanticScholar(
+                timeout=int(self._timeout),
+                api_key=self._get_api_key(),
+                retry=True,
+            )
         return self._client
-
-    def _headers(self) -> dict[str, str]:
-        api_key = self._get_api_key()
-        if api_key:
-            return {"x-api-key": api_key}
-        return {}
-
-    def _request(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        url = f"{self.BASE_URL}{path}"
-        last_exc: Exception | None = None
-        for attempt in range(self.MAX_RETRIES):
-            try:
-                response = self.client.get(url, params=params, headers=self._headers())
-                # 429 is the dominant failure mode for anonymous use; retry with
-                # exponential backoff. 5xx is also transient. Anything else is
-                # raised immediately (4xx errors are usually our fault).
-                if response.status_code in (429, 502, 503, 504):
-                    last_exc = httpx.HTTPStatusError(
-                        f"transient {response.status_code}",
-                        request=response.request,
-                        response=response,
-                    )
-                    if attempt < self.MAX_RETRIES - 1:
-                        time.sleep(min(8.0, 2**attempt))
-                        continue
-                response.raise_for_status()
-                return response.json()
-            except httpx.HTTPStatusError as exc:
-                body = exc.response.text if exc.response is not None else ""
-                status = exc.response.status_code if exc.response is not None else "?"
-                raise RuntimeError(f"Semantic Scholar API error ({status}): {body}") from exc
-            except httpx.RequestError as exc:
-                last_exc = exc
-                if attempt < self.MAX_RETRIES - 1:
-                    time.sleep(min(8.0, 2**attempt))
-                    continue
-                raise RuntimeError(f"Semantic Scholar request failed: {exc}") from exc
-        raise RuntimeError(
-            f"Semantic Scholar request failed after {self.MAX_RETRIES} attempts: {last_exc}"
-        )
 
     def search_papers(
         self,
         query: str,
         limit: int = 10,
         year_from: int | None = None,
-        fields: str = DEFAULT_PAPER_FIELDS,
+        fields: list[str] | None = None,
     ) -> list[Paper]:
         """Search papers by free-text query.
 
@@ -196,30 +198,36 @@ class SemanticScholarClient:
             query: Free-text search query (e.g. "diffusion models protein design").
             limit: Max results, 1..100.
             year_from: Optional inclusive lower bound on publication year.
-            fields: Comma-separated list of fields per the Graph API spec.
+            fields: List of fields per the Graph API spec; defaults to
+                :data:`DEFAULT_PAPER_FIELDS`.
 
         Returns:
-            Typed :class:`Paper` instances (already unwrapped from the ``data``
-            envelope). Use ``.model_dump(exclude_unset=True)`` at the agent
-            boundary to recover the original dict shape.
+            Upstream :class:`semanticscholar.Paper.Paper` instances. Use
+            ``paper.raw_data`` at the agent boundary to recover the
+            original JSON dict.
         """
         if not query or not query.strip():
             raise ValueError("query cannot be empty.")
-        params: dict[str, Any] = {
-            "query": query.strip(),
-            "limit": max(1, min(limit, 100)),
-            "fields": fields,
-        }
-        if year_from is not None:
-            params["year"] = f"{year_from}-"
-        payload = self._request("/paper/search", params=params)
-        results = payload.get("data", [])
-        return [Paper.model_validate(item) for item in results if isinstance(item, dict)]
+        try:
+            results = self.client.search_paper(
+                query.strip(),
+                limit=max(1, min(limit, 100)),
+                fields=list(fields) if fields is not None else list(DEFAULT_PAPER_FIELDS),
+                year=f"{year_from}-" if year_from is not None else None,
+            )
+        except SemanticScholarException as exc:
+            raise RuntimeError(f"Semantic Scholar API error: {exc}") from exc
+        # ``search_paper`` returns ``PaginatedResults`` (or a single
+        # ``Paper`` when ``match_title=True``, which we never set). The
+        # ``.items`` accessor on ``PaginatedResults`` exposes the first
+        # page without forcing additional fetches — we trust the library's
+        # ``limit`` to give us what we asked for.
+        return list(results.items)
 
     def get_paper(
         self,
         paper_id: str,
-        fields: str = DEFAULT_PAPER_FIELDS,
+        fields: list[str] | None = None,
     ) -> Paper:
         """Fetch metadata for a single paper.
 
@@ -229,31 +237,38 @@ class SemanticScholarClient:
         """
         if not paper_id or not paper_id.strip():
             raise ValueError("paper_id cannot be empty.")
-        payload = self._request(f"/paper/{paper_id.strip()}", params={"fields": fields})
-        return Paper.model_validate(payload)
+        try:
+            return self.client.get_paper(
+                paper_id.strip(),
+                fields=list(fields) if fields is not None else list(DEFAULT_PAPER_FIELDS),
+            )
+        except SemanticScholarException as exc:
+            raise RuntimeError(f"Semantic Scholar API error: {exc}") from exc
 
     def get_references(
         self,
         paper_id: str,
         limit: int = 20,
-        fields: str = DEFAULT_REFERENCE_FIELDS,
+        fields: list[str] | None = None,
     ) -> list[Paper]:
-        """List the papers that the given paper cites."""
+        """List the papers that the given paper cites.
+
+        Returns a flat ``list[Paper]`` of the cited papers; the
+        intermediate :class:`semanticscholar.Reference.Reference` wrapper
+        (which carries citation context / intent fields) is stripped to
+        keep the caller-facing shape symmetric with ``search_papers``.
+        """
         if not paper_id or not paper_id.strip():
             raise ValueError("paper_id cannot be empty.")
-        params = {"limit": max(1, min(limit, 100)), "fields": fields}
-        payload = self._request(f"/paper/{paper_id.strip()}/references", params=params)
-        items = payload.get("data", [])
-        # Each reference entry wraps the cited paper under "citedPaper"; flatten
-        # so callers get typed Paper objects directly.
-        out: list[Paper] = []
-        for entry in items:
-            if not isinstance(entry, dict):
-                continue
-            cited = entry.get("citedPaper")
-            if isinstance(cited, dict):
-                out.append(Paper.model_validate(cited))
-        return out
+        try:
+            refs = self.client.get_paper_references(
+                paper_id.strip(),
+                limit=max(1, min(limit, 100)),
+                fields=list(fields) if fields is not None else list(DEFAULT_REFERENCE_FIELDS),
+            )
+        except SemanticScholarException as exc:
+            raise RuntimeError(f"Semantic Scholar API error: {exc}") from exc
+        return [ref.paper for ref in refs.items if ref.paper is not None]
 
     def search(
         self,
@@ -303,20 +318,16 @@ class SemanticScholarClient:
                 limit=clamped_limit,
                 year_from=year_from,
             )
-            # Dump at the agent boundary so the wire shape stays a plain
-            # list[dict] for the tool runtime / Slack renderer / CLI --json
-            # consumers. ``exclude_unset=True`` round-trips fields S2 didn't
-            # send back to "absent" instead of "explicit null" — preserves
-            # the byte-for-byte shape today's tests assert against and keeps
-            # forward-compat: extras in ``__pydantic_extra__`` always come
-            # through.
+            # ``Paper(data)`` stores ``data`` by reference, so ``raw_data``
+            # is the byte-for-byte original JSON dict the agent harness /
+            # Slack renderer / CLI --json consumers depend on.
             return {
                 "status": "ok",
                 "query": normalized_query,
                 "limit": clamped_limit,
                 "year_from": year_from,
                 "count": len(papers),
-                "results": [p.model_dump(exclude_unset=True) for p in papers],
+                "results": [p.raw_data for p in papers],
             }
         except Exception as exc:
             log.warning("semantic_scholar search failed", exc_info=True)
@@ -444,15 +455,16 @@ class SemanticScholarClient:
         # Run the (retry-prone) S2 call and the pure rendering before
         # opening a DB connection. The brief has no data dependency on
         # the DB before S2 returns, so holding a real Postgres connection
-        # idle through httpx retries (up to ~15s) is pure cost.
+        # idle through the upstream library's HTTP retries is pure cost.
         # Postgres ``max_connections`` is finite; we open a fresh
         # connection per call, so concurrent invocations would otherwise
         # pin one connection each for the duration of the S2 round trip.
         #
-        # The sync ``search_papers`` uses ``time.sleep`` for retry backoff;
-        # bouncing it through ``asyncio.to_thread`` keeps the event loop
-        # responsive without maintaining a parallel ``httpx.AsyncClient``
-        # path (mirrors how the workflow handler in
+        # The upstream library's ``SemanticScholar`` client is synchronous
+        # (the async sibling is a separate class); bouncing it through
+        # ``asyncio.to_thread`` keeps the event loop responsive without
+        # maintaining a parallel ``AsyncSemanticScholar`` path (mirrors
+        # how the workflow handler in
         # ``overlay/workflows/research_brief.py`` invokes the tool method).
         papers = await asyncio.to_thread(
             self.search_papers,
@@ -613,10 +625,15 @@ class SemanticScholarClient:
         }
 
     def close(self) -> None:
-        """Close the HTTP client."""
-        if self._client is not None:
-            self._client.close()
-            self._client = None
+        """Drop the cached library client.
+
+        The upstream ``SemanticScholar`` instance owns an ``httpx``
+        client internally and has no public ``close`` hook, so we just
+        release our reference and let GC collect it. Kept as a method
+        for backward compatibility with callers that use this class as a
+        context manager.
+        """
+        self._client = None
 
     def __enter__(self) -> SemanticScholarClient:
         return self

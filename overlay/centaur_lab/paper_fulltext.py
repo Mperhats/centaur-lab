@@ -28,8 +28,9 @@ import hashlib
 from datetime import UTC, datetime
 from typing import Any, Final, Literal
 
+from semanticscholar.Paper import Paper
+
 from centaur_lab.paper_document import _canonical_json, _content_hash
-from centaur_lab.paper_models import Paper
 
 FULLTEXT_BODY_MAX_BYTES: Final[int] = 1 * 1024 * 1024  # 1 MiB cap on indexed body bytes.
 
@@ -98,7 +99,11 @@ def build_fulltext_document(
 
     title = paper.title or "Untitled"
 
-    first_author = paper.authors[0] if paper.authors else None
+    # ``paper.authors`` is ``None`` when the S2 response omitted the key
+    # entirely; normalise to ``[]`` so the truthy-or-None checks below
+    # don't have to special-case the upstream ``None`` sentinel.
+    authors = paper.authors or []
+    first_author = authors[0] if authors else None
     author_id = ""
     author_name = ""
     if first_author is not None:

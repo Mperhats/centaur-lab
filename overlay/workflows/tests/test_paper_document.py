@@ -8,9 +8,9 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from semanticscholar.Paper import Paper
 
 from centaur_lab.paper_document import _content_hash, build_paper_document, upsert_document
-from centaur_lab.paper_models import Paper
 from centaur_lab.testing import EXECUTE_ARG_INDEX, MockPool
 
 # Tolerance for source_updated_at = datetime.now(UTC) at projection.
@@ -42,8 +42,14 @@ def _sample_paper_dict() -> dict[str, Any]:
 
 
 def _sample_paper() -> Paper:
-    """Typed sibling of ``_sample_paper_dict`` for the post-Pydantic API."""
-    return Paper.model_validate(_sample_paper_dict())
+    """Build an upstream :class:`Paper` from the sample dict.
+
+    The library's ``Paper(data)`` stores ``data`` by reference and exposes
+    fields via read-only properties; missing/null fields surface as
+    ``None``. ``build_paper_document`` normalises those to the empty
+    defaults the projection logic expects.
+    """
+    return Paper(_sample_paper_dict())
 
 
 def test_build_paper_document_full_happy_shape() -> None:
@@ -85,7 +91,7 @@ def test_build_paper_document_raises_on_missing_paperId() -> None:
     paper_data = _sample_paper_dict()
     del paper_data["paperId"]
     with pytest.raises(ValueError, match="paperId"):
-        build_paper_document(Paper.model_validate(paper_data))
+        build_paper_document(Paper(paper_data))
 
 
 def test_build_paper_document_preserves_explicit_nulls_for_missing_optional_fields() -> None:
@@ -101,7 +107,7 @@ def test_build_paper_document_preserves_explicit_nulls_for_missing_optional_fiel
         "year": None,
         "authors": [],
     }
-    doc = build_paper_document(Paper.model_validate(paper_data))
+    doc = build_paper_document(Paper(paper_data))
 
     assert doc["occurred_at"] is None
     assert doc["author_id"] == "" and doc["author_name"] == ""
@@ -120,7 +126,7 @@ def test_content_hash_non_ascii_byte_form_matches_upstream() -> None:
         "title": "深層学習: 変換器の基礎",
         "authors": [{"authorId": "1", "name": "山田太郎"}],
     }
-    doc = build_paper_document(Paper.model_validate(paper_data), query="変換器")
+    doc = build_paper_document(Paper(paper_data), query="変換器")
 
     parts = (doc["title"], doc["body"], doc["url"], doc["metadata"])
     upstream = json.dumps(parts, separators=(",", ":"), sort_keys=True, ensure_ascii=False)

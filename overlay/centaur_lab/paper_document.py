@@ -5,12 +5,18 @@ upstream's reserved ``shared.tools_runtime`` namespace) so both
 ``overlay/workflows/`` and ``overlay/tools/`` can import these helpers
 without sys.path gymnastics or cross-package back-references.
 
-``build_paper_document`` projects a :class:`centaur_lab.paper_models.Paper`
-into the column shape expected by ``company_context_documents``;
-``upsert_document`` applies that row idempotently via ``content_hash``
-so reruns over unchanged input no-op, while re-parenting an otherwise-
-unchanged paper (e.g. one previously saved by ``save_papers`` and later
-surfaced by ``research_brief``) still updates the row.
+``build_paper_document`` projects an upstream
+:class:`semanticscholar.Paper.Paper` into the column shape expected by
+``company_context_documents``; ``upsert_document`` applies that row
+idempotently via ``content_hash`` so reruns over unchanged input no-op,
+while re-parenting an otherwise-unchanged paper (e.g. one previously
+saved by ``save_papers`` and later surfaced by ``research_brief``)
+still updates the row.
+
+The upstream ``Paper`` class returns ``None`` (not ``[]``/``{}``) for
+missing fields and exposes ``openAccessPdf`` as a plain dict; every
+attribute read below normalises those to the empty/default values the
+projection logic was written against.
 """
 
 from __future__ import annotations
@@ -20,7 +26,7 @@ import json
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from centaur_lab.paper_models import Paper
+from semanticscholar.Paper import Paper
 
 
 # We intentionally do not import api.runtime_control.canonical_json here so
@@ -73,8 +79,12 @@ def build_paper_document(
 
     title = paper.title or "Untitled"
 
-    display_names = [a.name for a in paper.authors if a.name]
-    first_author = paper.authors[0] if paper.authors else None
+    # ``paper.authors`` is ``None`` when the S2 response omitted the key.
+    # Normalise to an empty list once so every downstream comprehension
+    # can stay free of the None-guard.
+    authors = paper.authors or []
+    display_names = [a.name for a in authors if a.name]
+    first_author = authors[0] if authors else None
     author_id = ""
     author_name = ""
     if first_author is not None:
@@ -85,12 +95,16 @@ def build_paper_document(
     venue = paper.venue
     citation_count = int(paper.citationCount or 0)
 
-    doi = paper.externalIds.get("DOI")
-    arxiv_id = paper.externalIds.get("ArXiv")
+    external_ids = paper.externalIds or {}
+    doi = external_ids.get("DOI")
+    arxiv_id = external_ids.get("ArXiv")
 
+    # ``paper.openAccessPdf`` is a plain dict from the upstream library
+    # (not a typed object); ``None`` when the field is absent or null.
     open_access_pdf_url: str | None = None
-    if paper.openAccessPdf is not None and paper.openAccessPdf.url:
-        open_access_pdf_url = str(paper.openAccessPdf.url)
+    open_access_pdf = paper.openAccessPdf
+    if open_access_pdf and open_access_pdf.get("url"):
+        open_access_pdf_url = str(open_access_pdf["url"])
 
     canonical_s2_url = f"https://www.semanticscholar.org/paper/{paper_id_str}"
     url = paper.url or canonical_s2_url
@@ -122,7 +136,7 @@ def build_paper_document(
             "authorId": str(a.authorId) if a.authorId else None,
             "name": str(a.name or ""),
         }
-        for a in paper.authors
+        for a in authors
     ]
 
     # OVERLAY: include all metadata keys with explicit nulls (instead of

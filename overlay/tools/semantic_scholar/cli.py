@@ -59,7 +59,10 @@ def _make_client():
 
 
 def _format_authors(authors, max_authors: int = 3) -> str:
-    """Format a list of :class:`Author` (or empty) into a human-readable string."""
+    """Format a list of :class:`Author` (or empty/None) into a human-readable string."""
+    # ``paper.authors`` from the upstream library is ``None`` when the
+    # S2 response omitted the key entirely; accept that here so the CLI
+    # doesn't have to spell out the None guard at every call site.
     if not authors:
         return ""
     names = [a.name for a in authors if a.name]
@@ -77,8 +80,12 @@ def _truncate(text: str | None, length: int = 80) -> str:
 
 
 def _papers_to_json(papers) -> str:
-    """Dump a ``list[Paper]`` to a JSON string, preserving the wire shape."""
-    return json.dumps([p.model_dump(exclude_unset=True) for p in papers], indent=2)
+    """Dump a ``list[Paper]`` to a JSON string, preserving the wire shape.
+
+    ``Paper(data)`` stores ``data`` by reference; ``raw_data`` is the
+    byte-for-byte original API response.
+    """
+    return json.dumps([p.raw_data for p in papers], indent=2)
 
 
 def _render_papers(papers, title: str) -> None:
@@ -133,7 +140,7 @@ def paper(
     with _make_client() as client:
         data = client.get_paper(paper_id)
     if json_output:
-        print(json.dumps(data.model_dump(exclude_unset=True), indent=2))
+        print(json.dumps(data.raw_data, indent=2))
         return
     console.print(f"[bold cyan]{data.title or '(no title)'}[/]")
     console.print(f"[yellow]{_format_authors(data.authors, max_authors=10)}[/]")

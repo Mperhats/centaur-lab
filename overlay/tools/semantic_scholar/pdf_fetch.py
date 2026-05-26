@@ -16,8 +16,7 @@ import logging
 from typing import Final
 
 import httpx
-
-from centaur_lab.paper_models import Paper
+from semanticscholar.Paper import Paper
 
 log = logging.getLogger(__name__)
 

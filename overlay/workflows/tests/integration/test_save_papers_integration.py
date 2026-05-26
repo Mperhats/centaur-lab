@@ -16,8 +16,8 @@ import json
 from typing import Any
 
 import pytest
+from semanticscholar.Paper import Paper
 
-from centaur_lab.paper_models import Paper
 from centaur_lab.testing import MockContext
 
 

@@ -29,14 +29,14 @@ import json
 from typing import Any
 
 import pytest
+from semanticscholar.Paper import Paper
 
-from centaur_lab.paper_models import Paper
 from semantic_scholar.client import SemanticScholarClient
 
 
 def _paper(paper_id: str, *, title: str | None = None) -> Paper:
     """Minimal S2-shaped :class:`Paper` sufficient for ``build_paper_document``."""
-    return Paper.model_validate(
+    return Paper(
         {
             "paperId": paper_id,
             "title": title or f"Paper {paper_id}",

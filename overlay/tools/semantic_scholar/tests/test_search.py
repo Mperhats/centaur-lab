@@ -5,8 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from semanticscholar.Paper import Paper
 
-from centaur_lab.paper_models import Paper
 from semantic_scholar.client import SemanticScholarClient
 
 
@@ -24,8 +24,14 @@ def _live_paper_dict(paper_id: str, *, year: int = 2024) -> dict[str, Any]:
 
 
 def _live_paper(paper_id: str, *, year: int = 2024) -> Paper:
-    """Build a typed :class:`Paper` for use as a ``search_papers`` mock return."""
-    return Paper.model_validate(_live_paper_dict(paper_id, year=year))
+    """Build an upstream :class:`Paper` for use as a ``search_papers`` mock return.
+
+    The library's ``Paper(data)`` stores ``data`` by reference; ``raw_data``
+    returns the input dict verbatim, which is what the agent boundary
+    contract assertion below (``result["results"] == [_live_paper_dict(...)]``)
+    relies on.
+    """
+    return Paper(_live_paper_dict(paper_id, year=year))
 
 
 def _install_search_papers(
@@ -78,10 +84,9 @@ def test_search_returns_live_papers(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result["status"] == "ok"
     assert result["query"] == "graph neural networks"
     assert result["count"] == 2
-    # Wire shape contract: results round-trip through
-    # ``Paper.model_validate(...).model_dump(exclude_unset=True)`` and equal
-    # the original dicts the agent harness/Slack renderer/CLI --json
-    # depend on.
+    # Wire shape contract: ``Paper(data).raw_data`` returns ``data`` by
+    # reference, so results equal the original dicts the agent harness /
+    # Slack renderer / CLI --json depend on.
     assert result["results"] == [_live_paper_dict("p1"), _live_paper_dict("p2")]
     assert calls == [
         {
@@ -142,15 +147,17 @@ def test_search_does_not_require_database_url(monkeypatch: pytest.MonkeyPatch) -
     assert result["count"] == 1
 
 
-def test_search_dumps_paper_models_at_agent_boundary(
+def test_search_returns_raw_dicts_at_agent_boundary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Agent-boundary contract: ``search()`` returns plain dicts even though
-    ``search_papers()`` now returns typed :class:`Paper`.
+    ``search_papers()`` returns typed :class:`Paper` from the upstream
+    library.
 
     Pinned because the rest of the codebase (CLI ``--json``, Slack tool
     runtime, downstream agents) depends on ``result["results"]`` being a
-    JSON-serialisable list of dicts.
+    JSON-serialisable list of dicts. ``search()`` accomplishes this by
+    calling ``paper.raw_data`` on each result.
     """
     papers = [_live_paper("p1")]
     _install_search_papers(monkeypatch, papers)

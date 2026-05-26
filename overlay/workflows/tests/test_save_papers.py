@@ -7,9 +7,9 @@ from unittest.mock import patch
 
 import pytest
 import save_papers
+from semanticscholar.Paper import Paper
 
 from centaur_lab.paper_document import _content_hash, build_paper_document
-from centaur_lab.paper_models import Paper
 from centaur_lab.testing import MockContext, MockPool
 
 
@@ -78,7 +78,7 @@ class MockS2Client:
 
 def _paper(paper_id: str, *, title: str = "Sample Paper") -> Paper:
     """Minimal S2-shaped :class:`Paper` sufficient for ``build_paper_document``."""
-    return Paper.model_validate(
+    return Paper(
         {
             "paperId": paper_id,
             "title": title,

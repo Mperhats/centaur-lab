@@ -19,10 +19,11 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from api.workflow_engine import WorkflowContext
 
+from semanticscholar.Paper import Paper
+
 from centaur_lab.brief import persist_research_brief_from_papers
 from centaur_lab.metrics import observe_document_size, record_document_change
 from centaur_lab.paper_document import build_paper_document, upsert_document
-from centaur_lab.paper_models import Paper
 from tools.semantic_scholar.client import SemanticScholarClient
 
 WORKFLOW_NAME = "save_papers"
