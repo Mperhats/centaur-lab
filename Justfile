@@ -65,6 +65,17 @@ bootstrap-secrets:
 down:
     helm uninstall $CENTAUR_RELEASE --namespace $CENTAUR_NAMESPACE
 
+# Cluster health at a glance (mirrors upstream `.centaur/Justfile status`).
+[group('lifecycle')]
+status:
+    kubectl get all -n $CENTAUR_NAMESPACE
+
+# Rebuild overlay image + restart API + recycle Slack sandboxes.
+# Implemented in overlay/Justfile; exposed here for discoverability.
+[group('lifecycle')]
+reload:
+    just overlay::reload
+
 # Upstream `just smoke` with X-Api-Key added — current chart rejects unauthed localhost.
 [group('dev')]
 smoke:
