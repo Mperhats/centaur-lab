@@ -11,6 +11,14 @@ Actionable items only. Completed audits and MVP plans live in git history.
 - [ ] **First successful GHCR publish from Overlay CI on `main`**
   - Workflow exists (`.github/workflows/overlay.yml`) but has **never pushed** — only two failed runs on the feature branch (Justfile parse error on `just` 1.36; no run recorded after merge to `main`).
   - Push step runs only on `push` to `main` after lint + tests pass.
+  - **2026-05-26 blocker:** GitHub Actions in `major_outage` per [githubstatus.com](https://www.githubstatus.com/) — `workflow_dispatch` returns HTTP 500, push events arrive (visible in `/repos/.../events`) but no runs are scheduled. Workflows show `state: active`; this is platform-side, not config-side. Spent ~hour ruling out billing, visibility (public/private flip), token scopes, path filters, and workflow YAML before checking `https://www.githubstatus.com/api/v2/components.json` — **check that endpoint first next time.**
+  - When Actions recovers, verify with:
+    ```bash
+    gh workflow run overlay.yml --ref main
+    gh run list --limit 5
+    gh api users/Mperhats/packages/container/centaur-lab%2Fcentaur-overlay/versions \
+      --jq '.[0] | {name, created_at, tags: .metadata.container.tags}'
+    ```
 
 - [x] **Merge `feat/deploy-alignment`** — values split, sha tags, CI workflow, infra skeleton.
 
