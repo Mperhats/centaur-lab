@@ -103,3 +103,105 @@ async def test_exec_python_captures_exception_via_exit_code() -> None:
     assert result.exc_type == "SubprocessError"
     assert result.exc_info == {"exit_code": 1}
     assert any("ValueError" in chunk for chunk in result.term_out)
+
+
+@pytest.mark.asyncio
+async def test_exec_python_per_node_working_dir_isolation() -> None:
+    """Two exec_python calls with different working_dir values must touch disjoint paths.
+
+    Phase 4h prerequisite (`docs/superpowers/plans/2026-05-26-bfts-phase4.md`
+    §Task 4h.1): per-node `/workspace/<node_id>/` working directories let
+    intra-tree parallel expansion fan out without racing on
+    `runfile.py` / `experiment_data.npy` / `*.png` inside a single
+    `/workspace/working/`.
+    """
+    fake = _FakeSandboxAPI(_FakePodExecResult(stdout="", stderr="", exit_code=0, duration_s=0.0))
+    executor = BFTSExecutor(sandbox_api=fake)
+
+    await executor.exec_python(
+        sandbox_id="sbx-iso",
+        code="x = 1",
+        timeout_s=10.0,
+        working_dir="node_a",
+    )
+    await executor.exec_python(
+        sandbox_id="sbx-iso",
+        code="x = 2",
+        timeout_s=10.0,
+        working_dir="node_b",
+    )
+
+    assert len(fake.writes) == 2
+    _, path_a, _ = fake.writes[0]
+    _, path_b, _ = fake.writes[1]
+    assert path_a == "/workspace/node_a/runfile.py"
+    assert path_b == "/workspace/node_b/runfile.py"
+    # Distinct write targets => no clobber between concurrent expansions.
+    assert path_a != path_b
+
+    assert len(fake.commands) == 2
+    _, cmd_a, _ = fake.commands[0]
+    _, cmd_b, _ = fake.commands[1]
+    # Each command mkdirs + chdirs into its own per-node workspace and
+    # runs *that* node's runfile.py.
+    assert "mkdir -p /workspace/node_a" in cmd_a
+    assert "cd /workspace/node_a" in cmd_a
+    assert "python -u /workspace/node_a/runfile.py" in cmd_a
+    assert "mkdir -p /workspace/node_b" in cmd_b
+    assert "cd /workspace/node_b" in cmd_b
+    assert "python -u /workspace/node_b/runfile.py" in cmd_b
+    # And neither command references the other node's directory.
+    assert "node_b" not in cmd_a
+    assert "node_a" not in cmd_b
+
+
+@pytest.mark.asyncio
+async def test_exec_python_default_working_dir_is_back_compat() -> None:
+    """Calling exec_python without working_dir must hit /workspace/working/.
+
+    Phase 0–3 callers (`_bfts_expand.py`) do not pass `working_dir`, so the
+    default has to keep the legacy Sakana-shape path verbatim.
+    """
+    fake = _FakeSandboxAPI(_FakePodExecResult(stdout="", stderr="", exit_code=0, duration_s=0.0))
+    executor = BFTSExecutor(sandbox_api=fake)
+
+    await executor.exec_python(sandbox_id="sbx-default", code="x = 1", timeout_s=10.0)
+
+    assert len(fake.writes) == 1
+    _, path, _ = fake.writes[0]
+    assert path == "/workspace/working/runfile.py"
+    assert len(fake.commands) == 1
+    _, cmd, _ = fake.commands[0]
+    assert "mkdir -p /workspace/working" in cmd
+    assert "cd /workspace/working" in cmd
+    assert "python -u /workspace/working/runfile.py" in cmd
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "",                # empty
+        "../escape",       # path traversal
+        "foo/bar",         # contains slash => could escape workspace
+        "/abs/path",       # leading slash => absolute, escapes /workspace
+        ".hidden",         # leading dot => dotfile, also too close to ..
+        "..",              # the classic
+    ],
+)
+async def test_exec_python_rejects_unsafe_working_dir(bad: str) -> None:
+    """Defensive: controllers supply working_dir; reject anything that could
+    escape /workspace/ or surprise the shell."""
+    fake = _FakeSandboxAPI(_FakePodExecResult(stdout="", stderr="", exit_code=0, duration_s=0.0))
+    executor = BFTSExecutor(sandbox_api=fake)
+
+    with pytest.raises(ValueError):
+        await executor.exec_python(
+            sandbox_id="sbx-x",
+            code="pass",
+            timeout_s=10.0,
+            working_dir=bad,
+        )
+    # No write or exec should have happened on a rejected call.
+    assert fake.writes == []
+    assert fake.commands == []

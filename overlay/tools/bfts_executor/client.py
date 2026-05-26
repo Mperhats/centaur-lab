@@ -24,8 +24,8 @@ from typing import Any, Protocol
 
 from .models import ExecutionResult
 
-WORKING_DIR = "/workspace/working"
-"""Per-node writable workspace under the inline workspace PVC.
+_DEFAULT_WORKING_DIR = "working"
+"""Default per-expansion subdirectory name under the workspace PVC.
 
 Matches Sakana's ``os.path.join(os.getcwd(), 'working')`` contract: the
 bfts-executor image sets ``WORKDIR /workspace`` so ``os.getcwd()`` is
@@ -33,6 +33,22 @@ bfts-executor image sets ``WORKDIR /workspace`` so ``os.getcwd()`` is
 ``experiment_data.npy`` and ``*.png`` into ``working/``. Spec correction
 #12 — we own the image and the path; the inline ``volumeClaimTemplates``
 (Task 1.6) attaches a per-Sandbox PVC at this mount point.
+
+Phase 4h (``docs/superpowers/plans/2026-05-26-bfts-phase4.md`` §4h.1)
+adds a per-call ``working_dir`` parameter so concurrent expansions can
+fan out into disjoint subdirectories (``/workspace/<node_id>/``) without
+racing on ``runfile.py`` / ``experiment_data.npy`` / ``*.png``. Pre-4h
+callers don't pass the parameter and continue to operate on
+``/workspace/working/``.
+"""
+
+WORKING_DIR = f"/workspace/{_DEFAULT_WORKING_DIR}"
+"""Back-compat alias for the legacy single-workspace path.
+
+Pre-4h.1 callers and docs referenced ``WORKING_DIR`` directly; keep the
+symbol so external readers still find the well-known path. New code
+should call :meth:`BFTSExecutor.exec_python` / ``collect_artifacts``
+with an explicit ``working_dir`` per expansion instead.
 """
 
 RUNFILE_NAME = "runfile.py"
@@ -154,20 +170,35 @@ class BFTSExecutor:
         sandbox_id: str,
         code: str,
         timeout_s: float,
+        working_dir: str = _DEFAULT_WORKING_DIR,
     ) -> ExecutionResult:
+        # Defensive: ``working_dir`` is caller-supplied (Phase 4h controllers
+        # pass per-node names like ``node_abc12345``). Reject anything that
+        # could escape ``/workspace/`` or surprise the shell.
+        if (
+            not working_dir
+            or "/" in working_dir
+            or ".." in working_dir
+            or working_dir.startswith(".")
+        ):
+            msg = f"invalid working_dir: {working_dir!r}"
+            raise ValueError(msg)
+
         api = self._require_api()
-        runfile_path = f"{WORKING_DIR}/{RUNFILE_NAME}"
+        work_root = f"/workspace/{working_dir}"
+        runfile_path = f"{work_root}/{RUNFILE_NAME}"
 
         # 1. Write the code to the sandbox PVC.
         await api.write_file(sandbox_id, runfile_path, code)
 
-        # 2. Run it with chdir to working/ (matches Sakana's
+        # 2. Run it with chdir to the per-call working dir (matches Sakana's
         #    interpreter.py:120 + 138 chdir-twice defense). ``timeout`` is
         #    coreutils ``timeout(1)``; ``-s INT`` sends SIGINT at T,
         #    ``-k 60`` SIGKILL at T+60 (research 02 §Code execution
-        #    contract).
+        #    contract). ``mkdir -p`` is idempotent: the inline PVC's
+        #    ``/workspace`` exists, but the per-node subdirectory may not.
         command = (
-            f"mkdir -p {WORKING_DIR} && cd {WORKING_DIR} && "
+            f"mkdir -p {work_root} && cd {work_root} && "
             f"timeout --signal=INT --kill-after=60 {int(timeout_s)} "
             f"python -u {runfile_path}"
         )
@@ -237,8 +268,9 @@ class BFTSExecutor:
         sandbox_id: str,
         dest_dir: "Path",
         node_id: str,
+        working_dir: str = _DEFAULT_WORKING_DIR,
     ) -> list[str]:
-        """Copy working/*.npy + working/*.png out of the sandbox to dest_dir.
+        """Copy ``*.npy`` + ``*.png`` out of ``/workspace/<working_dir>/``.
 
         Returns the list of collected basenames (sorted). Mirrors Sakana's
         per-node artifact directory layout (research 02 §Workspace layout):
@@ -246,9 +278,24 @@ class BFTSExecutor:
 
         We drop the ``_proc_<pid>`` suffix because in Centaur the PID is
         meaningless (the workflow is the durable identity).
+
+        ``working_dir`` mirrors :meth:`exec_python` so a Phase 4h
+        per-node expansion that wrote into ``/workspace/<node_id>/`` can
+        collect from the same directory without bleeding into a sibling
+        node's artifacts.
         """
+        if (
+            not working_dir
+            or "/" in working_dir
+            or ".." in working_dir
+            or working_dir.startswith(".")
+        ):
+            msg = f"invalid working_dir: {working_dir!r}"
+            raise ValueError(msg)
+
         api = self._require_api()
-        entries = await api.list_dir(sandbox_id, WORKING_DIR)
+        work_root = f"/workspace/{working_dir}"
+        entries = await api.list_dir(sandbox_id, work_root)
         keep = [e for e in entries if e.endswith(".npy") or e.endswith(".png")]
         node_dir = dest_dir / f"experiment_{node_id}"
         node_dir.mkdir(parents=True, exist_ok=True)
