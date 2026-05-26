@@ -1,13 +1,15 @@
 """Workflow: BFTS tree controller (Stage 1 only).
 
 Loops:
-  select_next → for each selection, ctx.step("expand_node", ...) → wait_all
-  → write nodes → check terminate.
+  select_next → insert placeholder rows → fan out
+  ``bfts_expand_one`` children (one per selection, ``eager_start=True``)
+  → wait for every child → re-query DB → check terminate.
 
 Terminate when ≥1 good_node exists (Sakana stage-1 completion rule,
 agent_manager.py:434-442) OR iters_used >= max_iters.
 
-See docs/superpowers/plans/2026-05-25-bfts-on-centaur.md (Phase 2).
+See docs/superpowers/plans/2026-05-25-bfts-on-centaur.md (Phase 2) and
+docs/superpowers/plans/2026-05-26-bfts-phase4.md (Phase 4h: fan-out).
 """
 from __future__ import annotations
 
@@ -24,21 +26,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 if TYPE_CHECKING:
     from api.workflow_engine import WorkflowContext
 
-from _bfts_expand import ExpandContext, expand_node
 from _bfts_metric import score
 from _bfts_select import NodeRef, SearchConfig, select_next
 from _bfts_state import (
     insert_node,
     insert_run,
     list_nodes_for_run,
-    mark_buggy_plots,
     set_best_node,
-    update_node_metric,
 )
 
 from _bfts_config import (
     DEFAULT_METRIC_REDUCER,
-    resolve_llm_api_key,
     resolve_llm_settings,
     resolve_search_settings,
 )
@@ -135,7 +133,6 @@ async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
         llm_api_key_secret=inp.llm_api_key_secret,
     )
     search = resolve_search_settings(metric_reducer=inp.metric_reducer)
-    llm_api_key = resolve_llm_api_key(llm.llm_api_key_secret)
 
     rng = random.Random(inp.seed)
     pool = ctx._pool
@@ -181,14 +178,32 @@ async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
 
         noderefs = [_to_noderef(n, reducer=search.metric_reducer) for n in nodes]
         selections = select_next(nodes=noderefs, cfg=cfg, rng=rng)
+        # Defensive: the current selector always pads with phantom-draft
+        # ``None`` entries up to ``num_workers``, but if a future change
+        # ever yields an empty list we must break rather than spin.
+        if not selections:
+            break
 
-        # Insert one bfts_nodes row per selection up-front (so node_id is
-        # stable across expansion sub-steps even after restart).
-        prepared: list[tuple[str, NodeRef | None]] = []
+        # Insert one bfts_nodes row per selection up-front. The
+        # placeholder is required so the child workflow's
+        # ``update_node_metric`` has an existing row to update; if a
+        # child crashes between ``expand_node`` success and
+        # ``update_node_metric`` success, replay re-runs from the
+        # cached ``expand_node`` step and writes the update on retry.
+        # The placeholder stays until then.
+        prepared: list[tuple[str, dict[str, Any] | None]] = []
         for sel in selections:
             parent_id = sel.node_id if sel is not None else None
-            parent_row = next((n for n in nodes if n["node_id"] == parent_id), None) if parent_id else None
-            stage = "draft" if sel is None else ("debug" if parent_row and parent_row.get("is_buggy") else "improve")
+            parent_row = (
+                next((n for n in nodes if n["node_id"] == parent_id), None)
+                if parent_id
+                else None
+            )
+            stage = (
+                "draft"
+                if sel is None
+                else ("debug" if parent_row and parent_row.get("is_buggy") else "improve")
+            )
             debug_depth = 0
             if sel is not None and parent_row and parent_row.get("is_buggy"):
                 debug_depth = int(parent_row.get("debug_depth") or 0) + 1
@@ -209,65 +224,50 @@ async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
                 return nid
 
             node_id = await ctx.step("insert_node", _insert)
-            prepared.append((node_id, sel))
+            prepared.append((node_id, parent_row))
 
-        # Expand each selected node sequentially within this controller step.
-        # (Intra-step fan-out via child workflows is a Phase 3+ optimization;
-        # for MVP a sequential loop keeps the workflow self-contained and
-        # is bounded by num_workers anyway.)
-        for node_id, sel in prepared:
-            parent_row = (
-                next((n for n in nodes if n["node_id"] == sel.node_id), None)
-                if sel is not None else None
+        # Fan out: start every child eagerly so the engine schedules
+        # them in parallel rather than waiting for the next worker poll.
+        # The trigger_key is deterministic in (run_id, node_id) so a
+        # parent replay reuses the same child run rather than spawning
+        # a duplicate.
+        children: list[dict[str, Any]] = []
+        for node_id, parent_row in prepared:
+            child_run_id = f"{inp.run_id}:expand:{node_id}"
+            child = await ctx.start_workflow(
+                "start_expand_child",
+                workflow_name="bfts_expand_one",
+                run_input={
+                    "run_id": inp.run_id,
+                    "node_id": node_id,
+                    "sandbox_id": inp.sandbox_id,
+                    # The 8-hex prefix matches the executor's allowlist
+                    # (``^[A-Za-z0-9_-]+$``) and isolates each child's
+                    # workspace files (runfile.py / experiment_data.npy
+                    # / *.png) so concurrent siblings inside the shared
+                    # sandbox don't race.
+                    "working_dir": f"node_{node_id[:8]}",
+                    "parent_node": parent_row,
+                    "idea": inp.idea,
+                    "llm_api_key_secret": llm.llm_api_key_secret,
+                    "draft_model": llm.draft_model,
+                    "feedback_model": llm.feedback_model,
+                    "vlm_model": llm.vlm_model,
+                },
+                trigger_key=child_run_id,
+                eager_start=True,
             )
-            expand_ctx = ExpandContext(
-                sandbox_id=inp.sandbox_id,
-                parent_node=parent_row,
-                idea=inp.idea,
-                llm_api_key=llm_api_key,
-                node_id=node_id,
-                draft_model=llm.draft_model,
-                feedback_model=llm.feedback_model,
-                vlm_model=llm.vlm_model,
-            )
-            result = await expand_node(ctx=ctx, expand_ctx=expand_ctx)
-            await ctx.step(
-                "update_node",
-                lambda nid=node_id, r=result: update_node_metric(
-                    pool,
-                    node_id=nid,
-                    term_out=r["term_out"],
-                    exec_time_seconds=r["exec_time_seconds"],
-                    exc_type=r["exc_type"],
-                    exc_info=r["exc_info"],
-                    exc_stack=r["exc_stack"],
-                    metric=r["metric"],
-                    is_buggy=r["is_buggy"],
-                    analysis=r["analysis"],
-                    plan=r["plan"],
-                    code=r["code"],
-                    # parse_*/plot_* fields are only populated on the good
-                    # path (the buggy short-circuit return dict omits them).
-                    # `.get(...)` → None → COALESCE / SQL-NULL preserves the
-                    # existing column value, matching the contract documented
-                    # on update_node_metric.
-                    parse_metrics_code=r.get("parse_metrics_code"),
-                    parse_term_out=r.get("parse_term_out"),
-                    plot_code=r.get("plot_code"),
-                    plot_term_out=r.get("plot_term_out"),
-                ),
-            )
-            if "is_buggy_plots" in result:
-                await ctx.step(
-                    "mark_buggy_plots",
-                    lambda nid=node_id, r=result: mark_buggy_plots(
-                        pool,
-                        node_id=nid,
-                        is_buggy_plots=bool(r["is_buggy_plots"]),
-                        plot_analyses=r.get("plot_analyses"),
-                        vlm_feedback_summary=r.get("vlm_feedback_summary"),
-                    ),
-                )
+            children.append(child)
+
+        # Wait for every child to reach a terminal state before the next
+        # iteration's ``list_nodes_for_run`` runs. Each child workflow
+        # writes ``update_node_metric`` (and optionally
+        # ``mark_buggy_plots``) before returning, so the controller
+        # re-queries the DB on the next iteration to see the results.
+        # The child's return-value envelope is logging-only — the DB
+        # row is the source of truth.
+        for child in children:
+            await ctx.wait_for_workflow("wait_expand_child", run_id=child["run_id"])
         iters_used += 1
 
     final_nodes = await ctx.step(
