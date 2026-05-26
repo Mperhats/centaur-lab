@@ -24,7 +24,6 @@ around this tool method.
 
 from __future__ import annotations
 
-import asyncio
 import json
 from typing import Any
 
@@ -55,9 +54,9 @@ def _paper(paper_id: str, *, title: str | None = None) -> Paper:
 def _stub_search_papers(papers: list[Paper]):
     """Build a closure suitable for ``monkeypatch.setattr`` on the class.
 
-    Patches the sync ``search_papers``; ``_research_brief_async`` bounces
-    it through ``asyncio.to_thread`` rather than maintaining a parallel
-    async HTTP path.
+    ``research_brief`` bounces the sync ``search_papers`` through
+    ``asyncio.to_thread`` rather than maintaining a parallel async HTTP
+    path, so the stub stays sync.
     """
 
     def _search_papers(
@@ -65,7 +64,7 @@ def _stub_search_papers(papers: list[Paper]):
         query: str,
         limit: int = 10,
         year_from: int | None = None,
-        fields: str | None = None,
+        fields: list[str] | None = None,
     ) -> list[Paper]:
         return list(papers)
 
@@ -102,11 +101,8 @@ async def test_research_brief_persists_brief_and_papers_with_parent_link(
         raising=True,
     )
 
-    # research_brief is sync and drives its own ``asyncio.run`` loop;
-    # bounce off ``to_thread`` so it doesn't collide with the running
-    # pytest-asyncio loop.
     client = SemanticScholarClient(api_key="")
-    result = await asyncio.to_thread(client.research_brief, query="active inference", limit=3)
+    result = await client.research_brief(query="active inference", limit=3)
 
     assert result["status"] == "completed"
     assert result["results_count"] == 3
@@ -155,14 +151,12 @@ async def test_research_brief_idempotent_rerun(
     )
 
     client = SemanticScholarClient(api_key="")
-    first = await asyncio.to_thread(client.research_brief, query="active inference", year_from=2023)
+    first = await client.research_brief(query="active inference", year_from=2023)
     assert first["status"] == "completed"
     assert first["brief_action"] == "inserted"
     assert first["papers_inserted"] == 2
 
-    second = await asyncio.to_thread(
-        client.research_brief, query="active inference", year_from=2023
-    )
+    second = await client.research_brief(query="active inference", year_from=2023)
     assert second["status"] == "completed"
     assert second["brief_action"] == "noop"
     assert second["brief_document_id"] == first["brief_document_id"]
@@ -194,7 +188,7 @@ async def test_research_brief_no_results_brief_only(
     )
 
     client = SemanticScholarClient(api_key="")
-    result = await asyncio.to_thread(client.research_brief, query="quantum gravity nothing matches")
+    result = await client.research_brief(query="quantum gravity nothing matches")
     assert result["status"] == "completed"
     assert result["results_count"] == 0
     assert result["papers_inserted"] == 0

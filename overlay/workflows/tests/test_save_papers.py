@@ -55,7 +55,6 @@ class MockS2Client:
         self._papers = papers_by_id
         self._fail_ids = set(fail_ids)
         self._raise_on = raise_on or {}
-        self.close_called = False
         self.get_paper_calls: list[str] = []
 
     def get_paper(self, paper_id: str) -> Paper:
@@ -65,15 +64,6 @@ class MockS2Client:
         if paper_id in self._fail_ids:
             raise RuntimeError(f"S2 API error for {paper_id}")
         return self._papers[paper_id]
-
-    def close(self) -> None:
-        self.close_called = True
-
-    def __enter__(self) -> MockS2Client:
-        return self
-
-    def __exit__(self, *args: object) -> None:
-        self.close()
 
 
 def _paper(paper_id: str, *, title: str = "Sample Paper") -> Paper:
@@ -134,7 +124,6 @@ async def test_handler_inserts_one_paper() -> None:
     assert entry["status"] == "inserted"
     assert entry["document_id"] == "semantic_scholar:paper:abc123"
     assert entry["paperId"] == "abc123"
-    assert mock.close_called is True
 
 
 @pytest.mark.asyncio
@@ -160,7 +149,6 @@ async def test_handler_handles_partial_failure() -> None:
     assert len(failed) == 1
     assert failed[0]["paperId"] == "bad"
     assert "S2 API error for bad" in failed[0]["error"]
-    assert mock.close_called is True
     assert any(event == "save_papers_paper_failed" for event, _ in ctx.logs)
 
 
@@ -211,7 +199,11 @@ async def test_handler_returns_noop_for_unchanged_papers() -> None:
 
 
 @pytest.mark.asyncio
-async def test_handler_closes_client_on_exception() -> None:
+async def test_handler_propagates_unexpected_exceptions() -> None:
+    """Programming-error exceptions (i.e. not ``RuntimeError`` from the
+    S2 API) propagate so the workflow run is marked failed; the
+    handler doesn't swallow them into a ``"failed"`` result entry.
+    """
     pool = MockPool()
     ctx = MockContext(pool)
     mock = MockS2Client(
@@ -226,8 +218,6 @@ async def test_handler_closes_client_on_exception() -> None:
                 save_papers.Input(paper_ids=["boom"]),
                 ctx,
             )
-
-    assert mock.close_called is True
 
 
 @pytest.mark.asyncio

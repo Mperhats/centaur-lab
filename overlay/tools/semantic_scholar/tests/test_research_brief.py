@@ -9,6 +9,7 @@ intentionally NOT duplicated here.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -20,6 +21,11 @@ from centaur_lab.testing import (
     install_mock_conn,
 )
 from semantic_scholar.client import SemanticScholarClient
+
+
+def _run_brief(client: SemanticScholarClient, *args: Any, **kwargs: Any) -> dict[str, Any]:
+    """Drive the now-async ``research_brief`` from a sync test."""
+    return asyncio.run(client.research_brief(*args, **kwargs))
 
 
 def _install_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -103,7 +109,7 @@ def test_research_brief_empty_query_returns_error(monkeypatch: pytest.MonkeyPatc
     connect_calls = install_mock_conn(monkeypatch, MockAsyncpgConn())
     search_calls = _install_search_papers(monkeypatch, [])
 
-    result = _client().research_brief("   ")
+    result = _run_brief(_client(), "   ")
 
     assert result == {"status": "error", "error": "query cannot be empty"}
     assert connect_calls == []
@@ -116,7 +122,7 @@ def test_research_brief_non_positive_limit_returns_error(monkeypatch: pytest.Mon
     connect_calls = install_mock_conn(monkeypatch, MockAsyncpgConn())
     search_calls = _install_search_papers(monkeypatch, [])
 
-    result = _client().research_brief("anything", limit=0)
+    result = _run_brief(_client(), "anything", limit=0)
 
     assert result == {"status": "error", "error": "limit must be positive"}
     assert connect_calls == []
@@ -130,7 +136,7 @@ def test_research_brief_no_database_url_returns_error(monkeypatch: pytest.Monkey
     connect_calls = install_mock_conn(monkeypatch, MockAsyncpgConn())
     search_calls = _install_search_papers(monkeypatch, [])
 
-    result = _client().research_brief("anything")
+    result = _run_brief(_client(), "anything")
 
     assert result == {
         "status": "error",
@@ -154,7 +160,7 @@ def test_research_brief_clamps_limit_above_max(monkeypatch: pytest.MonkeyPatch) 
     install_mock_conn(monkeypatch, MockAsyncpgConn())
     search_calls = _install_search_papers(monkeypatch, [])
 
-    result = _client().research_brief("anything", limit=100)
+    result = _run_brief(_client(), "anything", limit=100)
 
     assert result["status"] == "completed"
     assert search_calls == [
@@ -172,7 +178,7 @@ def test_research_brief_persists_brief_and_papers_with_parent_link(
     papers = [_paper("p1"), _paper("p2"), _paper("p3")]
     search_calls = _install_search_papers(monkeypatch, papers)
 
-    result = _client().research_brief("active inference", limit=3, year_from=2020)
+    result = _run_brief(_client(), "active inference", limit=3, year_from=2020)
 
     assert result["status"] == "completed"
     brief_document_id = result["brief_document_id"]
@@ -200,10 +206,10 @@ def test_research_brief_search_failure_returns_error(monkeypatch: pytest.MonkeyP
     _install_search_papers(monkeypatch, exc=RuntimeError("S2 down"))
     recorder = _install_metrics(monkeypatch)
 
-    result = _client().research_brief("anything")
+    result = _run_brief(_client(), "anything")
 
     assert result == {"status": "error", "error": "S2 down"}
-    # _research_brief_async runs the S2 search BEFORE asyncpg.connect; when
+    # ``research_brief`` runs the S2 search BEFORE ``asyncpg.connect``; when
     # it raises, no connection is opened and no metrics are emitted.
     assert connect_calls == []
     assert mock.execute_calls == []
@@ -223,7 +229,7 @@ def test_research_brief_idempotent_rerun_returns_all_noop(monkeypatch: pytest.Mo
     discover_mock = MockAsyncpgConn()
     install_mock_conn(monkeypatch, discover_mock)
     _install_search_papers(monkeypatch, papers)
-    first = _client().research_brief("active inference")
+    first = _run_brief(_client(), "active inference")
     assert first["status"] == "completed"
     assert first["brief_action"] == "inserted"
 
@@ -237,7 +243,7 @@ def test_research_brief_idempotent_rerun_returns_all_noop(monkeypatch: pytest.Mo
     rerun_mock = MockAsyncpgConn(fetchval_for_doc_id=hashes)
     install_mock_conn(monkeypatch, rerun_mock)
     _install_search_papers(monkeypatch, papers)
-    second = _client().research_brief("active inference")
+    second = _run_brief(_client(), "active inference")
 
     assert second["status"] == "completed"
     assert second["brief_action"] == "noop"
@@ -257,7 +263,7 @@ def test_research_brief_emits_metrics_for_brief_and_papers(
     _install_search_papers(monkeypatch, papers)
     recorder = _install_metrics(monkeypatch)
 
-    result = _client().research_brief("active inference")
+    result = _run_brief(_client(), "active inference")
 
     assert result["status"] == "completed"
     # 1 brief + 2 papers = 3 of each metric call, brief recorded first.

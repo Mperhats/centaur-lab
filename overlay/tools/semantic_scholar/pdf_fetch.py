@@ -105,20 +105,28 @@ def derive_pdf_url(paper: Paper) -> str | None:
 
     Preference order:
 
-    1. ``openAccessPdf.url`` (when it's a non-empty stripped string).
+    1. ``openAccessPdf["url"]`` (when it's a non-empty stripped string).
     2. ``https://arxiv.org/pdf/{externalIds.ArXiv}.pdf`` (when an
        ArXiv ID is present and non-empty).
 
     Returns ``None`` when neither field is usable.
+
+    The upstream ``semanticscholar`` library exposes ``openAccessPdf``
+    and ``externalIds`` as plain dicts and returns ``None`` (not
+    ``{}``) when the API response omitted the field — every access
+    below normalises that.
     """
-    if paper.openAccessPdf is not None and paper.openAccessPdf.url:
-        stripped = paper.openAccessPdf.url.strip()
+    open_access_pdf = paper.openAccessPdf or {}
+    open_access_url = open_access_pdf.get("url")
+    if open_access_url:
+        stripped = str(open_access_url).strip()
         if stripped:
             return stripped
 
-    arxiv_id = paper.externalIds.get("ArXiv")
+    external_ids = paper.externalIds or {}
+    arxiv_id = external_ids.get("ArXiv")
     if arxiv_id:
-        stripped = arxiv_id.strip()
+        stripped = str(arxiv_id).strip()
         if stripped:
             return f"https://arxiv.org/pdf/{stripped}.pdf"
 

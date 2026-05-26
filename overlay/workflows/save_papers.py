@@ -53,40 +53,37 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     client = SemanticScholarClient()
     results: list[dict[str, Any]] = []
     saved_papers: list[Paper] = []
-    try:
-        for paper_id in inp.paper_ids:
-            try:
-                paper = client.get_paper(paper_id)
-            except RuntimeError as exc:
-                error_message = str(exc)
-                ctx.log(
-                    "save_papers_paper_failed",
-                    paper_id=paper_id,
-                    error=error_message,
-                )
-                results.append(
-                    {
-                        "paperId": paper_id,
-                        "status": "failed",
-                        "error": error_message,
-                    }
-                )
-                continue
-
-            saved_papers.append(paper)
-            document = build_paper_document(paper, query=inp.query)
-            observe_document_size(document)
-            action = await upsert_document(ctx._pool, document)
-            record_document_change(document, action)
+    for paper_id in inp.paper_ids:
+        try:
+            paper = client.get_paper(paper_id)
+        except RuntimeError as exc:
+            error_message = str(exc)
+            ctx.log(
+                "save_papers_paper_failed",
+                paper_id=paper_id,
+                error=error_message,
+            )
             results.append(
                 {
                     "paperId": paper_id,
-                    "document_id": document["document_id"],
-                    "status": action,
+                    "status": "failed",
+                    "error": error_message,
                 }
             )
-    finally:
-        client.close()
+            continue
+
+        saved_papers.append(paper)
+        document = build_paper_document(paper, query=inp.query)
+        observe_document_size(document)
+        action = await upsert_document(ctx._pool, document)
+        record_document_change(document, action)
+        results.append(
+            {
+                "paperId": paper_id,
+                "document_id": document["document_id"],
+                "status": action,
+            }
+        )
 
     papers_inserted = sum(1 for r in results if r.get("status") == "inserted")
     papers_updated = sum(1 for r in results if r.get("status") == "updated")

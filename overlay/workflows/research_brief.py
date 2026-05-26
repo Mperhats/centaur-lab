@@ -1,15 +1,14 @@
-"""Workflow: thin wrapper delegating to ``SemanticScholarClient.research_brief``.
+"""Workflow: build and persist a research brief from Semantic Scholar.
 
-The actual S2-search → render → upsert pipeline now lives on
-``SemanticScholarClient.research_brief`` in
-``overlay/tools/semantic_scholar/client.py``. This workflow handler
-exists only to satisfy ``call workflow run`` callers (Justfile smoke
-recipes, external posters to ``/workflows/runs``); it delegates to the
-tool method and translates the tool's ``{"status": "error"}`` envelope
-back to the workflow's pre-existing ``{"status": "skipped"}`` contract
-for ``empty_query`` and ``invalid_limit`` — the two soft-skip cases
-that workflow callers already depend on. All other tool returns
-(success and other errors) pass through unchanged.
+Searches the Graph API for ``query``, renders a Markdown lit review,
+and writes the brief plus its citing papers to
+``company_context_documents``. Idempotent on ``(query, year_from)``.
+
+Calls the shared ``persist_research_brief_from_papers`` helper directly
+with the workflow's pool (``ctx._pool``) instead of going through the
+tool's ``research_brief`` envelope — workflows already own a pool and a
+running loop, so the envelope-driven sync/async bridging the tool
+method does for agent callers is pure overhead here.
 """
 
 from __future__ import annotations
@@ -21,9 +20,9 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from api.workflow_engine import WorkflowContext
 
+from centaur_lab.brief import persist_research_brief_from_papers
 from tools.semantic_scholar.client import (
-    RESEARCH_BRIEF_EMPTY_QUERY_ERROR,
-    RESEARCH_BRIEF_INVALID_LIMIT_ERROR,
+    MAX_RESEARCH_BRIEF_LIMIT,
     SemanticScholarClient,
 )
 
@@ -39,64 +38,60 @@ class Input:
     year_from: int | None = None
 
 
-# The tool method returns ``{"status": "error", "error": <message>}`` for these
-# two input-validation cases. The pre-T3 workflow returned a ``"skipped"``
-# envelope with a distinct ``reason`` instead; preserve that shape so external
-# callers (Justfile smoke recipes, direct posters to ``/workflows/runs``)
-# observe no contract change. Keys are the tool method's exported error
-# constants so any future reword surfaces as an ImportError at the top of
-# this module rather than a silent drift that drops translations.
-_SKIPPED_TRANSLATIONS: dict[str, dict[str, str]] = {
-    RESEARCH_BRIEF_EMPTY_QUERY_ERROR: {"status": "skipped", "reason": "empty_query"},
-    RESEARCH_BRIEF_INVALID_LIMIT_ERROR: {"status": "skipped", "reason": "invalid_limit"},
-}
-
-
 async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
-    """Delegate to ``SemanticScholarClient.research_brief`` and pass through.
+    """Search → render → upsert. Returns the brief envelope minus markdown.
 
-    The tool method is synchronous (drives its own event loop via
-    ``asyncio.run``); run it in a worker thread so it doesn't collide
-    with the workflow engine's running event loop.
+    Soft-skips (``{"status": "skipped", "reason": ...}``) for empty
+    query or non-positive limit; everything else is wrapped in
+    ``status="completed"``. The brief markdown is recoverable via
+    ``brief_document_id`` so we don't carry it through
+    ``workflow_runs.output_json`` (which would compound across reruns).
     """
+    normalized_query = (inp.query or "").strip()
+    if not normalized_query:
+        ctx.log("research_brief_skipped", reason="empty_query")
+        return {"status": "skipped", "reason": "empty_query"}
+    if inp.limit <= 0:
+        ctx.log("research_brief_skipped", reason="invalid_limit")
+        return {"status": "skipped", "reason": "invalid_limit"}
+
+    clamped_limit = min(inp.limit, MAX_RESEARCH_BRIEF_LIMIT)
     ctx.log(
-        "research_brief_delegating",
-        query=inp.query,
-        limit=inp.limit,
+        "research_brief_starting",
+        query=normalized_query,
+        limit=clamped_limit,
         year_from=inp.year_from,
     )
 
-    with SemanticScholarClient() as client:
-        result = await asyncio.to_thread(
-            client.research_brief,
-            query=inp.query,
-            limit=inp.limit,
-            year_from=inp.year_from,
-        )
+    client = SemanticScholarClient()
+    # SDK is sync; bounce off-loop so concurrent workflow runs don't
+    # serialize on its HTTP retries.
+    papers = await asyncio.to_thread(
+        client.search_papers,
+        query=normalized_query,
+        limit=clamped_limit,
+        year_from=inp.year_from,
+    )
 
-    if result.get("status") == "error":
-        translated = _SKIPPED_TRANSLATIONS.get(str(result.get("error", "")))
-        if translated is not None:
-            ctx.log("research_brief_skipped", reason=translated["reason"])
-            return translated
+    result = await persist_research_brief_from_papers(
+        ctx._pool,
+        query=normalized_query,
+        papers=papers,
+        year_from=inp.year_from,
+        limit=clamped_limit,
+    )
 
     ctx.log(
-        "research_brief_delegated",
-        status=result.get("status"),
-        brief_document_id=result.get("brief_document_id"),
-        brief_action=result.get("brief_action"),
-        results_count=result.get("results_count"),
-        papers_inserted=result.get("papers_inserted"),
-        papers_updated=result.get("papers_updated"),
-        papers_noop=result.get("papers_noop"),
+        "research_brief_completed",
+        brief_document_id=result["brief_document_id"],
+        brief_action=result["brief_action"],
+        results_count=result["results_count"],
+        papers_inserted=result["papers_inserted"],
+        papers_updated=result["papers_updated"],
+        papers_noop=result["papers_noop"],
     )
-    # S8: drop ``markdown`` from the persisted workflow result. The
-    # workflow's return is what lands in ``workflow_runs.output_json``;
-    # for a 20-paper brief the markdown is ~20 KB per run and compounds
-    # across reruns. The brief body is recoverable via
-    # ``brief_document_id`` (still returned above), and direct callers
-    # of ``SemanticScholarClient.research_brief`` (CLI ``--pretty``,
-    # in-process agent consumption) continue to receive ``markdown``
-    # inline from the tool method itself — only the workflow handler's
-    # envelope strips it.
-    return {k: v for k, v in result.items() if k != "markdown"}
+
+    return {
+        "status": "completed",
+        **{k: v for k, v in result.items() if k != "markdown"},
+    }

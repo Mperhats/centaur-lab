@@ -24,12 +24,9 @@ from centaur_lab.testing import MockContext
 class FakeS2Client:
     """Minimal ``SemanticScholarClient`` stand-in for integration tests.
 
-    ``save_papers.handler`` only calls ``get_paper`` and ``close`` on the
-    client; the context-manager hooks are included so the same stub keeps
-    working if the handler is later refactored to use ``with`` (mirroring
-    the unit-test stubs in ``test_save_papers.py``). Unknown ``paper_id``s
-    raise ``RuntimeError`` to exercise the handler's per-paper failure
-    branch.
+    ``save_papers.handler`` only calls ``get_paper`` on the client.
+    Unknown ``paper_id``s raise ``RuntimeError`` to exercise the
+    per-paper failure branch.
     """
 
     def __init__(self, papers_by_id: dict[str, dict[str, Any]]) -> None:
@@ -38,16 +35,7 @@ class FakeS2Client:
     def get_paper(self, paper_id: str) -> Paper:
         if paper_id not in self._papers_by_id:
             raise RuntimeError(f"unknown paper id in stub: {paper_id}")
-        return Paper.model_validate(self._papers_by_id[paper_id])
-
-    def close(self) -> None:
-        pass
-
-    def __enter__(self) -> FakeS2Client:
-        return self
-
-    def __exit__(self, *args: object) -> None:
-        self.close()
+        return Paper(self._papers_by_id[paper_id])
 
 
 _PAPER_173BA: dict[str, Any] = {

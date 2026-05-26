@@ -10,6 +10,7 @@ Run from this directory:
     uv run python cli.py search "diffusion models protein design" --limit 5
 """
 
+import asyncio
 import json
 import sys
 from pathlib import Path
@@ -123,8 +124,8 @@ def search(
     json_output: bool = typer.Option(False, "--json", help="Output as JSON."),
 ):
     """Search papers by query."""
-    with _make_client() as client:
-        papers = client.search_papers(query=query, limit=limit, year_from=year_from)
+    client = _make_client()
+    papers = client.search_papers(query=query, limit=limit, year_from=year_from)
     if json_output:
         print(_papers_to_json(papers))
         return
@@ -137,8 +138,8 @@ def paper(
     json_output: bool = typer.Option(False, "--json", help="Output as JSON."),
 ):
     """Fetch metadata for a single paper."""
-    with _make_client() as client:
-        data = client.get_paper(paper_id)
+    client = _make_client()
+    data = client.get_paper(paper_id)
     if json_output:
         print(json.dumps(data.raw_data, indent=2))
         return
@@ -159,8 +160,8 @@ def references(
     json_output: bool = typer.Option(False, "--json", help="Output as JSON."),
 ):
     """List the papers cited by the given paper."""
-    with _make_client() as client:
-        refs = client.get_references(paper_id=paper_id, limit=limit)
+    client = _make_client()
+    refs = client.get_references(paper_id=paper_id, limit=limit)
     if json_output:
         print(_papers_to_json(refs))
         return
@@ -217,8 +218,8 @@ def research_brief_cmd(
     if pretty and json_output:
         raise typer.BadParameter("--pretty and --json are mutually exclusive; pick one.")
 
-    with _make_client() as client:
-        result = client.research_brief(query=query, limit=limit, year_from=year_from)
+    client = _make_client()
+    result = asyncio.run(client.research_brief(query=query, limit=limit, year_from=year_from))
 
     if result.get("status") == "error":
         # The tool method's error envelope is the canonical place for
@@ -262,8 +263,8 @@ def archive_cmd(
     20260526000001_add_paper_archives migration applied. ``just db::port-forward``
     plus ``just db::fetch-secret`` gives you a local DSN.
     """
-    with _make_client() as client:
-        result = client.archive_paper(paper_id, source_url=source_url)
+    client = _make_client()
+    result = asyncio.run(client.archive_paper(paper_id, source_url=source_url))
 
     if json_output:
         print(json.dumps(result, indent=2))
