@@ -28,6 +28,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 if TYPE_CHECKING:
     from api.workflow_engine import WorkflowContext
 
+import asyncpg
+
 from _bfts_config import (
     DEFAULT_DEBUG_PROB,
     DEFAULT_MAX_DEBUG_DEPTH,
@@ -38,6 +40,29 @@ from _bfts_config import (
 from _bfts_hyperparams import insert_hyperparams, latest_hyperparams
 
 WORKFLOW_NAME = "bfts_reflection_nightly"
+
+
+async def _load_recent_runs(
+    pool: asyncpg.Pool, limit: int
+) -> list[dict[str, Any]]:
+    """Fetch the most-recent N completed runs as a list of dicts.
+
+    ``ctx.step`` checkpoints its return value via JSON serialization, so the
+    raw ``asyncpg.Record`` objects ``pool.fetch`` returns must be coerced to
+    dicts before they leave the step. Mirrors the same pattern used in
+    ``_bfts_state.list_recent_node_summaries`` / ``list_nodes_for_run``.
+    """
+    rows = await pool.fetch(
+        """
+        SELECT best_node_id
+        FROM bfts_runs
+        WHERE status = 'completed'
+        ORDER BY updated_at DESC
+        LIMIT $1
+        """,
+        limit,
+    )
+    return [dict(r) for r in rows]
 
 # Heuristic clamps. Kept module-level so a tweak shows up in one place
 # and so the test pinning the bounds doesn't redefine magic numbers.
@@ -93,19 +118,14 @@ async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
     # The plan's wider SELECT was forward-looking; pulling
     # ``idea_json`` / ``config_json`` here costs KB-MB per row and adds
     # nothing the heuristic uses. Expand at the call site when a v2
-    # rule actually reads more columns.
+    # rule actually reads more columns. The wrapping helper converts
+    # ``asyncpg.Record`` rows to dicts so ``ctx.step`` can checkpoint
+    # the result; a previous direct ``pool.fetch`` here surfaced as
+    # ``Object of type Record is not JSON serializable`` and the
+    # workflow died 5ms in.
     recent = await ctx.step(
         "load_recent_runs",
-        lambda: pool.fetch(
-            """
-            SELECT best_node_id
-            FROM bfts_runs
-            WHERE status = 'completed'
-            ORDER BY updated_at DESC
-            LIMIT $1
-            """,
-            inp.lookback_runs,
-        ),
+        lambda: _load_recent_runs(pool, inp.lookback_runs),
     )
 
     if not recent:
