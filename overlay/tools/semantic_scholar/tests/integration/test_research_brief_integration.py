@@ -72,11 +72,13 @@ def _stub_search_papers(papers: list[dict[str, Any]]):
 
 
 def _set_database_url(monkeypatch: pytest.MonkeyPatch, dsn: str) -> None:
-    """Point ``_resolve_database_url`` at the test DSN.
+    """Point the client's DATABASE_URL fallback chain at the test DSN.
 
-    The env-first branch wins, so patching ``secret`` is defensive — it
-    keeps the test from accidentally hitting the real centaur_sdk
-    secret resolver in the (unlikely) event the env var is masked.
+    The constructor resolves ``database_url`` via constructor arg → env var
+    → ``secret(...)``; setting the env var hits the second branch. Patching
+    ``secret`` is defensive — keeps the test from hitting the real
+    centaur_sdk secret resolver in the (unlikely) event the env var is
+    masked.
     """
     monkeypatch.setenv("DATABASE_URL", dsn)
     monkeypatch.setattr(

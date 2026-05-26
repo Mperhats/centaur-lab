@@ -84,7 +84,7 @@ smoke-semantic-scholar query="diffusion models protein design" limit="5":
 # renders the markdown lit review, and persists the brief + each citing
 # paper to company_context_documents. Useful for end-to-end verification
 # of the persistence path against a port-forwarded centaur_test DB. Set
-# DATABASE_URL (the tool method falls back to it via _resolve_database_url)
+# DATABASE_URL (the constructor's env / secret fallback chain picks it up)
 # to your port-forwarded DSN. Defaults to --pretty so the rendered
 # markdown is the only thing on stdout — pipe to `glow` for nicer
 # in-terminal rendering.

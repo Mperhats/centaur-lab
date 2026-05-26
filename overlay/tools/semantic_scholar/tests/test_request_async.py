@@ -82,7 +82,7 @@ class _FakeAsyncClient:
         self.aenter_count = 0
         self.aexit_count = 0
 
-    async def __aenter__(self) -> "_FakeAsyncClient":
+    async def __aenter__(self) -> _FakeAsyncClient:
         self.aenter_count += 1
         return self
 

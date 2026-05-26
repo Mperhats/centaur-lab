@@ -34,7 +34,7 @@ def _env_only_secret(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         s2_client,
         "secret",
-        lambda key, default="": os.environ.get(key, default),
+        lambda key, default="": os.environ.get(key, default),  # noqa: TID251
     )
 
 
