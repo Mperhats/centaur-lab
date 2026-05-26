@@ -1,0 +1,32 @@
+[project]
+name = "bfts_executor"
+description = "Drive agent-sandbox Sandbox CRs for BFTS experiment execution"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "kubernetes-asyncio>=29.0.0",
+    "httpx>=0.27.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+
+[tool.centaur]
+module = "client.py"
+# No optional_secrets: this tool only talks to the in-cluster Kubernetes
+# API (read via the API pod's mounted service account token) and to the
+# sandbox-internal HTTP exec endpoint. No external HTTPS, so iron-proxy
+# has nothing to substitute.
