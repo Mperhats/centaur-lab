@@ -13,29 +13,32 @@ Underscore-prefixed module name so the API's workflow loader skips it
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Any
 
 
-WORST_METRIC: dict[str, Any] = {"_worst": True}
+WORST_METRIC: Mapping[str, Any] = MappingProxyType({"_worst": True})
 """Sentinel that compares worse than any real metric.
 
+Read-only mapping; mutating it would corrupt downstream `is_worst()` checks.
 Assigned on any failure path (buggy exec, metric-parse failure, plot
 failure). Equivalent to Sakana's WorstMetricValue
 (.scientist/ai_scientist/treesearch/utils/metric.py:327-341)."""
 
 
-def is_worst(metric: dict[str, Any] | None) -> bool:
+def is_worst(metric: Mapping[str, Any] | None) -> bool:
     return metric is None or bool(metric.get("_worst"))
 
 
-def direction_lower_is_better(metric: dict[str, Any]) -> bool:
+def direction_lower_is_better(metric: Mapping[str, Any]) -> bool:
     names = metric.get("metric_names") or []
     if not names:
         return True
     return bool(names[0].get("lower_is_better", True))
 
 
-def mean(metric: dict[str, Any]) -> float:
+def mean(metric: Mapping[str, Any]) -> float:
     """Mean of all final_values across all metrics and datasets.
 
     Returns +inf for is_worst() so argmax(-mean) never picks it.
@@ -53,7 +56,7 @@ def mean(metric: dict[str, Any]) -> float:
     return sum(values) / len(values)
 
 
-def score(metric: dict[str, Any]) -> float:
+def score(metric: Mapping[str, Any]) -> float:
     """Sortable score: lower is better => return mean; higher is better => return -mean.
 
     The best node is the one with the LOWEST score(); use argmin.

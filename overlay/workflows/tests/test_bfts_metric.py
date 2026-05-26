@@ -12,6 +12,7 @@ from _bfts_metric import (
     direction_lower_is_better,
     is_worst,
     mean,
+    score,
 )
 
 
@@ -62,3 +63,35 @@ def test_worst_metric_compares_worst() -> None:
     real = {"metric_names": [{"metric_name": "x", "lower_is_better": True, "description": "", "data": [{"dataset_name": "d", "final_value": 0.5, "best_value": 0.5}]}]}
     assert is_worst(WORST_METRIC)
     assert not is_worst(real)
+
+
+def test_score_lower_is_better_returns_mean() -> None:
+    m = {
+        "metric_names": [
+            {
+                "metric_name": "val_loss",
+                "lower_is_better": True,
+                "description": "",
+                "data": [{"dataset_name": "ds", "final_value": 0.4, "best_value": 0.3}],
+            }
+        ]
+    }
+    assert score(m) == 0.4
+
+
+def test_score_higher_is_better_flips_sign() -> None:
+    m = {
+        "metric_names": [
+            {
+                "metric_name": "val_acc",
+                "lower_is_better": False,
+                "description": "",
+                "data": [{"dataset_name": "ds", "final_value": 0.9, "best_value": 0.95}],
+            }
+        ]
+    }
+    assert score(m) == -0.9
+
+
+def test_score_worst_metric_is_positive_inf() -> None:
+    assert score(WORST_METRIC) == float("inf")
