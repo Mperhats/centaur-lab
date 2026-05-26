@@ -1,0 +1,29 @@
+[project]
+name = "pdf"
+description = "Stream PDFs over HTTPS and parse them to Markdown via the pymupdf4llm → pymupdf → pypdf fallback chain. Public HTTP only — no auth, no DB."
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27.0",
+    "pymupdf>=1.24.0",
+    "pymupdf4llm>=0.0.17",
+    "pypdf>=4.0.0",
+    "typer>=0.12.0",
+    "rich>=13.0.0",
+    "python-dotenv>=1.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[tool.centaur]
+module = "client.py"
