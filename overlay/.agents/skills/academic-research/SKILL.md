@@ -235,3 +235,28 @@ already in the metadata row. Archive only when the user actually needs
 the body. Don't call `archive_paper` to "save" a paper — that tool
 method does not persist; always go through the `archive_papers`
 workflow when persistence is the goal.
+
+### Known limitation: Cloudflare-protected publishers
+
+The HTTP fetch path is plain `urllib`-style — no headless browser. Any
+publisher that gates PDFs behind a Cloudflare JavaScript challenge
+returns HTTP 403 with an HTML body starting `<!DOCTYPE html><html
+lang="en-US"><head><title>Just a moment...</title>`. The workflow
+records this as `{status: "error", stage: "fetch", reason:
+"http_error"}` for the affected paper and continues with the rest of
+the batch — one Cloudflare-blocked paper never aborts a multi-paper
+archive. Concretely:
+
+- **arXiv** (`arxiv.org/pdf/...`) — always works (no JS challenge).
+- **biorxiv / medrxiv** — Cloudflare-protected, will 403 every time.
+- **Most journal sites** — usually Cloudflare-protected or paywalled.
+- **Publisher-hosted open-access PDFs** (PLOS, MDPI, eLife, etc.) —
+  mostly fine, occasional 403.
+
+When the user asks to archive a paper and you see this failure mode in
+the workflow's `results[]`, surface it plainly: "I couldn't fetch the
+PDF from biorxiv — they require a browser-level challenge. The
+abstract is still indexed under `<brief_document_id>`, and the open
+access page is at `<url>` if you want to pull the body manually." Do
+NOT retry — the same call will get the same 403. Don't fabricate
+content as a workaround.
