@@ -1,0 +1,102 @@
+"""Workflow: BFTS root — fans out num_drafts independent bfts_tree children.
+
+Each child gets a Sandbox provisioned by `bfts_executor.create_sandbox`
+(Task 1.6 / 1.9 in plan Phase 1). We do NOT call `ctx.agent_turn` to
+provision — Spec correction #11: do_agent_turn (.centaur/services/api/api
+/workflow_engine.py:1124) is for spawn→message→execute→wait-for-terminal
+agent runs and drags in spawn_assignment, slackbot session opening, and
+agent-execution event rows that BFTS does not need (BFTS sandboxes have
+no harness; the executor's CMD is `sleep infinity`).
+
+See docs/superpowers/plans/2026-05-25-bfts-on-centaur.md (Phase 2).
+"""
+from __future__ import annotations
+
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+if TYPE_CHECKING:
+    from api.workflow_engine import WorkflowContext
+
+WORKFLOW_NAME = "bfts_root"
+
+
+@dataclass
+class Input:
+    idea: dict[str, Any] = field(default_factory=dict)
+    num_drafts: int = 3
+    num_workers: int = 4
+    max_debug_depth: int = 3
+    debug_prob: float = 0.5
+    max_iters: int = 20
+    seed_base: int = 0
+
+
+def _sandbox_id(*, run_id: str, tree_idx: int) -> str:
+    """Deterministic per-tree sandbox id.
+
+    Format chosen so the BFTS executor's Sandbox CRDs are easy to scope
+    by run_id (label `centaur.ai/bfts-run`) and easy to clean up by
+    prefix. Stable across workflow restarts because `ctx.run_id` is
+    durable.
+    """
+    return f"bfts-{run_id}-tree-{tree_idx}"
+
+
+async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
+    children: list[dict[str, Any]] = []
+    for i in range(inp.num_drafts):
+        sandbox_id = _sandbox_id(run_id=ctx.run_id, tree_idx=i)
+        await ctx.step(
+            f"create_sandbox_{i}",
+            lambda sid=sandbox_id: ctx.tools.bfts_executor.create_sandbox(
+                sandbox_id=sid,
+                run_id=ctx.run_id,
+            ),
+        )
+        child_run_id = f"{ctx.run_id}:tree:{i}"
+        child = await ctx.start_workflow(
+            f"start_tree_{i}",
+            workflow_name="bfts_tree",
+            run_input={
+                "run_id": child_run_id,
+                "parent_run_id": ctx.run_id,
+                "idea": inp.idea,
+                "num_drafts": 1,    # each child tree has 1 root; root-level num_drafts = num trees
+                "num_workers": inp.num_workers,
+                "max_debug_depth": inp.max_debug_depth,
+                "debug_prob": inp.debug_prob,
+                "max_iters": inp.max_iters,
+                "seed": inp.seed_base + i,
+                "sandbox_id": sandbox_id,
+            },
+            trigger_key=child_run_id,
+            eager_start=True,
+        )
+        children.append(
+            {"run_id": child["run_id"], "tree_index": i, "sandbox_id": sandbox_id}
+        )
+
+    results: list[dict[str, Any]] = []
+    for child in children:
+        res = await ctx.wait_for_workflow(
+            f"wait_tree_{child['tree_index']}", run_id=child["run_id"]
+        )
+        results.append(res)
+
+    # Tear down each per-tree Sandbox now that all children are terminal.
+    # PVC follows owner refs (Spec correction #12 + agent-sandbox
+    # `shutdownPolicy: "Retain"` is overridden by an explicit delete).
+    for child in children:
+        await ctx.step(
+            f"stop_sandbox_{child['tree_index']}",
+            lambda sid=child["sandbox_id"]: ctx.tools.bfts_executor.stop_sandbox(
+                sandbox_id=sid
+            ),
+        )
+
+    return {"trees": children, "results": results}
