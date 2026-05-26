@@ -1,0 +1,17 @@
+[project]
+name = "pdf"
+version = "0.1.0"
+description = "Stream PDFs over HTTPS and parse them to Markdown via the pymupdf4llm -> pymupdf -> pypdf fallback chain. Public HTTP only — no auth."
+requires-python = ">=3.11"
+license = "Apache-2.0 OR MIT"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# Runtime manifest read by upstream's tool_manager. Dev/test deps live
+# in the root pyproject.toml; this file exists for tool discovery only.
+# No ``[tool.centaur].secrets`` — every PDF host this tool talks to is
+# public, so iron-proxy doesn't need to inject any auth headers.
+[tool.centaur]
+module = "client.py"

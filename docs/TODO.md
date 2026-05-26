@@ -68,11 +68,9 @@ CI requires `submodules: recursive` on `actions/checkout` so the symlink target 
 
 - [ ] If upstream ever fixes the packaging, delete the `centaur_sdk` symlink and add `centaur-sdk` as a regular dep in root `pyproject.toml` (path-sourced from `.centaur/centaur_sdk` via `[tool.uv.sources]`).
 
-## Tool discovery after dropping per-tool pyproject.toml
+## Per-tool pyproject.toml (resolved 2026-05-26)
 
-The acme-mirror reorg deleted `tools/<name>/pyproject.toml` files; the root `pyproject.toml` is now the single source of truth for dev/test deps. Upstream's `tool_manager` (`.centaur/services/api/api/tool_manager.py:1574-1683`) discovers tools by scanning each `tools/<name>/` for a `pyproject.toml` and reading its `[project] dependencies` plus `[tool.centaur]` block. **Tools with no per-tool `pyproject.toml` are silently skipped at API startup**, which means deploying this overlay as-is registers zero tools.
-
-- [ ] Before first GHCR publish, decide: (a) restore minimal per-tool `pyproject.toml` files at `tools/<name>/` for runtime discovery (matches centaur-acme exactly), or (b) propose an upstream change to `tool_manager` that discovers tools from a centralized manifest. Option (a) is the lower-risk path.
+`tools/semantic_scholar/pyproject.toml` and `tools/pdf/pyproject.toml` are minimal runtime manifests for upstream's `tool_manager` (`.centaur/services/api/api/tool_manager.py:1574-1683`) — they exist only for tool discovery and `[tool.centaur].optional_secrets` -> iron-proxy injection. Dev/test deps remain aggregated in the root `pyproject.toml` (single venv). Matches the centaur-acme + every upstream `.centaur/tools/*/pyproject.toml` shape.
 
 ## Overlay DB migrations (future)
 
