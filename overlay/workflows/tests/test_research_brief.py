@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 import research_brief
 
-from centaur_lab.testing import MockContext, MockPool
+from tests._helpers import MockContext, MockPool
 
 
 def _ok_bundle(

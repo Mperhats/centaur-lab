@@ -1,10 +1,11 @@
 """Unit tests for ``semantic_scholar.utils`` — pure tool-scoped helpers.
 
-``derive_pdf_url`` is also exercised by ``test_pdf_fetch.py`` (the
-legacy location still re-exports the same logic until Task 3 removes
-``pdf_fetch.py``); the cases here are intentionally narrower and
-exercise the new module's import path so consumers of the post-refactor
-``utils`` entry point have a contract test of their own.
+Covers :func:`derive_pdf_url`, :func:`canonical_json`, and
+:func:`content_hash` against the contract documented in
+``semantic_scholar/utils.py``. ``derive_pdf_url`` previously also had
+coverage in a sibling ``test_pdf_fetch.py``; that module was removed
+when ``pdf_fetch.py`` was dismantled into ``tools/pdf/fetch/http.py``
+plus this ``utils.py``.
 """
 
 from __future__ import annotations

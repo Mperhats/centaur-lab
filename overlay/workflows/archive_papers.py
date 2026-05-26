@@ -36,9 +36,11 @@ from semantic_scholar.client import SemanticScholarClient
 
 # Inlined metrics shim — try the real ``api.vm_metrics`` import (works
 # inside the API pod), fall back to no-op stubs (works in local pytest
-# runs where ``api`` isn't on sys.path). Mirrors
-# ``centaur_lab/metrics.py`` so both pods report against the same
-# Prometheus surface.
+# runs where ``api`` isn't on sys.path). The same two-line try/except
+# block is duplicated verbatim in ``save_papers.py`` and
+# ``research_brief.py`` so all three handlers report against the same
+# Prometheus surface; that duplication is the upstream inline-helpers
+# convention.
 try:
     from api.vm_metrics import (
         observe_company_context_document_size as _observe_document_size,

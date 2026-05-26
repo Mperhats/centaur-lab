@@ -123,7 +123,7 @@ clean-sandboxes filter="all":
 # sandboxes — this recipe deletes Slack Sandbox CRDs after the API roll.
 #
 # This recipe is the local-dev loop after editing overlay/tools,
-# overlay/workflows, overlay/.agents/skills, or overlay/centaur_lab:
+# overlay/workflows, or overlay/.agents/skills:
 #   1. rebuild centaur-overlay:sha-<short> and write overlay/.tag
 #   2. helm deploy with overlay.image.tag (rolls API when tag changes)
 #   3. rollout restart API (same-commit rebuilds reuse sha tag; Helm may not roll)
@@ -167,8 +167,8 @@ test-workflows:
 
 # Run a single org tool's test suite locally. Dev deps come from that
 # tool's pyproject.toml [dependency-groups]; pytest pythonpath in the
-# same file makes centaur_sdk, centaur_lab, and tools.<name>.*
-# importable without conftest sys.path bootstrap.
+# same file makes centaur_sdk and tools.<name>.* importable without
+# conftest sys.path bootstrap.
 #
 # Default is semantic_scholar (the original tool with the largest suite).
 # Pass any tool dirname to target a sibling: `just overlay::test-tools pdf`.

@@ -33,9 +33,10 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "strict"
+# ``..`` puts sibling tool packages on the path (``pdf`` for the PDF
+# fetch/parse stages); ``../../../.centaur`` exposes ``centaur_sdk``.
 pythonpath = [
     "..",
-    "../..",
     "../../../.centaur",
 ]
 

@@ -1,8 +1,7 @@
 """Tool-scoped helpers for the ``semantic_scholar`` tool.
 
-Three pure helpers that the tool's network layer (and the workflows
-that consume the tool's typed ``Paper`` objects) need to share without
-pulling in the broader ``centaur_lab`` persistence library:
+Three pure helpers shared between the tool's network layer and the
+workflows that consume the tool's typed ``Paper`` objects:
 
 * :func:`derive_pdf_url` — pick the best PDF URL for a paper, or
   ``None``. Used by the archive pipeline before download.

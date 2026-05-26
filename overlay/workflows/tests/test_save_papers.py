@@ -8,10 +8,10 @@ bundle method involved (saving metadata-only papers is the workflow's
 unique responsibility; the tool has no analogous method).
 
 The unit tests exercise the handler end-to-end against the in-memory
-``MockPool`` and ``MockContext`` stand-ins. The hash assertions use
-the module's own private ``_content_hash`` (not ``centaur_lab``'s
-sibling) because both copies hash to the same bytes — they're meant
-to drift only when the upstream canonical-JSON spec drifts.
+``MockPool`` and ``MockContext`` stand-ins. Hash assertions use the
+handler's own inlined ``_content_hash`` (byte-identical to the copies
+in the sibling workflow files; the duplication is intentional under the
+upstream inline-helpers convention).
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ import save_papers
 from semantic_scholar.projections import build_paper_document
 from semanticscholar.Paper import Paper
 
-from centaur_lab.testing import MockContext, MockPool
+from tests._helpers import MockContext, MockPool
 
 
 class MetricsRecorder:

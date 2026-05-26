@@ -18,7 +18,7 @@ from typing import Any
 import pytest
 from semanticscholar.Paper import Paper
 
-from centaur_lab.testing import MockContext
+from tests._helpers import MockContext
 
 
 class FakeS2Client:

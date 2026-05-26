@@ -82,8 +82,7 @@ MAX_RESEARCH_BRIEF_LIMIT = 20
 
 # Archive-pipeline knobs. Held on the client (not the workflow) so the
 # agent-facing ``archive_paper`` method ships sensible defaults without
-# forcing every caller to repeat the constants; matches the previous
-# values in ``centaur_lab/paper_archive.py``.
+# forcing every caller to repeat the constants.
 MAX_PDF_BYTES: Final[int] = 50 * 1024 * 1024
 PDF_DOWNLOAD_TIMEOUT_S: Final[float] = 60.0
 PDF_USER_AGENT: Final[str] = "centaur-scientist/0.1 (paper-archive; +https://centaur.run)"

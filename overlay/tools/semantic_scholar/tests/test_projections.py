@@ -1,9 +1,8 @@
 """Unit tests for ``semantic_scholar.projections`` — pure projection functions.
 
-The projection helpers used to live under ``centaur_lab/`` next to
-their async-DB counterparts; these tests cover the same logic at its
-new tool-scoped home, plus the new ``build_paper_archive_row`` that
-was previously inlined inside ``paper_archive.archive_paper_to_pool``.
+Covers the projection helpers at their tool-scoped home plus the
+``build_paper_archive_row`` projection that the workflow handler
+consumes when producing a ``paper_archives`` row.
 """
 
 from __future__ import annotations

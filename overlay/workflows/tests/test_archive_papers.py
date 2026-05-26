@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock, patch
 import archive_papers
 import pytest
 
-from centaur_lab.testing import MockContext
+from tests._helpers import MockContext
 
 
 class _SequencedPool:

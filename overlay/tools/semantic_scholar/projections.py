@@ -18,11 +18,11 @@ Three column shapes are produced here:
   :func:`render_brief`; the persistence side is built around the
   rendered body in :func:`build_brief_document`.
 
-These projections were previously colocated with their async-DB
-counterparts in ``centaur_lab/``; pulling the pure halves out lets the
-tool ship its agent-facing reads without forcing the workflow layer to
-own the persistence library, and lets the workflows do their own
-inlined writes (matching upstream conventions).
+These projections used to live next to their async-DB counterparts
+under ``centaur_lab/`` (now removed). Splitting the pure halves into
+this module lets the tool ship its agent-facing reads without forcing
+the workflow layer to depend on a persistence library, and lets each
+workflow own its inlined writes — matching upstream conventions.
 """
 
 from __future__ import annotations

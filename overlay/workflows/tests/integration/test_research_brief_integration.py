@@ -23,7 +23,7 @@ import research_brief
 from semantic_scholar.client import SemanticScholarClient
 from semanticscholar.Paper import Paper
 
-from centaur_lab.testing import MockContext
+from tests._helpers import MockContext
 
 
 def _paper(paper_id: str, *, title: str | None = None) -> Paper:
