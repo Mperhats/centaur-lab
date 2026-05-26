@@ -12,10 +12,6 @@ mod cloudflared 'cloudflared/Justfile'
 # org-overlay recipes stay in one place; reachable as `just overlay::<recipe>`.
 mod overlay 'overlay/Justfile'
 
-# Refresh markdown mirrors of upstream docs via curl.md. Reachable as
-# `just docs::refresh`, `just docs::diff`, `just docs::refresh-fresh`.
-mod docs 'docs/Justfile'
-
 default:
     just --list
 
@@ -76,76 +72,10 @@ bootstrap-secrets:
 down:
     helm uninstall $CENTAUR_RELEASE --namespace $CENTAUR_NAMESPACE
 
-# Mirrors upstream's `cleanup-orphan-proxy-services` `dry-run | delete`
-# interface and delegates the orphan-Service half to that recipe so we do
-# not reimplement it. Sandbox pods owned by a Sandbox CR with replicas > 0
-# are skipped — the agent-sandbox controller would recreate them — and
-# per-sandbox proxy pods whose sandbox-id maps to a skipped sandbox are
-# kept. The cluster-wide api iron-proxy (sandbox-id="api") is never
-# touched.
-# Reap stale sandbox + per-sandbox iron-proxy Pods + orphan proxy Services. Pass `delete` to apply.
+# Cluster health at a glance (mirrors upstream `.centaur/Justfile status`).
 [group('lifecycle')]
-clean mode="dry-run":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    case "{{mode}}" in
-      dry-run|delete) ;;
-      *) echo "mode must be dry-run or delete" >&2; exit 2 ;;
-    esac
-
-    ns=$CENTAUR_NAMESPACE
-    keep_ids=()
-    drop_sandboxes=()
-    drop_proxies=()
-
-    while IFS=$'\t' read -r pod sid owner_kind owner_name; do
-      [[ -n "$pod" ]] || continue
-      if [[ "$owner_kind" == "Sandbox" && -n "$owner_name" ]]; then
-        replicas=$(kubectl get sandbox -n "$ns" "$owner_name" -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "")
-        if [[ -n "$replicas" && "$replicas" != "0" ]]; then
-          keep_ids+=("$sid")
-          continue
-        fi
-      fi
-      drop_sandboxes+=("$pod")
-    done < <(
-      kubectl get pods -n "$ns" -l centaur.ai/managed=true \
-        -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.centaur\.ai/sandbox-id}{"\t"}{.metadata.ownerReferences[?(@.kind=="Sandbox")].kind}{"\t"}{.metadata.ownerReferences[?(@.kind=="Sandbox")].name}{"\n"}{end}'
-    )
-
-    while IFS=$'\t' read -r pod sid; do
-      [[ -n "$pod" && "$sid" != "api" ]] || continue
-      for kid in "${keep_ids[@]+"${keep_ids[@]}"}"; do
-        [[ "$kid" == "$sid" ]] && continue 2
-      done
-      drop_proxies+=("$pod")
-    done < <(
-      kubectl get pods -n "$ns" -l centaur.ai/iron-proxy=true \
-        -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.centaur\.ai/sandbox-id}{"\n"}{end}'
-    )
-
-    total=$(( ${#drop_sandboxes[@]} + ${#drop_proxies[@]} ))
-    if [[ "$total" -eq 0 ]]; then
-      echo "No stale sandbox or proxy pods found."
-    else
-      for pod in "${drop_sandboxes[@]+"${drop_sandboxes[@]}"}"; do
-        if [[ "{{mode}}" == "delete" ]]; then
-          kubectl delete pod -n "$ns" "$pod" --wait=false
-        else
-          printf 'sandbox pod: %s\n' "$pod"
-        fi
-      done
-      for pod in "${drop_proxies[@]+"${drop_proxies[@]}"}"; do
-        if [[ "{{mode}}" == "delete" ]]; then
-          kubectl delete pod -n "$ns" "$pod" --wait=false
-        else
-          printf 'proxy pod:   %s\n' "$pod"
-        fi
-      done
-    fi
-
-    echo "---"
-    (cd {{centaur}} && just cleanup-orphan-proxy-services "{{mode}}")
+status:
+    kubectl get all -n $CENTAUR_NAMESPACE
 
 # Rebuild overlay image + deploy (sha tag roll) + tear down Slack sandboxes.
 # Implemented in overlay/Justfile; exposed here for discoverability.
@@ -205,266 +135,32 @@ smoke:
     echo "smoke timed out waiting for execution ${execution_id}" >&2
     exit 1
 
-# Background `kubectl port-forward` for Slackbot (:3001) and API (:8000), detached
-# from this terminal so it survives shell exit. Idempotent: re-running while alive
-# is a no-op. Pair with `just dev-stop` and `just status`. Use `just logs <component>`
-# (delegated to upstream `.centaur/Justfile`) for live cluster logs.
+# Per-session dev loop: port-forward Slackbot (:3001) + API (:8000), tail Slackbot logs. Tunnel auto-runs as a launch agent.
 [group('dev')]
 dev:
     #!/usr/bin/env bash
-    set -uo pipefail
-    started=0
-    for svc in slackbot:3001 api:8000; do
-      name=${svc%:*}; port=${svc#*:}
-      pidfile=/tmp/centaur-pf-$name.pid
-      logfile=/tmp/centaur-port-forward-$name.log
-      pid=$(cat "$pidfile" 2>/dev/null || true)
-      if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-        echo "  $name :$port  already running (pid $pid)"
-        continue
-      fi
-      pkill -f "kubectl port-forward.*centaur-$name" 2>/dev/null || true
-      nohup kubectl port-forward -n $CENTAUR_NAMESPACE svc/${CENTAUR_RELEASE}-centaur-$name $port:$port \
-        >"$logfile" 2>&1 </dev/null &
-      new_pid=$!
-      disown "$new_pid" 2>/dev/null || true
-      echo "$new_pid" > "$pidfile"
-      echo "  $name :$port  started (pid $new_pid, log: $logfile)"
-      started=1
-    done
-    [ "$started" = "1" ] && sleep 2 || true
-    fail=0
-    for port in 3001 8000; do
-      if ! lsof -nP -iTCP:$port -sTCP:LISTEN -t >/dev/null 2>&1; then
-        echo "WARN: port $port not bound — check /tmp/centaur-port-forward-*.log" >&2
-        fail=1
+    set -euo pipefail
+    slackbot_log=/tmp/centaur-port-forward-slackbot.log
+    api_log=/tmp/centaur-port-forward-api.log
+    kubectl port-forward -n $CENTAUR_NAMESPACE svc/${CENTAUR_RELEASE}-centaur-slackbot 3001:3001 \
+      >"$slackbot_log" 2>&1 &
+    slackbot_pid=$!
+    kubectl port-forward -n $CENTAUR_NAMESPACE svc/${CENTAUR_RELEASE}-centaur-api 8000:8000 \
+      >"$api_log" 2>&1 &
+    api_pid=$!
+    trap 'kill "$slackbot_pid" "$api_pid" 2>/dev/null || true; wait 2>/dev/null || true' EXIT INT TERM
+    sleep 2
+    for pid_var in slackbot_pid api_pid; do
+      pid=${!pid_var}
+      if ! kill -0 "$pid" 2>/dev/null; then
+        echo "port-forward ${pid_var} died on startup — check logs:" >&2
+        cat "$slackbot_log" "$api_log" >&2
+        exit 1
       fi
     done
-    [ "$fail" = "0" ] && echo "ready. 'just status' to confirm; 'just dev-stop' to tear down."
-
-# Stop the backgrounded port-forwards started by `just dev`. Idempotent.
-# Cleans up both the pid-file-tracked processes and any stale matches.
-[group('dev')]
-dev-stop:
-    #!/usr/bin/env bash
-    set -uo pipefail
-    for name in slackbot api; do
-      pidfile=/tmp/centaur-pf-$name.pid
-      pid=$(cat "$pidfile" 2>/dev/null || true)
-      if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-        kill "$pid" 2>/dev/null || true
-        echo "  $name  stopped (pid $pid)"
-      fi
-      pkill -f "kubectl port-forward.*centaur-$name" 2>/dev/null || true
-      rm -f "$pidfile"
-    done
-    echo "done."
-
-# Full local-stack health check. Delegates the k8s slice to upstream's
-# `just status` and the tunnel slice to `just cloudflared::status`, then
-# layers in the port-forward and API-health pieces we own.
-[group('dev')]
-status:
-    #!/usr/bin/env bash
-    set -uo pipefail
-    echo "=== helm release ==="
-    helm list -n $CENTAUR_NAMESPACE 2>/dev/null | awk 'NR==1 || /centaur/'
+    echo "slackbot -> localhost:3001 (pid $slackbot_pid, log: $slackbot_log)  -- routes /api/webhooks/slack"
+    echo "api      -> localhost:8000 (pid $api_pid, log: $api_log)            -- routes everything else"
+    echo "tunnel   -> https://centaur.local-labs.xyz (cloudflared user agent — 'just cloudflared::status' to verify)"
+    echo "Tailing Slackbot logs. Ctrl-C stops both port-forwards; tunnel keeps running."
     echo ""
-    echo "=== k8s resources (upstream just status) ==="
-    (cd {{centaur}} && just status) 2>&1 | head -40
-    echo ""
-    echo "=== cloudflared tunnel ==="
-    just cloudflared::status 2>&1 || true
-    echo ""
-    echo "=== port-forwards ==="
-    for svc in slackbot:3001 api:8000; do
-      name=${svc%:*}; port=${svc#*:}
-      pidfile=/tmp/centaur-pf-$name.pid
-      pid=$(cat "$pidfile" 2>/dev/null || true)
-      bound=$(lsof -nP -iTCP:$port -sTCP:LISTEN -t 2>/dev/null | head -1 || true)
-      if [ -n "$bound" ] && [ "$bound" = "$pid" ]; then
-        echo "  $name :$port  OK (pid $pid)"
-      elif [ -n "$bound" ]; then
-        echo "  $name :$port  WARN bound by pid $bound (not tracked — pid file says '${pid:-none}')"
-      else
-        echo "  $name :$port  DOWN — run 'just dev'"
-      fi
-    done
-    echo ""
-    echo "=== API health (in-cluster) ==="
-    kubectl exec -n $CENTAUR_NAMESPACE deploy/${CENTAUR_RELEASE}-centaur-api -c api -- \
-      curl -fsS http://localhost:8000/health 2>&1 || echo "health probe failed"
-
-# Phase 0 platform smoke: confirms the agent-sandbox controller + api SA RBAC
-# can create a Sandbox CRD with the BFTS shape (labels, inline volumeClaim,
-# workspace mount path) and that pods/exec works. No overlay workflow
-# involved; this is a pure-kubectl check against the bundled controller.
-# See docs/superpowers/plans/2026-05-25-bfts-on-centaur.md (Phase 0 Task 0.2).
-[group('bfts')]
-bfts-platform-smoke:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    ns=$CENTAUR_NAMESPACE
-    sandbox_id="bfts-platform-smoke-$(date +%s)"
-    cleanup() {
-      kubectl -n "$ns" delete sandbox.agents.x-k8s.io "$sandbox_id" \
-        --ignore-not-found --cascade=foreground --wait=true || true
-    }
-    trap cleanup EXIT
-    cat <<YAML | kubectl -n "$ns" apply -f -
-    apiVersion: agents.x-k8s.io/v1alpha1
-    kind: Sandbox
-    metadata:
-      name: ${sandbox_id}
-      labels:
-        centaur.ai/bfts-sandbox: "true"
-    spec:
-      replicas: 1
-      service: false
-      shutdownPolicy: Retain
-      volumeClaimTemplates:
-        - metadata:
-            name: workspace
-          spec:
-            accessModes: ["ReadWriteOnce"]
-            resources:
-              requests:
-                storage: 1Gi
-      podTemplate:
-        metadata:
-          labels:
-            centaur.ai/bfts-sandbox: "true"
-        spec:
-          containers:
-            - name: sandbox
-              image: busybox:1.36
-              command: ["sleep", "infinity"]
-              workingDir: /workspace
-              volumeMounts:
-                - name: workspace
-                  mountPath: /workspace
-    YAML
-    kubectl -n "$ns" wait --for=condition=Ready pod/"$sandbox_id" --timeout=120s
-    out=$(kubectl -n "$ns" exec "$sandbox_id" -- sh -c \
-      'mkdir -p /workspace/smoke && printf "%s" "PLATFORM_OK" > /workspace/smoke/marker && cat /workspace/smoke/marker')
-    if [ "$out" = "PLATFORM_OK" ]; then
-      echo "PLATFORM SMOKE OK (sandbox ${sandbox_id})"
-      exit 0
-    fi
-    echo "unexpected exec output: '${out}'" >&2
-    exit 1
-
-# Build the bfts-executor:latest image used by Sandbox pods the BFTS
-# tool spawns. Docker Desktop's k8s shares the host image cache so
-# pullPolicy: IfNotPresent finds the local tag without a registry.
-# See docs/superpowers/plans/2026-05-25-bfts-on-centaur.md (Phase 1).
-[group('bfts')]
-bfts-build-executor:
-    docker build -f overlay/Dockerfile.bfts-executor -t bfts-executor:latest overlay
-
-# Phase 1 end-to-end: prove that BFTS sandbox PVC retention works
-# across pause/resume. Drives BFTSExecutor (already deployed in the
-# overlay image) from inside the api pod via `kubectl exec`. See
-# docs/superpowers/plans/2026-05-25-bfts-on-centaur.md (Phase 1 Task 1.8).
-[group('bfts')]
-bfts-retention-smoke:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    api_deploy="deploy/${CENTAUR_RELEASE}-centaur-api"
-    sandbox_id="bfts-retention-smoke-$(date +%s)"
-    py="$(cat <<'PY'
-    import asyncio, os, sys
-    sys.path.insert(0, "/app/overlay/org/tools")
-    from bfts_executor.client import BFTSExecutor, _KubernetesSandboxAPI
-
-    async def main(sandbox_id: str) -> None:
-        api = _KubernetesSandboxAPI()
-        executor = BFTSExecutor(sandbox_api=api)
-        try:
-            await executor.create_sandbox(
-                sandbox_id, run_id="retention-smoke"
-            )
-            await api.write_file(
-                sandbox_id, "/workspace/sentinel.txt", "RETENTION_OK"
-            )
-            await executor.pause_sandbox(sandbox_id)
-            await executor.resume_sandbox(sandbox_id)
-            res = await api.run_command(
-                sandbox_id, "cat /workspace/sentinel.txt", timeout_s=10.0
-            )
-            if res.stdout.strip() != "RETENTION_OK":
-                raise SystemExit(
-                    f"sentinel mismatch: '{res.stdout!r}' exit={res.exit_code}"
-                )
-            print("RETENTION SMOKE OK")
-        finally:
-            await executor.stop_sandbox(sandbox_id)
-
-    asyncio.run(main(os.environ["SANDBOX_ID"]))
-    PY
-    )"
-    kubectl -n $CENTAUR_NAMESPACE exec "$api_deploy" -c api \
-        -- env SANDBOX_ID="$sandbox_id" /app/.venv/bin/python -c "$py"
-
-# Phase 2 smoke: kick off a tiny BFTS run (1 draft, 2 iters) and stream
-# status. See docs/superpowers/plans/2026-05-25-bfts-on-centaur.md (Phase 2).
-[group('bfts')]
-bfts-toy-run:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    api_deploy="deploy/${CENTAUR_RELEASE}-centaur-api"
-    exec_curl() {
-      kubectl exec -n $CENTAUR_NAMESPACE "$api_deploy" -- sh -c \
-        'curl -sS "$@" -H "X-Api-Key: $SLACKBOT_API_KEY"' -- "$@"
-    }
-    run=$(exec_curl -X POST http://localhost:8000/workflows/runs \
-        -H "Content-Type: application/json" \
-        -d '{
-              "workflow_name":"bfts_root",
-              "input":{
-                "idea":{
-                  "Name":"toy-linreg",
-                  "Title":"Linear regression baseline on 200 synthetic samples",
-                  "Short Hypothesis":"A least-squares fit on a 1-feature dataset should achieve MSE below the variance of y.",
-                  "Experiments":["sklearn.linear_model.LinearRegression on a single synthetic dataset of 200 samples."]
-                },
-                "num_drafts":1,
-                "num_workers":1,
-                "max_iters":2,
-                "debug_prob":0.5
-              }
-            }')
-    run_id=$(printf '%s' "$run" | jq -r '.run_id')
-    echo "started bfts_root run ${run_id}"
-    for _ in $(seq 1 240); do
-      state=$(exec_curl "http://localhost:8000/workflows/runs/${run_id}")
-      status=$(printf '%s' "$state" | jq -r '.status // empty')
-      [ "$status" = "completed" ] && { printf '%s\n' "$state" | jq; exit 0; }
-      [ "$status" = "failed" ] || [ "$status" = "failed_permanent" ] && { printf '%s\n' "$state" | jq >&2; exit 1; }
-      sleep 5
-    done
-    echo "bfts_root run ${run_id} did not reach terminal in time" >&2
-    exec_curl "http://localhost:8000/workflows/runs/${run_id}" | jq >&2
-    exit 1
-
-# Phase 3 smoke: run a toy BFTS + assert best_solution.py exists.
-[group('bfts')]
-bfts-verify-best:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    api_deploy="deploy/${CENTAUR_RELEASE}-centaur-api"
-    psql_count() {
-      kubectl exec -n $CENTAUR_NAMESPACE $api_deploy -- psql "$DATABASE_URL" -tAc \
-        "SELECT count(*) FROM bfts_artifacts WHERE relative_path = 'best_solution.py';" \
-        | tr -d '[:space:]'
-    }
-    before=$(psql_count)
-    just bfts-toy-run
-    after=$(psql_count)
-    delta=$((after - before))
-    if [ "$delta" -ge "1" ]; then
-      echo "BFTS-VERIFY-BEST OK (+${delta} new artifact(s); total=${after})"
-      exit 0
-    fi
-    echo "no new best_solution.py written (before=${before}, after=${after})" >&2
-    exit 1
+    kubectl logs -n $CENTAUR_NAMESPACE deploy/${CENTAUR_RELEASE}-centaur-slackbot --tail=20 -f
