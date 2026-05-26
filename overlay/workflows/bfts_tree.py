@@ -39,6 +39,7 @@ from _bfts_state import (
     list_nodes_for_run,
     list_seed_children,
     mark_node_failed,
+    mark_run_completed,
     set_best_node,
     update_node_aggregate_metric,
 )
@@ -182,6 +183,14 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                 "num_workers": search.num_workers,
                 "max_debug_depth": search.max_debug_depth,
                 "debug_prob": search.debug_prob,
+                # F.2 / F.4 fields — were missing from the persisted
+                # snapshot even though ``sources`` claimed they'd been
+                # resolved. Without them in ``config_json``, a replay or
+                # postmortem couldn't reproduce the exact knob values
+                # that drove the run (operator had to read the engine's
+                # ``output_json`` instead, which is per-run-only).
+                "prior_attempts_window": search.prior_attempts_window,
+                "num_seeds": search.num_seeds,
                 "max_iters": inp.max_iters,
                 "seed": inp.seed,
                 "llm_api_key_secret": llm.llm_api_key_secret,
@@ -549,6 +558,16 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             num_seeds=search.num_seeds,
             aggregate=aggregate,
         )
+
+    # Unconditional terminal-status write — covers the "all-buggy tree,
+    # no best leaf" case where ``set_best_node`` is never called and the
+    # row would otherwise stay ``running`` forever. ``set_best_node`` no
+    # longer touches ``status`` so this is the single writer for the
+    # ``running -> completed`` transition (idempotent on replay).
+    await ctx.step(
+        "mark_run_completed",
+        lambda: mark_run_completed(pool, run_id=inp.run_id),
+    )
 
     return {
         "run_id": inp.run_id,

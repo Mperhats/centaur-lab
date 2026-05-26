@@ -21,6 +21,9 @@ from _bfts_state import (
     list_recent_node_summaries,
     list_seed_children,
     mark_node_failed,
+    mark_run_completed,
+    mark_run_failed,
+    set_best_node,
     update_node_aggregate_metric,
     update_node_metric,
 )
@@ -407,3 +410,57 @@ async def test_update_node_aggregate_metric_merges_via_jsonb_concat() -> None:
     parsed = json.loads(args[1])
     assert parsed["aggregate_mean"] == pytest.approx(0.32)
     assert parsed["aggregate_n"] == pytest.approx(3.0)
+
+
+@pytest.mark.asyncio
+async def test_set_best_node_writes_only_best_node_id_and_updated_at() -> None:
+    """``set_best_node`` no longer flips ``status``. We assert the UPDATE
+    touches ``best_node_id`` + ``updated_at`` and explicitly DOES NOT
+    include ``status = '...'`` so the new ``mark_run_completed`` writer
+    is the single source of truth for the running -> completed
+    transition (covers the all-buggy-tree case)."""
+    pool = FakePool()
+
+    await set_best_node(pool, run_id="run-1", best_node_id="node-7")
+
+    query, args = pool.execute_calls[0]
+    assert "best_node_id = $2" in query
+    assert "updated_at = NOW()" in query
+    assert "status" not in query, (
+        "set_best_node must not write status anymore; "
+        "mark_run_completed owns that transition"
+    )
+    assert args == ("run-1", "node-7")
+
+
+@pytest.mark.asyncio
+async def test_mark_run_completed_updates_status_with_run_id_only() -> None:
+    """Idempotent ``status -> 'completed'`` transition keyed on
+    ``run_id``. Single positional arg, no payload, since the value is
+    hard-coded into the UPDATE statement."""
+    pool = FakePool()
+
+    await mark_run_completed(pool, run_id="run-42")
+
+    assert len(pool.execute_calls) == 1
+    query, args = pool.execute_calls[0]
+    assert "UPDATE bfts_runs" in query
+    assert "status = 'completed'" in query
+    assert "WHERE run_id = $1" in query
+    assert args == ("run-42",)
+
+
+@pytest.mark.asyncio
+async def test_mark_run_failed_updates_status_with_run_id_only() -> None:
+    """Reconciliation-only writer for ``status -> 'failed'``. Same
+    contract shape as ``mark_run_completed`` so the orphan-sweep tool
+    can call either based on the engine's terminal status."""
+    pool = FakePool()
+
+    await mark_run_failed(pool, run_id="run-99")
+
+    query, args = pool.execute_calls[0]
+    assert "UPDATE bfts_runs" in query
+    assert "status = 'failed'" in query
+    assert "WHERE run_id = $1" in query
+    assert args == ("run-99",)

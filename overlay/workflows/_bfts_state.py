@@ -335,9 +335,55 @@ async def update_node_aggregate_metric(
 async def set_best_node(
     pool: asyncpg.Pool, *, run_id: str, best_node_id: str
 ) -> None:
+    """Record the run's best node id.
+
+    Status is **not** touched here — that's owned by
+    :func:`mark_run_completed` / :func:`mark_run_failed` so we have a
+    single writer for ``bfts_runs.status``. Runs that finish without a
+    good leaf (all-buggy tree) still need to leave ``running``; coupling
+    status to ``best_node_id`` previously left those rows stuck forever.
+    """
     await pool.execute(
-        "UPDATE bfts_runs SET best_node_id = $2, status = 'completed', updated_at = NOW() WHERE run_id = $1",
+        "UPDATE bfts_runs SET best_node_id = $2, updated_at = NOW() WHERE run_id = $1",
         run_id, best_node_id,
+    )
+
+
+async def mark_run_completed(
+    pool: asyncpg.Pool, *, run_id: str
+) -> None:
+    """Transition ``bfts_runs.status -> 'completed'`` at end-of-handler.
+
+    Idempotent (re-runs leave the row in ``completed``). Called
+    unconditionally by ``bfts_tree.handler`` after the export step so
+    every successful workflow execution surfaces a terminal status — not
+    just ones that produced a best node. Mirrors how the engine flips
+    ``workflow_runs.status``; without it the operator sees ``bfts_runs``
+    rows stuck in ``running`` for hours after the workflow itself
+    completed.
+    """
+    await pool.execute(
+        "UPDATE bfts_runs SET status = 'completed', updated_at = NOW() WHERE run_id = $1",
+        run_id,
+    )
+
+
+async def mark_run_failed(
+    pool: asyncpg.Pool, *, run_id: str
+) -> None:
+    """Transition ``bfts_runs.status -> 'failed'``.
+
+    Reserved for the reconciliation path (e.g. a one-shot orphan sweep
+    that aligns ``bfts_runs.status`` with the engine's terminal
+    ``workflow_runs.status``). The handler itself cannot reliably call
+    this from inside its own try/except — the durable workflow engine
+    treats raised exceptions as retryable and replays from the last
+    checkpoint, so any in-handler "failed" write would either fight the
+    replay or never run.
+    """
+    await pool.execute(
+        "UPDATE bfts_runs SET status = 'failed', updated_at = NOW() WHERE run_id = $1",
+        run_id,
     )
 
 

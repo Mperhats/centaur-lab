@@ -289,6 +289,12 @@ def _patch_fanout_deps(
     monkeypatch.setattr(bfts_tree, "insert_run", AsyncMock(return_value=None))
     monkeypatch.setattr(bfts_tree, "insert_node", AsyncMock(return_value=None))
     monkeypatch.setattr(bfts_tree, "set_best_node", AsyncMock(return_value=None))
+    # F.6 follow-up: ``mark_run_completed`` is invoked unconditionally
+    # at end-of-handler. Patch it for the same reason as the other DAOs
+    # so the ``object()`` pool sentinel never reaches asyncpg.
+    monkeypatch.setattr(
+        bfts_tree, "mark_run_completed", AsyncMock(return_value=None)
+    )
     # F.1: mark_node_failed is only invoked on a failed-child path; tests
     # without ``wait_results`` overrides never reach it but we patch it
     # for the same reason as the other DAOs — keep the ``object()`` pool
@@ -746,6 +752,144 @@ async def test_handler_persists_sources_in_config_json(
     assert sources["num_drafts"] == "input"  # _input passes num_drafts=1
     assert sources["max_debug_depth"] == "default"
     assert sources["metric_reducer"] == "default"
+
+
+@pytest.mark.asyncio
+async def test_handler_persists_num_seeds_and_prior_attempts_in_config_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``config_json`` must include the RESOLVED ``num_seeds`` and
+    ``prior_attempts_window`` so an operator can post-hoc answer
+    "did this run use seed re-eval / memory injection?" from
+    ``bfts_runs`` alone — without re-resolving env / DB tiers.
+
+    Before the F.6 follow-up these two fields were tracked in
+    ``sources`` but the resolved values themselves never made it into
+    the persisted snapshot, so a Slack-driven smoke run looked
+    indistinguishable from a Phase-0 run in the database. Lock the
+    presence of both fields here so a future "trim the config dict"
+    refactor regresses loudly.
+    """
+    import bfts_tree
+
+    monkeypatch.setenv("BFTS_NUM_SEEDS", "3")
+    monkeypatch.setenv("BFTS_PRIOR_ATTEMPTS_WINDOW", "5")
+    _patch_fanout_deps(monkeypatch)
+    insert_run_mock = AsyncMock(return_value=None)
+    monkeypatch.setattr(bfts_tree, "insert_run", insert_run_mock)
+
+    ctx = _TreeCtx()
+    await bfts_tree.handler(_input(num_drafts=1, max_iters=1), ctx)
+
+    config = insert_run_mock.await_args.kwargs["config"]
+    assert config["num_seeds"] == 3
+    assert config["prior_attempts_window"] == 5
+    # And sources still record where each value came from.
+    assert config["sources"]["num_seeds"] == "env"
+    assert config["sources"]["prior_attempts_window"] == "env"
+
+
+# ---------------------------------------------------------------------------
+# F.6 follow-up: every bfts_tree.handler run must flip
+# bfts_runs.status to 'completed' — including runs that produced no
+# good leaf (all-buggy tree). Previously status only moved when
+# set_best_node was called, leaving all-buggy runs stuck in 'running'
+# forever and producing the orphan rows observed in the 2026-05-26
+# Slack smoke.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_handler_marks_run_completed_when_no_best_node(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """All-buggy tree path: ``select_best`` returns ``None`` so
+    ``set_best_node`` is never called. The handler must still call
+    ``mark_run_completed`` so ``bfts_runs.status`` leaves ``running``.
+    """
+    import bfts_tree
+
+    _patch_fanout_deps(monkeypatch)
+    mark_completed_mock = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        bfts_tree, "mark_run_completed", mark_completed_mock
+    )
+
+    ctx = _TreeCtx()
+    await bfts_tree.handler(_input(num_drafts=1, max_iters=1), ctx)
+
+    mark_completed_mock.assert_awaited_once()
+    assert mark_completed_mock.await_args.kwargs["run_id"] == "r-tree-1"
+
+
+@pytest.mark.asyncio
+async def test_handler_marks_run_completed_when_best_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Happy path: a good leaf is selected so ``set_best_node`` runs.
+    ``mark_run_completed`` MUST also run — it's the single writer for
+    ``bfts_runs.status`` and is idempotent on the success path."""
+    import _bfts_export
+    import bfts_tree
+
+    _patch_fanout_deps(monkeypatch)
+    # Promote a synthetic best node so the export branch fires.
+    monkeypatch.setattr(
+        _bfts_export,
+        "select_best",
+        lambda _nodes, **_kw: {
+            "node_id": "best-1",
+            "code": "print('hi')",
+            "stage_name": "draft",
+            "metric_json": {"final_value": 0.42},
+        },
+    )
+    mark_completed_mock = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        bfts_tree, "mark_run_completed", mark_completed_mock
+    )
+
+    ctx = _TreeCtx()
+    await bfts_tree.handler(_input(num_drafts=1, max_iters=1), ctx)
+
+    mark_completed_mock.assert_awaited_once()
+    assert mark_completed_mock.await_args.kwargs["run_id"] == "r-tree-1"
+
+
+@pytest.mark.asyncio
+async def test_handler_mark_run_completed_step_runs_after_seed_block(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ``mark_run_completed`` step name must appear in ``ctx.calls``
+    AFTER the F.4 seed aggregate write so a workflow replay that
+    short-circuits earlier checkpoints still reaches the status
+    transition. Locks the call ordering so a future refactor that
+    moves the call back above the seed block regresses loudly.
+    """
+    import _bfts_export
+    import bfts_tree
+
+    _patch_fanout_deps(monkeypatch)
+    monkeypatch.setattr(
+        _bfts_export,
+        "select_best",
+        lambda _nodes, **_kw: {
+            "node_id": "best-1",
+            "code": "print('hi')",
+            "stage_name": "draft",
+            "metric_json": {"final_value": 0.42},
+        },
+    )
+    monkeypatch.setenv("BFTS_NUM_SEEDS", "1")
+
+    ctx = _TreeCtx()
+    await bfts_tree.handler(_input(num_drafts=1, max_iters=1), ctx)
+
+    assert "mark_run_completed" in ctx.calls
+    # Must come AFTER list_seed_children + any seed waits / writes.
+    mark_idx = ctx.calls.index("mark_run_completed")
+    seed_idx = ctx.calls.index("list_seed_children")
+    assert mark_idx > seed_idx
 
 
 # ---------------------------------------------------------------------------
