@@ -53,6 +53,17 @@ _MIGRATIONS_DIR = (
 )
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    """Register the ``integration`` marker so ``--strict-markers`` and CI
+    can target this suite with ``-m "not integration"`` instead of the
+    coarser ``--ignore=tests/integration``.
+    """
+    config.addinivalue_line(
+        "markers",
+        "integration: requires CENTAUR_TEST_DATABASE_URL pointing at a real Postgres",
+    )
+
+
 def _dsn_with_db(dsn: str, database: str) -> str:
     """Re-base a DSN onto a different database name."""
     parts = urlsplit(dsn)
@@ -157,14 +168,27 @@ def _test_dsn() -> str:
 async def db_pool(_test_dsn: str):
     """Yield an asyncpg pool against the ``centaur_test`` database.
 
-    ``TRUNCATE … CASCADE`` before each test gives a clean slate. Because
-    ``centaur_test`` is dedicated to integration tests (no Slack ETL writes
-    there), the full-table truncate is safe and noticeably faster than the
-    scoped ``DELETE`` we'd need against a shared dev DB.
+    Pool lifecycle only — per-test table cleanup lives in
+    ``_clear_company_context_tables`` below so the lifecycle and
+    isolation concerns stay orthogonal (mirrors
+    ``.centaur/services/api/tests/test_company_context_documents.py``).
     """
     pool = await asyncpg.create_pool(_test_dsn, min_size=1, max_size=2)
     try:
-        await pool.execute("TRUNCATE TABLE company_context_documents CASCADE")
         yield pool
     finally:
         await pool.close()
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _clear_company_context_tables(db_pool):
+    """Truncate test tables before every integration test.
+
+    Autouse + dependent on ``db_pool`` so adding new tables to clean up
+    later is a one-line edit here instead of perturbing pool lifecycle.
+    Because ``centaur_test`` is dedicated to integration tests, the
+    full-table ``TRUNCATE … CASCADE`` is safe and noticeably faster than
+    a scoped ``DELETE``.
+    """
+    await db_pool.execute("TRUNCATE TABLE company_context_documents CASCADE")
+    yield

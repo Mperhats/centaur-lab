@@ -43,6 +43,7 @@ _PAPER_173BA: dict[str, Any] = {
 }
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_save_papers_writes_paper_row_with_full_shape(
     db_pool: Any, monkeypatch: pytest.MonkeyPatch
@@ -87,6 +88,7 @@ async def test_save_papers_writes_paper_row_with_full_shape(
     assert metadata["year"] == 2017
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_save_papers_is_idempotent_on_rerun(
     db_pool: Any, monkeypatch: pytest.MonkeyPatch
@@ -115,6 +117,7 @@ async def test_save_papers_is_idempotent_on_rerun(
     assert count == 1
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_save_papers_partial_failure_writes_successful_papers(
     db_pool: Any, monkeypatch: pytest.MonkeyPatch

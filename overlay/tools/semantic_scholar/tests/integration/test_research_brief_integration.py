@@ -85,6 +85,7 @@ def _set_database_url(monkeypatch: pytest.MonkeyPatch, dsn: str) -> None:
     )
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_research_brief_persists_brief_and_papers_with_parent_link(
     db_pool: Any, _test_dsn: str, monkeypatch: pytest.MonkeyPatch
@@ -138,6 +139,7 @@ async def test_research_brief_persists_brief_and_papers_with_parent_link(
         assert row["parent_document_id"] == brief_document_id
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_research_brief_idempotent_rerun(
     db_pool: Any, _test_dsn: str, monkeypatch: pytest.MonkeyPatch
@@ -179,6 +181,7 @@ async def test_research_brief_idempotent_rerun(
     assert brief_count == 1
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_research_brief_no_results_brief_only(
     db_pool: Any, _test_dsn: str, monkeypatch: pytest.MonkeyPatch
