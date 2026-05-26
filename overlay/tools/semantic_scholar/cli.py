@@ -152,5 +152,88 @@ def references(
     _render_papers(refs, title=f"References of {paper_id}")
 
 
+def _render_research_brief_summary(query: str, result: dict) -> None:
+    # Lazy-imported so the centaur_sdk path bootstrap above is in effect
+    # before ``from centaur_sdk import Table`` resolves. Mirrors the
+    # convention used by ``_render_papers``.
+    from centaur_sdk import Table
+
+    table = Table(title=f"Research brief: '{query}'")
+    table.add_column("Field", style="cyan")
+    table.add_column("Value", style="white")
+    table.add_row("status", str(result.get("status", "")))
+    table.add_row("brief_document_id", str(result.get("brief_document_id", "")))
+    table.add_row("brief_action", str(result.get("brief_action", "")))
+    table.add_row("results_count", str(result.get("results_count", 0)))
+    table.add_row("papers_inserted", str(result.get("papers_inserted", 0)))
+    table.add_row("papers_updated", str(result.get("papers_updated", 0)))
+    table.add_row("papers_noop", str(result.get("papers_noop", 0)))
+    console.print(table)
+
+
+@app.command("research-brief")
+def research_brief_cmd(
+    query: str = typer.Argument(..., help="The research topic to brief on."),
+    limit: int = typer.Option(
+        5, "--limit", "-n", help="Maximum number of papers to include in the brief."
+    ),
+    year_from: int | None = typer.Option(
+        None,
+        "--year-from",
+        "-y",
+        help="Restrict results to papers published from this year onward.",
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Print the full result dict as JSON."
+    ),
+    pretty: bool = typer.Option(
+        False, "--pretty", help="Print only the rendered Markdown brief."
+    ),
+) -> None:
+    """Build and persist a research brief on a topic.
+
+    Calls SemanticScholarClient.research_brief, which searches Semantic
+    Scholar, renders a Markdown lit-review, and writes the brief plus
+    its citing papers to company_context_documents for future RAG
+    retrieval. Idempotent on (query, year_from) — re-running with the
+    same inputs updates the existing rows in place.
+    """
+    # Mutual exclusion: ``--pretty`` strips everything but the markdown,
+    # ``--json`` prints the full result dict — they describe two different
+    # output modes, so accepting both would silently let one win and mask
+    # the operator's intent. Mirror upstream's deep-research pattern of
+    # explicit single-flag selection.
+    if pretty and json_output:
+        raise typer.BadParameter(
+            "--pretty and --json are mutually exclusive; pick one."
+        )
+
+    with _make_client() as client:
+        result = client.research_brief(query=query, limit=limit, year_from=year_from)
+
+    if result.get("status") == "error":
+        # The tool method's error envelope is the canonical place for
+        # operator-actionable messages (empty query, missing DATABASE_URL,
+        # S2 outage). Surface it verbatim and exit non-zero so callers
+        # piping through ``glow`` or scripting around the CLI can branch
+        # on exit code instead of parsing stdout.
+        console.print(f"[red]research_brief failed:[/] {result.get('error', '')}")
+        raise typer.Exit(1)
+
+    if pretty:
+        # Print the markdown only — useful for piping to ``glow`` or
+        # pasting into Slack. Use ``print`` instead of ``console.print``
+        # so Rich doesn't try to interpret embedded ``[brackets]`` in the
+        # rendered brief as markup tags.
+        print(result.get("markdown", ""))
+        return
+
+    if json_output:
+        print(json.dumps(result, indent=2))
+        return
+
+    _render_research_brief_summary(query, result)
+
+
 if __name__ == "__main__":
     app()

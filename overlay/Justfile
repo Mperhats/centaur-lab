@@ -63,7 +63,7 @@ test-workflows-integration:
 # as `test-workflows-integration` — set CENTAUR_TEST_DATABASE_URL to enable.
 [group('dev')]
 test-tools-integration:
-    cd tools/semantic_scholar && uv run --python 3.11 --with pytest --with pytest-asyncio --with asyncpg --with httpx --with python-dotenv pytest tests/integration/ -v
+    cd tools/semantic_scholar && uv run --python 3.11 --with pytest --with pytest-asyncio --with asyncpg --with httpx pytest tests/integration/ -v
 
 # Smoke-test the CLI without spinning up a sandbox. Honors $SEMANTIC_SCHOLAR_API_KEY
 # from the root `.env` (auto-loaded above) but works without it (anonymous,
@@ -71,6 +71,19 @@ test-tools-integration:
 [group('dev')]
 smoke-semantic-scholar query="diffusion models protein design" limit="5":
     cd tools/semantic_scholar && uv run python cli.py search {{ quote(query) }} --limit {{ limit }}
+
+# Smoke-test the research_brief tool method via the CLI subcommand.
+# Goes through SemanticScholarClient.research_brief, which searches S2,
+# renders the markdown lit-review, and persists the brief + each citing
+# paper to company_context_documents. Useful for end-to-end verification
+# of the persistence path against a port-forwarded centaur_test DB. Set
+# DATABASE_URL (the tool method falls back to it via _resolve_database_url)
+# to your port-forwarded DSN. Defaults to --pretty so the rendered
+# markdown is the only thing on stdout — pipe to `glow` for nicer
+# in-terminal rendering.
+[group('dev')]
+smoke-research-brief query="active inference world models" limit="5":
+    cd tools/semantic_scholar && uv run python cli.py research-brief {{ quote(query) }} --limit {{ limit }} --pretty
 
 # Smoke-test the deployed save_papers workflow. Posts a single paper ID to
 # /workflows/runs from inside the API pod so we can reuse $SLACKBOT_API_KEY
@@ -86,10 +99,14 @@ smoke-save-papers paper_id="173ba8ae4582b6f9f6919aa3f813579a5349f1f9":
         -d "{\"workflow_name\":\"save_papers\",\"input\":{\"paper_ids\":[\"{{ paper_id }}\"]}}"' \
       | jq .
 
-# Smoke-test the deployed research_brief workflow. Same auth pattern as
-# smoke-save-papers — exec into the API pod to reuse $SLACKBOT_API_KEY.
+# Smoke-test the DEPLOYED research_brief workflow via the API pod. Same
+# auth pattern as smoke-save-papers — exec into the pod to reuse
+# $SLACKBOT_API_KEY. The local CLI smoke lives at `smoke-research-brief`
+# in the `dev` group; this recipe specifically exercises the workflow
+# router + sandbox harness in-cluster (renamed to break the name clash
+# when the CLI subcommand landed).
 [group('cluster')]
-smoke-research-brief query="active inference world models" limit="3":
+smoke-research-brief-deployed query="active inference world models" limit="3":
     kubectl exec -n centaur-system deploy/centaur-centaur-api -- sh -c \
       'curl -sS -X POST http://localhost:8000/workflows/runs \
         -H "X-Api-Key: $SLACKBOT_API_KEY" \
