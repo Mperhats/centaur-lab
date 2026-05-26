@@ -16,11 +16,7 @@ docker build -t centaur-overlay:dev .
 ```
 
 That's it. The image at `centaur-overlay:dev` is what Centaur's Helm chart
-mounts at `/app/overlay/org` (API) and `/home/agent/overlay/org` (sandbox).
-
-Pin a sha-tagged GHCR build in your sibling
-[`centaur-lab-infra`](https://github.com/paradigmxyz/centaur-acme-infra) repo
-to roll it to production.
+mounts into the API and sandbox pods.
 
 ## Repository map
 
