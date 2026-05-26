@@ -1,3 +1,10 @@
+# Source of truth for what the overlay image does NOT ship.
+#
+# The Dockerfile is a single ``COPY . /overlay`` (matching upstream's
+# canonical pattern in .centaur/docs/public/md/extend/overlay.md:80-84),
+# so anything we want to keep out of the runtime payload must be
+# excluded here.
+
 # Version control
 .git
 
@@ -10,23 +17,40 @@
 **/.ruff_cache
 **/*.pyc
 
-# Lock files
+# Lock files (each tool's pyproject.toml is the resolution source;
+# upstream installs deps at API discovery time, so lockfiles add weight
+# without affecting runtime behavior)
 **/*.lock
 
 # Docker
 .dockerignore
 
-# Docs / non-runtime
-*.md
-!.agents/skills/**
-
-# Environment (secrets)
-**/.env
-**/.env.*
-
-# Tests
+# Tests (workflows + tool unit/integration test trees never run inside
+# the API or sandbox pods)
 workflows/tests
 tools/*/tests
 
-# Dev tools
+# Dev tools (the Justfile is for the developer machine, not the pod)
 Justfile
+
+# Environment (secrets — never bake into images)
+**/.env
+**/.env.*
+
+# Non-runtime markdown.
+#
+# Most ``*.md`` files are README-style developer docs that don't belong
+# in the image, but a few are runtime payload that the API/sandbox
+# explicitly reads at request time. Allow-list those:
+#
+#   - ``.agents/skills/**`` — every skill is a ``SKILL.md`` plus its
+#     reference docs; the sandbox loads them when the agent invokes a
+#     skill.
+#   - ``services/**/SYSTEM_PROMPT.md`` — overlay prompt overlays live
+#     next to the upstream service they extend (see
+#     .centaur/docs/public/md/extend/overlay.md:32-34). Scoped to the
+#     exact filename so other developer-doc ``*.md`` files under
+#     ``services/`` (READMEs, runbooks) stay out of the runtime image.
+*.md
+!.agents/skills/**
+!services/**/SYSTEM_PROMPT.md
