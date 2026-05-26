@@ -800,17 +800,25 @@ class SemanticScholarClient:
         year_from: int | None,
         database_url: str,
     ) -> dict[str, Any]:
+        # Run the (synchronous, retry-prone) S2 call and the pure rendering
+        # before opening a DB connection. Unlike hybrid ``search`` — which
+        # needs a ``conn.fetch`` to resolve the cutoff year — the brief has
+        # no data dependency on the DB, so holding a real Postgres
+        # connection idle through httpx retries (up to ~15s) is pure cost.
+        # Postgres ``max_connections`` is finite; we open a fresh connection
+        # per call, so concurrent invocations would otherwise pin one
+        # connection each for the duration of the S2 round trip.
+        papers = self.search_papers(
+            query=query,
+            limit=limit,
+            year_from=year_from,
+        )
+
+        markdown = _render_brief(query, year_from, papers)
+        brief_doc = _build_brief_document(query, year_from, limit, papers, markdown)
+
         conn = await asyncpg.connect(database_url, command_timeout=30)
         try:
-            papers = self.search_papers(
-                query=query,
-                limit=limit,
-                year_from=year_from,
-            )
-
-            markdown = _render_brief(query, year_from, papers)
-            brief_doc = _build_brief_document(query, year_from, limit, papers, markdown)
-
             brief_action = await upsert_document(conn, brief_doc)
             emit_document_metrics(brief_doc, brief_action)
 

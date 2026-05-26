@@ -294,16 +294,18 @@ def test_research_brief_search_failure_returns_error(
 ) -> None:
     _install_database_url(monkeypatch)
     mock = MockAsyncpgConn()
-    _install_mock_conn(monkeypatch, mock)
+    connect_calls = _install_mock_conn(monkeypatch, mock)
     _install_search_papers(monkeypatch, exc=RuntimeError("S2 down"))
     recorder = _install_metrics(monkeypatch)
 
     result = _client().research_brief("anything")
     assert result == {"status": "error", "error": "S2 down"}
-    # Connection was opened (we don't validate until we know we have a
-    # DATABASE_URL), so the async helper ran far enough to ``connect``
-    # and the ``finally: close`` branch fired.
-    assert mock.close_count == 1
+    # The async helper now does the S2 search BEFORE opening a DB
+    # connection (see _research_brief_async). When the search raises,
+    # asyncpg.connect is never reached — so no connection is opened
+    # and the close branch never fires.
+    assert connect_calls == []
+    assert mock.close_count == 0
     assert mock.fetchval_calls == []
     assert mock.execute_calls == []
     assert recorder.calls == []
@@ -595,17 +597,24 @@ def test_research_brief_db_connection_failure_returns_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_database_url(monkeypatch)
-    _install_mock_conn(
+    connect_calls = _install_mock_conn(
         monkeypatch,
         None,
         connect_exc=RuntimeError("could not connect to database"),
     )
-    _install_search_papers(monkeypatch, [_paper("p1")])
+    search_calls = _install_search_papers(monkeypatch, [_paper("p1")])
     recorder = _install_metrics(monkeypatch)
 
-    result = _client().research_brief("anything")
+    result = _client().research_brief("anything", year_from=2022)
     assert result["status"] == "error"
     assert "could not connect to database" in result["error"]
+    # The S2 search runs successfully *before* the connect attempt;
+    # the connect failure is what surfaces in the error envelope.
+    assert len(search_calls) == 1
+    assert search_calls[0]["query"] == "anything"
+    assert search_calls[0]["year_from"] == 2022
+    # And we still attempted to open exactly one connection.
+    assert len(connect_calls) == 1
     assert recorder.calls == []
 
 
