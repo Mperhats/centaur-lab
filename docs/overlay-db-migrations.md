@@ -32,7 +32,7 @@ without collision.
 dbmate's timestamp convention:
 
 ```
-overlay/services/api/db/migrations/YYYYMMDDHHMMSS_<short_name>.sql
+services/api/db/migrations/YYYYMMDDHHMMSS_<short_name>.sql
 ```
 
 Each file has `-- migrate:up` and `-- migrate:down`. dbmate is
@@ -42,7 +42,7 @@ version is inserted into the tracking table. It never rolls back or
 re-runs an already-applied version — even if the source changed.
 
 Example:
-[`overlay/services/api/db/migrations/20260526000001_add_paper_archives.sql`](../overlay/services/api/db/migrations/20260526000001_add_paper_archives.sql).
+[`services/api/db/migrations/20260526000001_add_paper_archives.sql`](../services/api/db/migrations/20260526000001_add_paper_archives.sql).
 
 ## How files reach the pod
 
@@ -50,9 +50,8 @@ The overlay image must include `services/`. Upstream's canonical
 `COPY . /overlay` Dockerfile pattern ships every overlay-extensible
 surface automatically; per-directory `COPY tools / COPY workflows / ...`
 selective patterns are an anti-pattern — they silently drop any future
-surface upstream adds. (See
-[`overlay/Dockerfile`](../overlay/Dockerfile) for the active recipe and
-[`overlay/.dockerignore`](../overlay/.dockerignore) for what's
+surface upstream adds. (See [`Dockerfile`](../Dockerfile) for the
+active recipe and [`.dockerignore`](../.dockerignore) for what's
 excluded.)
 
 Verify after a deploy:

@@ -4,6 +4,12 @@
 .env.*.local
 !.env.example
 
+# Local Helm values — per centaur-acme guidance, the overlay repo
+# carries no Helm values. Local laptop overrides live in a gitignored
+# values*.yaml (see README's local-deploy section). Helm values for any
+# cluster live in clusters/<name>/argocd/values/ instead.
+values*.yaml
+
 # Python detritus (in case anything escapes the .centaur/ submodule)
 __pycache__/
 *.py[cod]

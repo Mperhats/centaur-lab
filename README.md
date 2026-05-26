@@ -26,9 +26,7 @@ ACME-mirror reorganization plan:
 | `tests-old/` | Per-tool / per-workflow pytest suites pre-reorg. Migrating to `tests/` one-by-one as we re-author them in the new shape. |
 | `Dockerfile` + `.dockerignore` | Single-`COPY .` overlay image. The `.dockerignore` is the source of truth for what does **not** ship. |
 | `pyproject.toml` + `uv.lock` | Single-root uv project: aggregated dev/test deps and a single `.venv` at the repo root. Per-tool `pyproject.toml` files are still authoritative for runtime dep resolution inside the API pod. |
-| `values.org.yaml` | Org chart overlay: harness, Slackbot, Slack ETL, overlay repo name, repoCache. |
-| `values.local.yaml` | Laptop-only overrides: image pull policies, warm pool off, Docker Desktop paths. |
-| `clusters/centaur-lab/` | Prod GitOps skeleton (Argo CD + pinned image tags), shaped to match [`paradigmxyz/centaur-acme-infra`](https://github.com/paradigmxyz/centaur-acme-infra). Cluster lifecycle and deploy orchestration ultimately live here, not in the overlay repo. |
+| `clusters/centaur-lab/` | Prod GitOps skeleton (Argo CD + pinned image tags + Helm values), shaped to match [`paradigmxyz/centaur-acme-infra`](https://github.com/paradigmxyz/centaur-acme-infra). Cluster lifecycle, deploy orchestration, and **all Helm values** live here, not in the overlay repo. |
 | `.centaur/` | Git submodule pinned at a specific `paradigmxyz/centaur` SHA. The base platform. |
 | `.scientist/` | Git submodule pinning [Sakana AI-Scientist-v2](https://github.com/SakanaAI/AI-Scientist-v2) for research-flow experiments. |
 | `db/` | Local helpers for poking at the centaur Postgres (`centaur_db.py`, notebooks). Cluster-only — not packaged into the overlay image. |
@@ -39,10 +37,19 @@ ACME-mirror reorganization plan:
 
 The overlay image build context is the entire repo. `.dockerignore`
 excludes everything that isn't an overlay extension point — submodules,
-`db/`, `cloudflared/`, `docs/`, `clusters/`, Helm values, lockfiles, the
-root `.venv/`, and README-style markdown — while allow-listing the
-runtime-loaded markdown under `.agents/skills/**` and
+`db/`, `cloudflared/`, `docs/`, `clusters/`, any local `values*.yaml`,
+lockfiles, the root `.venv/`, and README-style markdown — while
+allow-listing the runtime-loaded markdown under `.agents/skills/**` and
 `services/**/SYSTEM_PROMPT.md`.
+
+**Credential hygiene:** per the
+[centaur-acme guidance](https://github.com/paradigmxyz/centaur-acme),
+no credentials, secret values, `.env` files, or Helm values live in
+this repo. Tools request secrets through Centaur's secret system
+(`secret("…")` placeholders resolved by iron-proxy / iron-token-broker
+at the network boundary). Helm values for any cluster live in
+`clusters/centaur-lab/argocd/values/` (or in the sibling infra repo
+when you split that out).
 
 ## Prerequisites
 
@@ -132,7 +139,12 @@ docker run --rm centaur-overlay:dev sh -c 'ls /overlay && ls /overlay/tools /ove
 > you want to bring back.
 
 For local laptop-cluster boot, the upstream submodule's `Justfile` covers
-most of what's needed:
+most of what's needed. Provide your own `values.local.yaml` (gitignored)
+for any laptop-specific overrides — start from
+[`clusters/centaur-lab/argocd/values/centaur.yaml`](clusters/centaur-lab/argocd/values/centaur.yaml)
+and pare it down to your local environment (typically: drop image tags,
+flip pull policies to `IfNotPresent`, point `repoCache.hostPath` at a
+local directory).
 
 ```bash
 cd .centaur
@@ -144,11 +156,15 @@ helm dependency update .centaur/contrib/chart
 helm upgrade --install centaur .centaur/contrib/chart \
     --namespace centaur-system --create-namespace \
     -f .centaur/contrib/chart/values.dev.yaml \
-    -f values.org.yaml \
     -f values.local.yaml \
     --set overlay.image.tag=dev \
     --set overlay.image.repository=centaur-overlay
 ```
+
+`values*.yaml` at the repo root is gitignored and excluded from the
+overlay image build context, so a local file is safe to keep alongside
+the rest of the repo without leaking into history or the published
+image.
 
 Verify the pods are healthy:
 

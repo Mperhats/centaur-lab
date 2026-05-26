@@ -58,9 +58,11 @@ kernel shutdown.
 ## Slack ETL & BM25
 
 Slack ingestion is wholly owned by centaur's scheduler — see
-`.centaur/docs/public/md/operate/slack-etl.md`. Toggle it in
-`values.org.yaml` (`api.slackEtlEnabled` + `api.slackSyncBackfillLookbackDays`)
-and let the workflows tick on their chart-configured interval.
+`.centaur/docs/public/md/operate/slack-etl.md`. Toggle it via the chart's
+`api.slackEtlEnabled` + `api.slackSyncBackfillLookbackDays` keys in
+`clusters/centaur-lab/argocd/values/centaur.yaml` (or your local
+`values.local.yaml` override) and let the workflows tick on their
+chart-configured interval.
 
 Centaur's Postgres is the `paradedb/paradedb` image with `pg_search`
 preloaded, so BM25 operators work natively:

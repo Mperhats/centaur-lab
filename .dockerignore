@@ -29,9 +29,11 @@ infra
 .scientist
 .worktrees
 
-# Helm values + GitOps configs (consumed at deploy time, not runtime)
-values.local.yaml
-values.org.yaml
+# Helm values + GitOps configs (consumed at deploy time, not runtime).
+# values.*.yaml at the repo root is no longer tracked — Helm values
+# live in clusters/centaur-lab/argocd/values/ — but we keep the rule
+# defensive in case a local user writes their own.
+values*.yaml
 
 # Virtual environments
 **/.venv
