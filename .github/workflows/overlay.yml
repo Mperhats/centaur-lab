@@ -16,6 +16,7 @@ on:
       - overlay/**
       - .github/workflows/overlay.yml
       - Justfile
+  workflow_dispatch:
 
 permissions:
   contents: read
