@@ -27,9 +27,9 @@ Actionable items only. Completed audits and pre-reorg backlog live in git histor
 
 ## Known upstream limitation: `centaur_sdk` is not a real installable package
 
-**TLDR:** `from centaur_sdk import secret` only resolves if `.centaur/` is on `sys.path`. There is no install path (PyPI, git+subdirectory, editable) that makes the import work portably.
+**TLDR:** `from centaur_sdk import secret` only resolves if `centaur_sdk/` exists at a location already on `sys.path`. There is no install path (PyPI, git+subdirectory, editable) that makes the import work portably. We expose the SDK at the repo root via a symlink instead — `centaur_sdk` → `.centaur/centaur_sdk`.
 
-**Reproducer:**
+**Reproducer (the broken install paths):**
 
 ```bash
 cd /tmp && rm -rf t && mkdir t && cd t && uv venv --python 3.11 -q
@@ -40,23 +40,37 @@ cd / && /tmp/t/.venv/bin/python -c "from centaur_sdk import secret"
 
 **Root cause:** `.centaur/centaur_sdk/pyproject.toml` declares `[tool.hatch.build.targets.wheel] packages = ["."]`. Hatchling installs the dir's contents at the wheel root, so `tool_sdk.py`, `cli_tables.py`, `__init__.py`, even `README.md` and `pyproject.toml` end up loose in `site-packages/` — there is no `centaur_sdk/` package directory. Upstream's own API gets away with it because its Dockerfile `COPY centaur_sdk/ centaur_sdk/` puts the source dir at `/app/centaur_sdk/` and runs with `WORKDIR /app`; the import resolves via cwd discovery, not via the install.
 
-We re-verified this against `uv add centaur-sdk = { path = ".centaur/centaur_sdk", editable = true }`: uv produces a working `dist-info` and `.pth` file pointing at `.centaur/centaur_sdk`, but because the `.pth` puts the package's *contents* on `sys.path` (not its parent), `from centaur_sdk import …` still fails — `tool_sdk` becomes a top-level module instead.
+**Our fix — repo-root symlink:**
 
-Neither the README's `pip install "centaur-sdk @ git+..."` snippet nor the AGENTS.md `pip install centaur-sdk` comment actually works — the package is not on PyPI ([paradigmxyz packages](https://github.com/orgs/paradigmxyz/packages?repo_name=centaur) lists 4 containers, no SDK; `pypi.org/simple/centaur-sdk/` 404s).
+```bash
+ln -s .centaur/centaur_sdk centaur_sdk
+```
 
-**Our current workaround** (`pyproject.toml`, `.github/workflows/overlay.yml`):
+Tracked in git as a symlink blob. The repo root is already on every entrypoint's `sys.path` (pytest discovers via `[tool.pytest.ini_options] pythonpath = ["."]` in root `pyproject.toml`; `uv run python -m tools.semantic_scholar.cli` puts cwd first by default; IDEs / mypy / pyright respect the project root), so Python finds `centaur_sdk/__init__.py` directly through the symlink. Bumping the `.centaur` submodule pin updates the SDK in lockstep with the API runtime.
 
 | Context | Mechanism |
 |---|---|
-| Runtime in API pod | Centaur tool loader puts `tools/` + overlay tool dirs on `sys.path`; `/app/centaur_sdk/` already on cwd path |
-| Pytest (local + CI) | `[tool.pytest.ini_options] pythonpath = [".", ".centaur"]` in root `pyproject.toml` puts the submodule's parent on the path so `import centaur_sdk` resolves to `.centaur/centaur_sdk/` as a package |
-| Tool CLIs (`uv run python -m tools.semantic_scholar.cli ...`) | The same root `pyproject.toml` `pythonpath` is honored by pytest only — for ad-hoc CLI runs, `PYTHONPATH=.centaur uv run …` |
+| Runtime in API pod | Centaur API container has its own `/app/centaur_sdk/`; the overlay image excludes our symlink via `.dockerignore` |
+| Pytest (local + CI) | Repo root on `pythonpath` → symlink resolves to `.centaur/centaur_sdk/` |
+| Tool CLIs (`uv run python -m tools.semantic_scholar.cli ...`) | Same — cwd is repo root, symlink resolves |
+| IDE / mypy / pyright | All see a real package directory at the repo root |
 
-CI requires `submodules: recursive` on `actions/checkout` so `.centaur/centaur_sdk/` is present for pytest.
+CI requires `submodules: recursive` on `actions/checkout` so the symlink target exists.
 
-**Upstream fix would collapse all of the above:** move files into `.centaur/centaur_sdk/centaur_sdk/` and change `packages = ["centaur_sdk"]`. After that, declare `centaur-sdk @ git+...` (or path-installed from the submodule) as a regular dep and delete every workaround. Not pursued because we don't own the upstream repo.
+**Trade-offs:**
 
-- [ ] If upstream ever fixes the packaging, drop the `pythonpath` entry and add `centaur-sdk` as a regular dep in root `pyproject.toml` (path-sourced from `.centaur/centaur_sdk` via `[tool.uv.sources]`).
+- macOS / Linux work natively. Windows clones need `git config core.symlinks true` (default on most modern setups; not a deploy target for centaur-lab).
+- The symlink is a phantom `centaur_sdk/` directory at the repo root that is actually content from the submodule. Documented in the README repo-map.
+
+**Upstream fix would let us drop the symlink:** move files into `.centaur/centaur_sdk/centaur_sdk/` and change `packages = ["centaur_sdk"]`. After that, declare `centaur-sdk` via `[tool.uv.sources]` and delete the symlink. Not pursued because we don't own the upstream repo.
+
+- [ ] If upstream ever fixes the packaging, delete the `centaur_sdk` symlink and add `centaur-sdk` as a regular dep in root `pyproject.toml` (path-sourced from `.centaur/centaur_sdk` via `[tool.uv.sources]`).
+
+## Tool discovery after dropping per-tool pyproject.toml
+
+The acme-mirror reorg deleted `tools/<name>/pyproject.toml` files; the root `pyproject.toml` is now the single source of truth for dev/test deps. Upstream's `tool_manager` (`.centaur/services/api/api/tool_manager.py:1574-1683`) discovers tools by scanning each `tools/<name>/` for a `pyproject.toml` and reading its `[project] dependencies` plus `[tool.centaur]` block. **Tools with no per-tool `pyproject.toml` are silently skipped at API startup**, which means deploying this overlay as-is registers zero tools.
+
+- [ ] Before first GHCR publish, decide: (a) restore minimal per-tool `pyproject.toml` files at `tools/<name>/` for runtime discovery (matches centaur-acme exactly), or (b) propose an upstream change to `tool_manager` that discovers tools from a centralized manifest. Option (a) is the lower-risk path.
 
 ## Overlay DB migrations (future)
 

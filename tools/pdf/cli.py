@@ -1,10 +1,11 @@
 """Standalone CLI for the ``pdf`` tool.
 
-Three commands matching the tool's two stages plus a combined entry:
+Three commands matching the tool's two stages plus a combined entry.
+Run from the repo root:
 
-    uv run python cli.py fetch <url> [--output paper.pdf]
-    uv run python cli.py parse <path>
-    uv run python cli.py fetch-and-parse <url> [--json]
+    uv run python -m tools.pdf.cli fetch <url> [--output paper.pdf]
+    uv run python -m tools.pdf.cli parse <path>
+    uv run python -m tools.pdf.cli fetch-and-parse <url> [--json]
 
 ``fetch`` and ``parse`` exercise each stage in isolation (useful when
 debugging which stage is failing). ``fetch-and-parse`` exercises the
@@ -12,21 +13,11 @@ same envelope the agent sees.
 """
 
 import json
-import sys
 from pathlib import Path
 
 import typer
 from dotenv import find_dotenv, load_dotenv
 from rich.console import Console
-
-# Put ``overlay/`` on sys.path so ``tools.pdf`` resolves as a
-# namespace-package import — byte-identical to how the API pod sets up
-# the ``tools.*`` namespace at startup. The tool itself has no
-# centaur_sdk dependency, so the bootstrap is intentionally narrow.
-_THIS_DIR = Path(__file__).resolve().parent
-_OVERLAY_DIR = _THIS_DIR.parents[1]
-if str(_OVERLAY_DIR) not in sys.path:
-    sys.path.insert(0, str(_OVERLAY_DIR))
 
 load_dotenv(find_dotenv(usecwd=True))
 

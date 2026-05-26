@@ -15,11 +15,7 @@ uv sync && uv run pytest tests/
 docker build -t centaur-overlay:dev .   # smoke test; CI publishes to GHCR on merge to main
 ```
 
-Production deploys come from CI, not your laptop. Every push to `main`
-publishes `ghcr.io/<owner>/centaur-lab/centaur-overlay:sha-<git>` to GHCR;
-the sibling [`centaur-lab-infra`](https://github.com/paradigmxyz/centaur-acme-infra)
-repo pins one of those tags in cluster Helm values to roll the API + sandbox
-pods.
+Production deploys run in [CI](.github/workflows/overlay.yml)
 
 ## Repository map
 
@@ -29,7 +25,9 @@ services/               # overlay-side migrations + sandbox prompt
 tools/                  # API-discovered tool plugins (pdf, semantic_scholar)
 workflows/              # durable workflow handlers
 tests/                  # ACME-style root pytest suite
+pyproject.toml          # single dev/test venv shared by tools + workflows
 .centaur/               # pinned upstream centaur submodule
+centaur_sdk/            # dev-only symlink → .centaur/centaur_sdk
 ```
 
 The repo follows the

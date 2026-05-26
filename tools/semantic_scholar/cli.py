@@ -1,56 +1,36 @@
 """Standalone CLI for the Semantic Scholar tool.
 
-Used for local smoke tests without a Centaur sandbox. The CLI loads ``.env``
-so ``SEMANTIC_SCHOLAR_API_KEY`` (if present) is honored; tool clients
-running inside Centaur read the key via ``secret(...)`` from the manager
-sidecar instead.
+Used for local smoke tests without a Centaur sandbox. The CLI loads
+``.env`` so ``SEMANTIC_SCHOLAR_API_KEY`` (if present) is honored; tool
+clients running inside Centaur read the key via ``secret(...)`` from the
+manager sidecar instead.
 
-Run from this directory:
+Run from the repo root:
 
-    uv run python cli.py search "diffusion models protein design" --limit 5
+    uv run python -m tools.semantic_scholar.cli search "diffusion models" -n 5
 """
 
 import asyncio
 import json
-import sys
-from pathlib import Path
 
 import typer
 from dotenv import find_dotenv, load_dotenv
 from rich.console import Console
 
-# Make `from centaur_sdk import ...` (used by client.py) resolvable when
-# running from `uv run`. The upstream centaur_sdk pyproject uses
-# `packages = ["."]`, which produces an editable install Python cannot
-# import as a package — so we put the submodule's parent on sys.path
-# instead. The API pod resolves the SDK normally via its own editable
-# install, so this is a CLI-only workaround.
-_THIS_DIR = Path(__file__).resolve().parent
-_SDK_PARENT = _THIS_DIR.parents[2] / ".centaur"
-if _SDK_PARENT.is_dir() and str(_SDK_PARENT) not in sys.path:
-    sys.path.insert(0, str(_SDK_PARENT))
-# Put ``overlay/`` on sys.path so ``tools.semantic_scholar`` and
-# ``tools.pdf`` resolve as namespace-package imports — byte-identical
-# to how the API pod sets up the ``tools.*`` namespace at startup.
-_OVERLAY_DIR = _THIS_DIR.parents[1]
-if str(_OVERLAY_DIR) not in sys.path:
-    sys.path.insert(0, str(_OVERLAY_DIR))
+from centaur_sdk import Table
+from tools.semantic_scholar.client import SemanticScholarClient
 
-# Walk up from CWD to find a `.env`. The repo convention is one root .env
-# (fed into the k8s Secret by `just bootstrap-secrets`); per-tool `.env`
-# files are not consulted by the API. Doing usecwd=True still picks up a
-# tool-local `.env` if you really want one for an isolated CLI session.
+# Walk up from CWD to find a `.env` so an isolated tool session still
+# picks up the same secrets the root .env feeds into the cluster Secret.
+# Tool clients running in Centaur ignore .env entirely and resolve
+# secrets through the manager sidecar instead.
 load_dotenv(find_dotenv(usecwd=True))
 
 app = typer.Typer(name="semantic_scholar", help="Semantic Scholar Graph API CLI")
 console = Console()
 
 
-def _make_client():
-    # Lazy-imported so the centaur_sdk path bootstrap above is in effect
-    # before client.py tries `from centaur_sdk import secret`.
-    from tools.semantic_scholar.client import SemanticScholarClient
-
+def _make_client() -> SemanticScholarClient:
     return SemanticScholarClient()
 
 
@@ -85,12 +65,6 @@ def _papers_to_json(papers) -> str:
 
 
 def _render_papers(papers, title: str) -> None:
-    # Lazy-imported so the centaur_sdk path bootstrap above is in effect
-    # before `from centaur_sdk import Table` resolves. Mirrors the upstream
-    # tool CLI convention of going through the SDK re-export instead of
-    # importing rich.table.Table directly.
-    from centaur_sdk import Table
-
     if not papers:
         console.print("[yellow]No results.[/]")
         raise typer.Exit()
@@ -164,11 +138,6 @@ def references(
 
 
 def _render_research_brief_summary(query: str, result: dict) -> None:
-    # Lazy-imported so the centaur_sdk path bootstrap above is in effect
-    # before ``from centaur_sdk import Table`` resolves. Mirrors the
-    # convention used by ``_render_papers``.
-    from centaur_sdk import Table
-
     table = Table(title=f"Research brief: '{query}'")
     table.add_column("Field", style="cyan")
     table.add_column("Value", style="white")

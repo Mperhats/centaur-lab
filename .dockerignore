@@ -15,8 +15,11 @@
 .github
 
 # Submodule — vendored upstream Centaur source tree, never shipped
-# in the image
+# in the image. ``centaur_sdk`` is a dev-only repo-root symlink into
+# ``.centaur/centaur_sdk`` (see pyproject.toml); the API pod has its
+# own ``/app/centaur_sdk/`` so the overlay must not ship one.
 .centaur
+centaur_sdk
 
 # Dev/ops directories at the repo root that aren't part of the overlay.
 # ``db``, ``clusters``, and ``infra`` were deleted post-reorg but are
@@ -45,9 +48,8 @@ values*.yaml
 **/.ruff_cache
 **/*.pyc
 
-# Lock files (each tool's pyproject.toml is the resolution source;
-# upstream installs deps at API discovery time, so lockfiles add weight
-# without affecting runtime behavior)
+# Lock files (root ``pyproject.toml`` is the dev-venv source of
+# truth; deploy-time deps live in the API pod image, not the overlay).
 **/*.lock
 
 # Docker
