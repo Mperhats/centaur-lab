@@ -12,21 +12,22 @@
 # Version control
 .git
 .gitmodules
-.gitattributes
 .github
 
 # Submodules — vendored upstream source trees, never shipped in the image
 .centaur
 .scientist
 
-# Dev/ops directories at the repo root that aren't part of the overlay
+# Dev/ops directories at the repo root that aren't part of the overlay.
+# ``db``, ``clusters``, and ``infra`` were deleted post-reorg but are
+# kept here as defense-in-depth so a stray local re-creation doesn't
+# silently bloat the image.
 db
 cloudflared
 docs
 clusters
 infra
 .cursor
-.scientist
 .worktrees
 
 # Helm values + GitOps configs (consumed at deploy time, not runtime).
