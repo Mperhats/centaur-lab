@@ -20,14 +20,17 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 
-# We intentionally do not import api.runtime_control.canonical_json here even
-# though this module runs inside the API pod. Keeping the canonicalization
-# local makes the module unit-testable outside the pod and the resulting
-# content_hash is still deterministic; nothing else compares these hashes
-# across services.
+# We intentionally do not import api.runtime_control.canonical_json here so
+# this module stays unit-testable outside the API pod. The argument list
+# below is kept byte-identical to upstream's ``canonical_json``
+# (``api.runtime_control.canonical_json``): same separators, ``sort_keys``,
+# ``ensure_ascii=False`` so non-ASCII titles/authors hash to literal Unicode
+# bytes rather than ``\\uXXXX`` escapes, and no ``default=`` so non-
+# serializable values raise ``TypeError`` instead of being silently coerced.
+# Cross-system content_hash identity depends on this byte equivalence.
 def _canonical_json(value: Any) -> str:
     """Stable JSON form used for hashing and JSONB metadata serialization."""
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    return json.dumps(value, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
 
 
 def _content_hash(*parts: Any) -> str:

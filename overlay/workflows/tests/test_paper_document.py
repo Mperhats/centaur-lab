@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,7 +17,12 @@ import pytest
 # name without changing the production layout.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from shared.paper_document import _content_hash, build_paper_document, upsert_document
+from shared.paper_document import (
+    _canonical_json,
+    _content_hash,
+    build_paper_document,
+    upsert_document,
+)
 
 from ._mocks import EXECUTE_ARG_INDEX, MockPool
 
@@ -150,6 +157,53 @@ def test_content_hash_changes_when_title_changes() -> None:
     paper["title"] = "Attention Is All You Need v2"
     mutated = build_paper_document(paper)
     assert baseline["content_hash"] != mutated["content_hash"]
+
+
+def test_canonical_json_preserves_non_ascii_literally() -> None:
+    """Non-ASCII content must be serialized as literal Unicode bytes, not
+    \\uXXXX escapes, so content_hash bytes match what upstream
+    ``api.runtime_control.canonical_json`` would compute for the same input.
+    """
+    title_jp = "深層学習"
+    title_de = "Übergang"
+
+    assert _canonical_json(title_jp) == f'"{title_jp}"'
+    assert _canonical_json(title_de) == f'"{title_de}"'
+    assert "\\u" not in _canonical_json({"title": title_jp, "name": title_de})
+
+
+def test_content_hash_for_non_ascii_paper_matches_upstream_byte_form() -> None:
+    """Strongest form: the hash must equal what we'd get if we re-canonicalized
+    the same parts with upstream's exact ``json.dumps`` arguments.
+    """
+    paper = _sample_paper()
+    paper["title"] = "深層学習: 変換器の基礎"
+    paper["authors"] = [{"authorId": "1", "name": "山田太郎"}]
+    doc = build_paper_document(paper, query="変換器")
+
+    parts = (doc["title"], doc["body"], doc["url"], doc["metadata"])
+    upstream_canonical = json.dumps(
+        parts, separators=(",", ":"), sort_keys=True, ensure_ascii=False
+    )
+    expected_hash = hashlib.sha256(upstream_canonical.encode("utf-8")).hexdigest()
+
+    assert doc["content_hash"] == expected_hash
+    assert "深層学習" in upstream_canonical
+    assert "山田太郎" in upstream_canonical
+
+
+def test_canonical_json_raises_typeerror_on_non_serializable_value() -> None:
+    """Dropping ``default=str`` means real serialization bugs surface as
+    ``TypeError`` instead of being silently coerced to ``str(value)``.
+    """
+    with pytest.raises(TypeError):
+        _canonical_json({"tags": {"a", "b"}})
+
+    class _Opaque:
+        pass
+
+    with pytest.raises(TypeError):
+        _canonical_json(_Opaque())
 
 
 @pytest.mark.asyncio
