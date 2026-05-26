@@ -13,6 +13,7 @@ from pathlib import Path
 
 import asyncpg
 import pytest
+import pytest_asyncio
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -24,7 +25,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def pool():
     p = await asyncpg.create_pool(os.environ["CENTAUR_TEST_DATABASE_URL"])
     yield p

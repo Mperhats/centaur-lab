@@ -50,6 +50,7 @@ async def insert_node(
         INSERT INTO bfts_nodes
             (node_id, run_id, parent_node_id, step, stage_name, plan, code, debug_depth)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        ON CONFLICT (node_id) DO NOTHING
         """,
         node_id, run_id, parent_node_id, step, stage_name, plan, code, debug_depth,
     )
@@ -68,6 +69,13 @@ async def update_node_metric(
     is_buggy: bool,
     analysis: str | None,
 ) -> None:
+    """Write the post-execution result for a node.
+
+    Nullable params (``exc_info``, ``exc_stack``, ``metric``,
+    ``analysis``): pass ``None`` to leave the column ``NULL`` (= absent);
+    pass an empty container (``[]`` / ``{}`` / ``""``) to record
+    empty-but-present. Callers MUST NOT conflate the two.
+    """
     await pool.execute(
         """
         UPDATE bfts_nodes SET
@@ -79,6 +87,9 @@ async def update_node_metric(
             metric_json = $7::jsonb,
             is_buggy = $8,
             analysis = $9,
+            -- parse_* / plot_* / plot_code intentionally NOT updated here:
+            -- they land in a separate update from Task 3.x once the
+            -- metric-parse sub-step and plot exec sub-step are in scope.
             updated_at = NOW()
         WHERE node_id = $1
         """,
@@ -121,12 +132,20 @@ async def mark_buggy_plots(
 async def list_nodes_for_run(
     pool: asyncpg.Pool, *, run_id: str
 ) -> list[dict[str, Any]]:
+    """Return all nodes for a run, ORDER BY step ASC.
+
+    JSONB columns (``term_out_json``, ``exc_info_json``, ``exc_stack_json``,
+    ``metric_json``, ``plot_analyses_json``) are returned as raw JSON
+    strings — callers must ``json.loads(...)`` them. Centaur's asyncpg
+    pool does not register a JSONB codec; we follow the same convention
+    so the schema matches what every other Centaur DAO sees.
+    """
     rows = await pool.fetch(
         """
         SELECT node_id, run_id, parent_node_id, step, stage_name, plan, code,
                term_out_json, exec_time_seconds, exc_type, exc_info_json,
-               metric_json, is_buggy, is_buggy_plots, debug_depth, analysis,
-               vlm_feedback_summary
+               exc_stack_json, metric_json, is_buggy, is_buggy_plots, debug_depth,
+               analysis, vlm_feedback_summary
         FROM bfts_nodes
         WHERE run_id = $1
         ORDER BY step ASC
