@@ -38,6 +38,13 @@ api:
   # history just because this value went up.
   slackSyncBackfillLookbackDays: 700
 
+  # Bump from chart default 2 → 16 for BFTS fan-out (1 root + num_drafts trees
+  # + per-tree intra-tree expand calls). Per docs/superpowers/research/03-centaur-platform.md
+  # §Workflow programming model — engine default is 2, which starves any
+  # workflow that fans out to children.
+  extraEnv:
+    WORKFLOW_WORKER_CONCURRENCY: "16"
+
   # The chart's default for `:latest`-tagged images is Always, which makes
   # kubelet try to pull centaur-api:latest from a public registry instead of
   # using the locally-built image. Slackbot already has IfNotPresent set in
