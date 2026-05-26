@@ -24,6 +24,7 @@ remembered.
 **Pick the right surface:**
 
 - "Find papers about X" → `semantic_scholar.search` (tool) + `save_papers` workflow follow-up (brief + papers)
+- "Find papers about X and read them" / "search and grab the PDFs" → `search_and_archive_papers` workflow (atomic search + full-text archive). One call, one parent `run_id`, the child `archive_papers` run is observable via `GET /workflows/runs/<parent>/children`.
 - "Summarize this paper" / DOI / arXiv ID / S2 ID → `semantic_scholar.get_paper` (tool) + `save_papers` workflow follow-up (brief + paper)
 - "What does this paper cite?" → `semantic_scholar.get_references` (tool, no persistence needed)
 - "Build a brief / lit review / writeup on X" → `research_brief` workflow (atomic search + render + persist). Do NOT use the `semantic_scholar.research_brief` tool method for this — it returns a bundle and writes nothing.
@@ -172,17 +173,25 @@ review. When the user wants more than the abstract ("read the paper",
 "quote from the methods section", "what does this paper actually
 report?"), reach for the archive surface.
 
-Two surfaces:
+Three surfaces:
 
 - `semantic_scholar.archive_paper(paper_id)` — single paper, agent-facing
   tool method. **Read-only**: returns a projection bundle dict
   (`paper_doc`, `fulltext_doc`, `archive_row`) describing what *would*
   be persisted, plus `pdf_sha256` / `size_bytes` / `parser_used`. Safe
   to call from a Slack turn for inspection; does NOT write to Postgres.
-- `archive_papers` workflow — batch over a list of paper IDs. **This is
-  what actually persists** rows to `paper_archives` and
-  `company_context_documents`. Use this whenever the user wants the
-  body indexed for future retrieval, even for a single paper.
+- `archive_papers` workflow — batch over a list of paper IDs you
+  already have. **This is what actually persists** rows to
+  `paper_archives` and `company_context_documents`. Use this whenever
+  the user wants the body indexed for future retrieval, even for a
+  single paper.
+- `search_and_archive_papers` workflow — when the user describes a
+  topic (not specific IDs) and wants the full text indexed. Searches
+  Semantic Scholar live, then chains `archive_papers` as a child
+  workflow over the matched IDs. Returns the child's run_id and full
+  payload (`{status, query, results_count, archive_run_id, archive}`)
+  so per-paper archive results are observable in one place. Prefer
+  this over a manual `search` → `archive_papers` two-call dance.
 
 Pipeline (both surfaces):
 
@@ -228,6 +237,9 @@ call run semantic_scholar archive_paper '{"paper_id":"173ba8ae4582b6f9f6919aa3f8
 # Actually persist — single paper or batch (same workflow)
 call workflow run '{"workflow_name":"archive_papers","input":{"paper_ids":["173ba8ae4582b6f9f6919aa3f813579a5349f1f9"]}}'
 call workflow run '{"workflow_name":"archive_papers","input":{"paper_ids":["173ba8ae...","abcd1234..."]}}'
+
+# Search + archive in one call when the user described a topic, not IDs
+call workflow run '{"workflow_name":"search_and_archive_papers","input":{"query":"diffusion models protein design","limit":5}}'
 ```
 
 Don't archive a paper just to read its abstract — the abstract is

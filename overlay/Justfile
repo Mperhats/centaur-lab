@@ -259,3 +259,19 @@ smoke-research-brief-deployed query="active inference world models" limit="3":
         -H "Content-Type: application/json" \
         -d "{\"workflow_name\":\"research_brief\",\"input\":{\"query\":\"{{ query }}\",\"limit\":{{ limit }}}}"' \
       | jq .
+
+# Smoke-test the DEPLOYED search_and_archive_papers workflow via the API
+# pod. Same auth pattern as the two recipes above. This workflow does the
+# full "find papers about X and read them" arc: it searches Semantic
+# Scholar, then dispatches archive_papers as a child run over every
+# matched ID, persisting paper_archives + company_context_documents rows.
+# Default query mirrors the other smokes; bump `limit` cautiously since
+# every result triggers a PDF fetch + parse.
+[group('cluster')]
+smoke-search-and-archive-papers-deployed query="active inference world models" limit="3":
+    kubectl exec -n {{namespace}} deploy/{{release}}-centaur-api -- sh -c \
+      'curl -sS -X POST http://localhost:8000/workflows/runs \
+        -H "X-Api-Key: $SLACKBOT_API_KEY" \
+        -H "Content-Type: application/json" \
+        -d "{\"workflow_name\":\"search_and_archive_papers\",\"input\":{\"query\":\"{{ query }}\",\"limit\":{{ limit }}}}"' \
+      | jq .
