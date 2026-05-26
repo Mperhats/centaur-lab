@@ -63,8 +63,14 @@ def _sandbox_id(*, run_id: str, tree_idx: int) -> str:
     by run_id (label `centaur.ai/bfts-run`) and easy to clean up by
     prefix. Stable across workflow restarts because `ctx.run_id` is
     durable.
+
+    RFC 1123 normalization: live ``ctx.run_id`` values are ``wfr_<hex>``
+    whose underscore violates K8s ``metadata.name`` (lowercase
+    alphanumeric + ``-`` + ``.`` only). Replace ``_`` with ``-`` so
+    ``create_sandbox`` doesn't get rejected with HTTP 422.
     """
-    return f"bfts-{run_id}-tree-{tree_idx}"
+    safe_run_id = run_id.replace("_", "-").lower()
+    return f"bfts-{safe_run_id}-tree-{tree_idx}"
 
 
 async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:

@@ -101,3 +101,49 @@ async def test_buggy_exec_skips_plotting() -> None:
     assert ctx.calls == ["draft_propose", "draft_exec", "bug_judge"]
     assert result["is_buggy"] is True
     assert result["metric"] is None
+
+
+@pytest.mark.asyncio
+async def test_tool_failure_in_exec_python_is_coerced_to_buggy() -> None:
+    """When ``ctx.tools.bfts_executor.exec_python`` fails, the centaur
+    tool_manager returns ``{"error": "...", "tool": ..., "method": ...}``
+    instead of an ``ExecutionResult`` dict. The expand pipeline used to
+    crash with ``KeyError: 'term_out'`` on the next ``exec_res["term_out"]``
+    read, masking the real underlying K8s/HTTP error (see live failure
+    in ``wfr_6123347aa5e440ad`` 2026-05-26: HTTP 422 sandbox-name
+    validation surfaced as ``KeyError('term_out')`` in
+    ``bfts_expand_one``).
+
+    Regression: the pipeline MUST detect the tool-failure shape, coerce
+    it to a buggy ExecutionResult-shape dict (``exc_type='ToolCallError'``,
+    ``term_out`` carrying the raw error string), and return ``is_buggy=True``
+    so the parent tree records the failure as a real node + retains the
+    error in ``exc_info_json`` for postmortem inspection.
+    """
+    canned = {
+        "draft_propose": {"plan": "p", "code": "print(1)"},
+        "draft_exec": {
+            "error": "404, message='Invalid response status', url=...",
+            "tool": "bfts_executor",
+            "method": "exec_python",
+        },
+    }
+    ctx = _RecordingCtx(canned)
+    expand_ctx = ExpandContext(
+        sandbox_id="sbx-1",
+        parent_node=None,
+        idea={},
+        llm_api_key="sk-test",
+        node_id="n-tool-failure",
+    )
+    result = await expand_node(ctx=ctx, expand_ctx=expand_ctx)
+    assert result["is_buggy"] is True, "tool failure must mark node buggy"
+    assert result["exc_type"] == "ToolCallError"
+    assert "404" in "\n".join(result["term_out"]), (
+        "raw error string must be preserved in term_out for postmortem"
+    )
+    assert result["metric"] is None
+    for k in ("parse_metrics_code", "parse_term_out", "plot_code", "plot_term_out"):
+        assert k not in result, (
+            "buggy short-circuit must not include parse_/plot_ keys"
+        )

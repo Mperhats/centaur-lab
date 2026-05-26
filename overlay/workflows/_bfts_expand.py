@@ -46,6 +46,45 @@ _FEEDBACK_TEMP = 0.5
 _VLM_MAX_PLOTS = 10
 
 
+def _coerce_exec_result(result: Any) -> dict[str, Any]:
+    """Normalize the return of ``ctx.tools.bfts_executor.exec_python``.
+
+    The executor tool returns an :class:`ExecutionResult` dataclass on
+    success, which the centaur tool_manager serializes to a dict shape
+    ``{"term_out": [...], "exec_time": ..., "exc_type": ..., ...}``.
+
+    On *tool* failure (K8s 422 sandbox-name validation, websocket
+    handshake 404, tool not registered, ...) the tool_manager catches
+    the exception and returns ``{"error": "...", "tool": ...,
+    "method": ...}`` instead — a shape with NO ``term_out`` key. Without
+    coercion the downstream ``exec_res["term_out"]`` read raises
+    ``KeyError: 'term_out'`` and the entire expand workflow fails,
+    masking the real underlying failure (live regression 2026-05-26:
+    sandbox name with underscore was rejected by K8s, surfaced as a
+    confusing ``KeyError`` in ``bfts_expand_one``).
+
+    Coerce the failure into an ExecutionResult-shape dict that flows
+    through the rest of the expand pipeline as a buggy node, so the
+    real error reaches ``bfts_nodes.exc_info_json`` for postmortem.
+    """
+    if isinstance(result, dict) and "term_out" in result:
+        return result
+    err_text = (
+        result.get("error", "tool returned unexpected shape")
+        if isinstance(result, dict)
+        else str(result)
+    )
+    return {
+        "term_out": [f"[bfts_executor tool failure] {err_text}"],
+        "exec_time": 0.0,
+        "exc_type": "ToolCallError",
+        "exc_info": {
+            "raw": result if isinstance(result, dict) else {"value": str(result)}
+        },
+        "exc_stack": None,
+    }
+
+
 @dataclass
 class ExpandContext:
     sandbox_id: str
@@ -162,7 +201,7 @@ async def expand_node(*, ctx: Any, expand_ctx: ExpandContext) -> dict[str, Any]:
         f"{branch}_propose", lambda: _propose_code(expand_ctx)
     )
 
-    exec_res = await ctx.step(
+    exec_res = _coerce_exec_result(await ctx.step(
         f"{branch}_exec",
         lambda: ctx.tools.bfts_executor.exec_python(
             sandbox_id=expand_ctx.sandbox_id,
@@ -170,7 +209,26 @@ async def expand_node(*, ctx: Any, expand_ctx: ExpandContext) -> dict[str, Any]:
             timeout_s=3600,
             working_dir=expand_ctx.working_dir,
         ),
-    )
+    ))
+
+    # Tool itself crashed (RFC 1123 / WS handshake / kubernetes_asyncio): no
+    # execution outcome to judge. Short-circuit before the LLM ``bug_judge``
+    # call to save tokens — we already know the node is buggy because the
+    # executor never produced an ExecutionResult.
+    if exec_res["exc_type"] == "ToolCallError":
+        return {
+            "plan": proposed["plan"],
+            "code": proposed["code"],
+            "term_out": exec_res["term_out"],
+            "exec_time_seconds": exec_res["exec_time"],
+            "exc_type": exec_res["exc_type"],
+            "exc_info": exec_res["exc_info"],
+            "exc_stack": exec_res["exc_stack"],
+            "metric": None,
+            "is_buggy": True,
+            "analysis": "tool call failed before code execution",
+            "stage_name": branch,
+        }
 
     judge = await ctx.step(
         "bug_judge",
@@ -202,7 +260,7 @@ async def expand_node(*, ctx: Any, expand_ctx: ExpandContext) -> dict[str, Any]:
         lambda: _metric_parse_inline(expand_ctx, proposed, exec_res),
     )
 
-    parse_exec = await ctx.step(
+    parse_exec = _coerce_exec_result(await ctx.step(
         "metric_parse_exec",
         lambda: ctx.tools.bfts_executor.exec_python(
             sandbox_id=expand_ctx.sandbox_id,
@@ -210,7 +268,7 @@ async def expand_node(*, ctx: Any, expand_ctx: ExpandContext) -> dict[str, Any]:
             timeout_s=300,
             working_dir=expand_ctx.working_dir,
         ),
-    )
+    ))
 
     metric = await ctx.step(
         "metric_extract",
@@ -226,7 +284,7 @@ async def expand_node(*, ctx: Any, expand_ctx: ExpandContext) -> dict[str, Any]:
         lambda: _plot_propose_inline(expand_ctx, proposed, metric),
     )
 
-    plot_exec = await ctx.step(
+    plot_exec = _coerce_exec_result(await ctx.step(
         "plot_exec",
         lambda: ctx.tools.bfts_executor.exec_python(
             sandbox_id=expand_ctx.sandbox_id,
@@ -234,7 +292,7 @@ async def expand_node(*, ctx: Any, expand_ctx: ExpandContext) -> dict[str, Any]:
             timeout_s=300,
             working_dir=expand_ctx.working_dir,
         ),
-    )
+    ))
 
     artifacts = await ctx.step(
         "collect_artifacts",

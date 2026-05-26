@@ -47,6 +47,33 @@ def test_sandbox_id_is_deterministic_and_run_scoped() -> None:
     assert _sandbox_id(run_id="run-def", tree_idx=0) == "bfts-run-def-tree-0"
 
 
+def test_sandbox_id_replaces_underscores_for_rfc1123() -> None:
+    """Live workflow runs use ``wfr_<hex>`` ids whose underscore violates
+    RFC 1123 (K8s metadata.name). The constructor MUST normalize the
+    underscores to dashes so ``create_sandbox`` doesn't get 422'd.
+    Regression test for the 17:20 UTC bfts-toy-run failure.
+    """
+    sid = _sandbox_id(run_id="wfr_4526037fdbfa4c0d", tree_idx=0)
+    assert "_" not in sid, f"sandbox name still contains underscore: {sid!r}"
+    assert sid == "bfts-wfr-4526037fdbfa4c0d-tree-0"
+
+
+def test_sandbox_id_is_rfc1123_compliant() -> None:
+    """End-to-end shape check: alphanumeric + dash + dot only,
+    starts and ends with alphanumeric, length <= 253. Catches future
+    changes that introduce other forbidden characters (uppercase,
+    underscore, leading dash, etc.).
+    """
+    import re
+
+    sid = _sandbox_id(run_id="wfr_4526037fdbfa4c0d", tree_idx=99)
+    pattern = re.compile(
+        r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+    )
+    assert pattern.match(sid), f"not RFC1123: {sid!r}"
+    assert len(sid) <= 253
+
+
 # --- Teardown contract tests ---------------------------------------------
 #
 # bfts_root provisions one Sandbox CR per child tree; if anything raises
