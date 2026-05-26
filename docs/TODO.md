@@ -2,6 +2,17 @@
 
 Actionable items only. Completed audits and MVP plans live in git history.
 
+## BFTS
+
+- [ ] **Stage-1 fidelity follow-up** — Five small Stage-1 gaps identified in the
+  2026-05-26 comparison vs. `.scientist/`. Plan:
+  [`docs/superpowers/plans/2026-05-26-bfts-stage1-fidelity-followup.md`](superpowers/plans/2026-05-26-bfts-stage1-fidelity-followup.md).
+  - F.1 Inspect failed `bfts_expand_one` status and mark stalled rows buggy
+  - F.2 Inject prior-attempts memory window into draft/improve prompts
+  - F.3 Emit `tree.dot` artifact at end of every run
+  - F.4 Multi-seed re-evaluation of the best node (opt-in)
+  - F.5 Exponential backoff on transient LLM API failures
+
 ## Infra / deploy
 
 - [x] **Fix GHCR overlay image path in `infra/argocd/values/centaur.yaml`**
