@@ -16,19 +16,23 @@ class _Ctx:
         self.canned = canned
         self.calls: list[str] = []
         self.vlm_analyze_paths: list[str] | None = None
+        self.vlm_analyze_model: str | None = None
         self.picker_paths: list[str] | None = None
         self.picker_n: int | None = None
+        self.picker_model: str | None = None
         ctx_self = self
 
         class _Tools:
             class _Vlm:
                 async def analyze_plots(_self, **kwargs):
                     ctx_self.vlm_analyze_paths = list(kwargs.get("plot_paths") or [])
+                    ctx_self.vlm_analyze_model = kwargs.get("model")
                     return canned["vlm"]
 
                 async def select_best_n_plots(_self, **kwargs):
                     ctx_self.picker_paths = list(kwargs.get("plot_paths") or [])
                     ctx_self.picker_n = kwargs.get("n")
+                    ctx_self.picker_model = kwargs.get("model")
                     return list(canned["picker"])  # type: ignore[arg-type]
 
             class _Exec:
@@ -99,7 +103,17 @@ async def test_expand_node_runs_picker_when_more_than_ten_plots() -> None:
         "picker": picked,
     }
     ctx = _Ctx(canned)
-    expand_ctx = ExpandContext(sandbox_id="s", parent_node=None, idea={}, llm_api_key="k", node_id="n1")
+    # Distinct sentinels so a regression that routes the picker to the VLM
+    # model (Sakana spec violation) flips the model assertions below.
+    expand_ctx = ExpandContext(
+        sandbox_id="s",
+        parent_node=None,
+        idea={},
+        llm_api_key="k",
+        node_id="n1",
+        feedback_model="claude-3-5-haiku-test",
+        vlm_model="claude-vision-test",
+    )
     result = await expand_node(ctx=ctx, expand_ctx=expand_ctx)
     assert ctx.calls.index("select_best_plots") < ctx.calls.index("vlm_analyze")
     assert ctx.picker_n == 10
@@ -107,3 +121,9 @@ async def test_expand_node_runs_picker_when_more_than_ten_plots() -> None:
     assert ctx.vlm_analyze_paths is not None and len(ctx.vlm_analyze_paths) == 10
     assert [Path(p).name for p in ctx.vlm_analyze_paths] == picked
     assert result["is_buggy_plots"] is False
+    # Sakana spec: the picker is a text-only ranking call on the feedback
+    # model; the VLM model is reserved for the actual vision review
+    # (`.scientist/ai_scientist/treesearch/parallel_agent.py:928-937`).
+    assert ctx.picker_model == "claude-3-5-haiku-test"
+    assert ctx.picker_model != "claude-vision-test"
+    assert ctx.vlm_analyze_model == "claude-vision-test"

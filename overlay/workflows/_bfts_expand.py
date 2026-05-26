@@ -235,6 +235,11 @@ async def expand_node(*, ctx: Any, expand_ctx: ExpandContext) -> dict[str, Any]:
 
     if plot_paths:
         vlm_model = expand_ctx.vlm_model
+        # The picker is a text-only ranking call — Sakana hits it with
+        # `cfg.agent.feedback.model`
+        # (`.scientist/ai_scientist/treesearch/parallel_agent.py:928-937`),
+        # not the VLM. The VLM model stays on the actual vision call.
+        picker_model = expand_ctx.feedback_model
         task_desc = str(expand_ctx.idea.get("Title", ""))
         # Sakana picks the 10 most informative plots via a feedback-model
         # call before the VLM batch when >10 plots were produced
@@ -244,7 +249,7 @@ async def expand_node(*, ctx: Any, expand_ctx: ExpandContext) -> dict[str, Any]:
         if len(plot_paths) > _VLM_MAX_PLOTS:
             picked = await ctx.step(
                 "select_best_plots",
-                lambda paths=plot_paths, desc=task_desc, m=vlm_model: (
+                lambda paths=plot_paths, desc=task_desc, m=picker_model: (
                     ctx.tools.bfts_vlm.select_best_n_plots(
                         plot_paths=paths,
                         n=_VLM_MAX_PLOTS,
