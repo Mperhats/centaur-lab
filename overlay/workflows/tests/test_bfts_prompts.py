@@ -6,6 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from _bfts_metric import mean as metric_mean
 from _bfts_prompts import (
     METRIC_PARSE_SPEC,
     PLOT_SELECTION_SPEC,
@@ -69,3 +70,33 @@ def test_impl_guideline_mentions_experiment_data_npy() -> None:
 def test_resp_fmt_mentions_single_codeblock() -> None:
     assert "python" in PROMPT_RESP_FMT.lower()
     assert "codeblock" in PROMPT_RESP_FMT.lower() or "code block" in PROMPT_RESP_FMT.lower()
+
+
+def test_metric_parse_spec_payload_round_trips_to_metric_mean() -> None:
+    """Wire-shape contract: a payload conforming to METRIC_PARSE_SPEC's
+    nested schema must be readable by _bfts_metric.mean() with no shape
+    massaging."""
+    payload = {
+        "metric_names": [
+            {
+                "metric_name": "val_loss",
+                "lower_is_better": True,
+                "description": "validation loss across folds",
+                "data": [
+                    {"dataset_name": "fold_0", "final_value": 0.4, "best_value": 0.3},
+                    {"dataset_name": "fold_1", "final_value": 0.6, "best_value": 0.5},
+                ],
+            }
+        ]
+    }
+    assert metric_mean(payload) == 0.5
+
+
+def test_function_spec_names_are_unique() -> None:
+    names = {
+        REVIEW_FUNC_SPEC["function"]["name"],
+        METRIC_PARSE_SPEC["function"]["name"],
+        VLM_FEEDBACK_SPEC["function"]["name"],
+        PLOT_SELECTION_SPEC["function"]["name"],
+    }
+    assert len(names) == 4

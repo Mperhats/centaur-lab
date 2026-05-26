@@ -23,6 +23,12 @@ def compile_prompt_to_md(prompt: PromptType, depth: int = 1) -> str:
     bullet items; strings are emitted as-is. Verbatim parity matters
     because every prompt downstream is built as nested dicts and the
     LLM-prompt-engineering work assumes this exact rendering.
+
+    Non-(str|list|dict) values fall back to ``str(value)`` — Sakana
+    parity, but caller-beware: passing ``None`` will render the literal
+    string ``"None"`` into the LLM prompt. Task 2.7's expansion driver
+    should coerce nullable DB columns (e.g. ``parent_code``) to ``""``
+    before assembling the prompt dict.
     """
     if isinstance(prompt, str):
         return prompt + "\n"
@@ -125,7 +131,8 @@ PLOT_SELECTION_SPEC: dict[str, Any] = {
             "properties": {
                 "selected_indices": {
                     "type": "array",
-                    "items": {"type": "integer"},
+                    "items": {"type": "integer", "minimum": 0},
+                    "minItems": 1,
                     "maxItems": 10,
                 }
             },
