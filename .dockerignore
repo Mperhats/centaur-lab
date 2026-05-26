@@ -60,6 +60,10 @@ values*.yaml
 tests
 tmp
 
+# Dev-only tooling (submodule + venv sync). The API pod has its own
+# /app/centaur_sdk/, so the overlay never runs these.
+scripts
+
 # Environment (secrets — never bake into images)
 **/.env
 **/.env.*

@@ -10,9 +10,9 @@
 ## Quickstart
 
 ```bash
-git submodule update --init --recursive
-uv sync && uv run pytest tests/
-docker build -t centaur-overlay:dev .   # smoke test; CI publishes to GHCR on merge to main
+./scripts/sync-sdk                       # init .centaur submodule + uv sync
+uv run pytest tests/
+docker build -t centaur-overlay:dev .    # smoke test; CI publishes to GHCR on merge to main
 ```
 
 Production deploys run in [CI](.github/workflows/overlay.yml)
@@ -38,14 +38,12 @@ overlay layout. For background on the model itself, see
 ## Updating the SDK
 
 The `centaur_sdk` symlink resolves to whatever `.centaur` is pinned at,
-so syncing the SDK == bumping the submodule pin. Quickstart's
-`git submodule update --init --recursive` only checks out the pinned
-SHA. To advance the pin to upstream's latest:
+so syncing the SDK == bumping the submodule pin. To advance the pin to
+upstream's latest, run the tests against it, and stage the bump:
 
 ```bash
-git submodule update --remote .centaur
-uv run pytest tests/                       # confirm overlay still works
-git add .centaur && git commit -m "bump .centaur to <sha>"
+./scripts/sync-sdk bump
+git commit -m "bump .centaur to <sha>"
 ```
 
 ## License
