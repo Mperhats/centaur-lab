@@ -172,9 +172,11 @@ class MetricsRecorder:
 
 
 def _install_metrics(monkeypatch: pytest.MonkeyPatch) -> MetricsRecorder:
+    import centaur_lab.brief as brief_module
+
     recorder = MetricsRecorder()
-    monkeypatch.setattr(s2_client, "observe_document_size", recorder.observe)
-    monkeypatch.setattr(s2_client, "record_document_change", recorder.record)
+    monkeypatch.setattr(brief_module, "observe_document_size", recorder.observe)
+    monkeypatch.setattr(brief_module, "record_document_change", recorder.record)
     return recorder
 
 

@@ -130,6 +130,8 @@ async def test_handler_inserts_one_paper() -> None:
     assert result["papers_updated"] == 0
     assert result["papers_noop"] == 0
     assert result["papers_failed"] == 0
+    assert result["brief_document_id"].startswith("semantic_scholar:research_brief:")
+    assert result["brief_action"] == "inserted"
     assert len(result["results"]) == 1
     entry = result["results"][0]
     assert entry["status"] == "inserted"
@@ -178,11 +180,12 @@ async def test_handler_passes_query_to_metadata() -> None:
             ctx,
         )
 
-    assert len(pool.execute_calls) == 1
+    assert len(pool.execute_calls) == 3
     _query, args = pool.execute_calls[0]
     metadata_json = args[15]
     assert isinstance(metadata_json, str)
     assert '"query":"active inference"' in metadata_json
+    assert any(event == "save_papers_brief_persisted" for event, _ in ctx.logs)
 
 
 @pytest.mark.asyncio
@@ -205,7 +208,9 @@ async def test_handler_returns_noop_for_unchanged_papers() -> None:
 
     assert result["papers_noop"] == 1
     assert result["papers_inserted"] == 0
-    assert pool.execute_calls == []
+    assert "brief_document_id" in result
+    assert result["brief_action"] in ("inserted", "updated", "noop")
+    assert len(pool.execute_calls) >= 1
 
 
 @pytest.mark.asyncio
@@ -238,6 +243,10 @@ async def test_handler_emits_vm_metrics_per_upsert(
     recorder = MetricsRecorder()
     monkeypatch.setattr(save_papers, "observe_document_size", recorder.observe)
     monkeypatch.setattr(save_papers, "record_document_change", recorder.record)
+    import centaur_lab.brief as brief_module
+
+    monkeypatch.setattr(brief_module, "observe_document_size", recorder.observe)
+    monkeypatch.setattr(brief_module, "record_document_change", recorder.record)
 
     with patch("save_papers.SemanticScholarClient") as mock_cls:
         mock_cls.return_value = mock
@@ -246,15 +255,13 @@ async def test_handler_emits_vm_metrics_per_upsert(
             ctx,
         )
 
-    # observe runs unconditionally before each upsert; record runs after
-    # with the resolved action — same ordering as upstream
-    # company_context_documents.
-    assert len(recorder.observe_calls) == 2
-    assert len(recorder.change_calls) == 2
-    for document in recorder.observe_calls:
-        assert document["source"] == "semantic_scholar"
-        assert document["source_type"] == "paper"
+    # observe: initial paper upserts + brief + re-parent upserts
+    assert len(recorder.observe_calls) == 5
+    assert len(recorder.change_calls) == 5
+    paper_observes = [d for d in recorder.observe_calls if d["source_type"] == "paper"]
+    brief_observes = [d for d in recorder.observe_calls if d["source_type"] == "research_brief"]
+    assert len(paper_observes) == 4
+    assert len(brief_observes) == 1
     for document, action in recorder.change_calls:
         assert document["source"] == "semantic_scholar"
-        assert document["source_type"] == "paper"
         assert action == "inserted"

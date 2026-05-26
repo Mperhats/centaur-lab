@@ -10,17 +10,17 @@ papers, preprints, citations, or what a specific researcher has published.
 Prefer it over generic web search for anything that lives in the academic
 literature: arXiv, NeurIPS, biology/chem journals, etc.
 
-**Default flow: search-then-save.** Persistence is on by default — after
-finding papers, call `save_papers` so future turns can retrieve them via
-`company_context` or RAG over saved rows. Skip the `save_papers` follow-up
-ONLY when the user explicitly says "just search", "don't save",
-"exploratory only", or otherwise signals they don't want the result
-remembered.
+**Default flow: persist with a research brief.** After finding papers via
+`search`, call `save_papers` (which always writes a linked
+`research_brief` row) or call `semantic_scholar.research_brief` directly
+for a single-query lit review. Skip persistence ONLY when the user
+explicitly says "just search", "don't save", "exploratory only", or
+otherwise signals they don't want the result remembered.
 
 **Pick the right surface:**
 
-- "Find papers about X" → `semantic_scholar.search` + `save_papers` follow-up
-- "Summarize this paper" / DOI / arXiv ID / S2 ID → `semantic_scholar.get_paper` + `save_papers` follow-up
+- "Find papers about X" → `semantic_scholar.search` + `save_papers` follow-up (brief + papers)
+- "Summarize this paper" / DOI / arXiv ID / S2 ID → `semantic_scholar.get_paper` + `save_papers` follow-up (brief + paper)
 - "What does this paper cite?" → `semantic_scholar.get_references`
 - "Build a brief / lit review / writeup on X" → `semantic_scholar.research_brief` (atomic search + render + persist)
 
@@ -35,8 +35,9 @@ Each entry in `results` is a standard S2 paper dict (`paperId`, `title`,
 
 `search` does not auto-persist. After a successful search, call
 `save_papers` on the `paperId`s you want remembered unless the user opted
-out. Use `research_brief` when the user wants a synthesized writeup that
-is persisted atomically (brief row + child paper rows).
+out — `save_papers` always upserts a linked `research_brief` row plus
+child paper rows. Use `research_brief` when one S2 query should drive the
+whole writeup atomically.
 
 `search_papers` is the lower-level sibling — same live API, raises on
 failure instead of returning an error envelope. Prefer `search` for
@@ -81,19 +82,21 @@ method. Both are content-hash idempotent — re-running with the same input
 is safe and cheap (returns `noop` actions), so you don't have to track
 whether you've already saved something.
 
-### `save_papers` — Remember Specific Papers
+### `save_papers` — Remember Specific Papers (+ brief)
 
 The implicit default after every `search` / `search_papers` / `get_paper`
-turn (see "Default flow: search-then-save" above). Also fires on explicit
-asks: "save these papers", "remember these for later", "add these to context".
+turn (see "Default flow" above). Also fires on explicit asks: "save these
+papers", "remember these for later", "add these to context".
 
 ```bash
 call workflow run '{"workflow_name":"save_papers","input":{"paper_ids":["173ba8ae...","abcd1234..."],"query":"diffusion models"}}'
 ```
 
-Returns `{status, papers_inserted, papers_updated, papers_noop, papers_failed, results}`.
-Pass the original user query in the optional `query` field — it's recorded
-as traceability metadata on each row.
+Returns `{status, papers_inserted, papers_updated, papers_noop, papers_failed,
+brief_document_id, brief_action, brief_query, results}`. Always writes a
+`research_brief` row linking the saved papers. Pass the original user query
+in the optional `query` field for traceability; when omitted, a stable
+`save_papers:<hash>` query is synthesized from the paper ID set.
 
 Idempotency means the save call is cheap to make even when the agent
 isn't sure whether the papers are already cached: re-saving an unchanged
