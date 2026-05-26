@@ -216,7 +216,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         # cached ``expand_node`` step and writes the update on retry.
         # The placeholder stays until then.
         prepared: list[tuple[str, dict[str, Any] | None]] = []
-        for sel in selections:
+        for i, sel in enumerate(selections):
             parent_id = sel.node_id if sel is not None else None
             parent_row = (
                 next((n for n in nodes if n["node_id"] == parent_id), None)
@@ -247,7 +247,11 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                 )
                 return nid
 
-            node_id = await ctx.step("insert_node", _insert)
+            # Per-iteration unique step name so each placeholder insert
+            # has a distinct row in the checkpoint table (no reliance on
+            # the engine's auto-suffix). Matches the ``create_sandbox_{i}``
+            # convention in ``bfts_root``.
+            node_id = await ctx.step(f"insert_node_{i}", _insert)
             prepared.append((node_id, parent_row))
 
         # Fan out: start every child eagerly so the engine schedules
@@ -255,11 +259,14 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         # The trigger_key is deterministic in (run_id, node_id) so a
         # parent replay reuses the same child run rather than spawning
         # a duplicate.
-        children: list[dict[str, Any]] = []
+        children: list[tuple[str, dict[str, Any]]] = []
         for node_id, parent_row in prepared:
             child_run_id = f"{inp.run_id}:expand:{node_id}"
+            # Step name embeds the child's ``node_id`` so a postmortem
+            # against the checkpoint table can correlate each start back
+            # to a specific child without auto-suffix lookup.
             child = await ctx.start_workflow(
-                "start_expand_child",
+                f"start_expand_{node_id}",
                 workflow_name="bfts_expand_one",
                 run_input={
                     "run_id": inp.run_id,
@@ -281,7 +288,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                 trigger_key=child_run_id,
                 eager_start=True,
             )
-            children.append(child)
+            children.append((node_id, child))
 
         # Wait for every child to reach a terminal state before the next
         # iteration's ``list_nodes_for_run`` runs. Each child workflow
@@ -301,8 +308,12 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         # and can stall the selector below ``num_drafts``. A follow-up will
         # add bounded waits + explicit failure inspection (tracked alongside
         # the same gap in ``bfts_root.py``).
-        for child in children:
-            await ctx.wait_for_workflow("wait_expand_child", run_id=child["run_id"])
+        for node_id, child in children:
+            # Step name suffix matches the ``start_expand_{node_id}`` above
+            # so start/wait pairs share a node_id for easy correlation.
+            await ctx.wait_for_workflow(
+                f"wait_expand_{node_id}", run_id=child["run_id"]
+            )
         iters_used += 1
 
     final_nodes = await ctx.step(

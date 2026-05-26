@@ -333,9 +333,9 @@ async def test_handler_inserts_placeholder_row_before_fan_out(
     ctx = _TreeCtx()
     await bfts_tree.handler(_input(num_drafts=4, num_workers=4, max_iters=1), ctx)
 
-    insert_idxs = [i for i, c in enumerate(ctx.calls) if c == "insert_node"]
+    insert_idxs = [i for i, c in enumerate(ctx.calls) if c.startswith("insert_node_")]
     start_idxs = [
-        i for i, c in enumerate(ctx.calls) if c == "start_expand_child"
+        i for i, c in enumerate(ctx.calls) if c.startswith("start_expand_")
     ]
     assert len(insert_idxs) == 4
     assert len(start_idxs) == 4
@@ -441,8 +441,8 @@ async def test_handler_waits_for_all_children_before_next_iteration(
     ctx = _TreeCtx()
     await bfts_tree.handler(_input(num_drafts=2, num_workers=2, max_iters=2), ctx)
 
-    starts = [i for i, c in enumerate(ctx.calls) if c == "start_expand_child"]
-    waits = [i for i, c in enumerate(ctx.calls) if c == "wait_expand_child"]
+    starts = [i for i, c in enumerate(ctx.calls) if c.startswith("start_expand_")]
+    waits = [i for i, c in enumerate(ctx.calls) if c.startswith("wait_expand_")]
 
     # Two iterations * num_workers=2 = 4 starts + 4 waits.
     assert len(starts) == 4
@@ -453,6 +453,55 @@ async def test_handler_waits_for_all_children_before_next_iteration(
     # iter-2 waits (last two).
     assert starts[0] < starts[1] < waits[0] < waits[1]
     assert waits[1] < starts[2] < starts[3] < waits[2] < waits[3]
+
+
+@pytest.mark.asyncio
+async def test_handler_uses_node_id_in_fan_out_step_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Replay-debugging contract: step names embed the per-iteration index
+    (``insert_node_{i}``) or the child ``node_id``
+    (``start_expand_{node_id}`` / ``wait_expand_{node_id}``) so each step
+    row in the checkpoint table can be correlated back to a specific
+    selection / child without relying on the engine's auto-suffix
+    (``#2``, ``#3``, ...). Matches the ``f"start_tree_{i}"`` /
+    ``f"wait_tree_{child['tree_index']}"`` pattern in ``bfts_root``."""
+    import bfts_tree
+
+    _patch_fanout_deps(monkeypatch)
+
+    ctx = _TreeCtx()
+    await bfts_tree.handler(_input(num_drafts=3, num_workers=3, max_iters=1), ctx)
+
+    inserts = [c for c in ctx.calls if c.startswith("insert_node_")]
+    starts = [c for c in ctx.calls if c.startswith("start_expand_")]
+    waits = [c for c in ctx.calls if c.startswith("wait_expand_")]
+
+    assert len(inserts) == 3
+    assert len(starts) == 3
+    assert len(waits) == 3
+
+    # Each step name must be unique within its phase — no reliance on the
+    # engine's auto-suffix.
+    assert len(set(inserts)) == 3
+    assert len(set(starts)) == 3
+    assert len(set(waits)) == 3
+
+    # insert_node_{i} must use the per-iteration index 0..2.
+    assert set(inserts) == {"insert_node_0", "insert_node_1", "insert_node_2"}
+
+    # start_expand_{node_id} and wait_expand_{node_id} share the same
+    # suffix set — every started child is awaited exactly once.
+    start_suffixes = {c[len("start_expand_"):] for c in starts}
+    wait_suffixes = {c[len("wait_expand_"):] for c in waits}
+    assert start_suffixes == wait_suffixes
+
+    # The suffix in each name matches the node_id carried in the child's
+    # run_input.
+    started_node_ids = {
+        call["run_input"]["node_id"] for call in ctx.start_workflow_calls
+    }
+    assert start_suffixes == started_node_ids
 
 
 @pytest.mark.asyncio
