@@ -28,7 +28,7 @@ import research_brief
 from ._mocks import MockContext, MockPool
 
 
-class FakeClient:
+class MockSemanticScholarClient:
     """Minimal stand-in for ``SemanticScholarClient`` recording delegation.
 
     Implements the context-manager protocol plus the single
@@ -44,7 +44,7 @@ class FakeClient:
         self.entered = False
         self.exited = False
 
-    def __enter__(self) -> FakeClient:
+    def __enter__(self) -> MockSemanticScholarClient:
         self.entered = True
         return self
 
@@ -64,14 +64,14 @@ class FakeClient:
         return self._return_value
 
 
-def _install_fake_client(
-    monkeypatch: pytest.MonkeyPatch, fake: FakeClient
+def _install_mock_client(
+    monkeypatch: pytest.MonkeyPatch, mock: MockSemanticScholarClient
 ) -> None:
-    """Swap ``research_brief.SemanticScholarClient`` with a factory for ``fake``."""
+    """Swap ``research_brief.SemanticScholarClient`` with a factory for ``mock``."""
     monkeypatch.setattr(
         research_brief,
         "SemanticScholarClient",
-        lambda: fake,
+        lambda: mock,
     )
 
 
@@ -90,8 +90,8 @@ async def test_research_brief_delegates_to_tool_method(
         "papers_noop": 0,
         "markdown": "# Research Brief: active inference\n",
     }
-    fake = FakeClient(return_value=expected)
-    _install_fake_client(monkeypatch, fake)
+    mock = MockSemanticScholarClient(return_value=expected)
+    _install_mock_client(monkeypatch, mock)
     ctx = MockContext(MockPool())
 
     result = await research_brief.handler(
@@ -100,7 +100,7 @@ async def test_research_brief_delegates_to_tool_method(
     )
 
     assert result == expected
-    assert fake.research_brief_calls == [
+    assert mock.research_brief_calls == [
         {"query": "active inference", "limit": 3, "year_from": 2024}
     ]
 
@@ -109,10 +109,10 @@ async def test_research_brief_delegates_to_tool_method(
 async def test_research_brief_translates_empty_query_error_to_skipped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake = FakeClient(
+    mock = MockSemanticScholarClient(
         return_value={"status": "error", "error": "query cannot be empty"}
     )
-    _install_fake_client(monkeypatch, fake)
+    _install_mock_client(monkeypatch, mock)
     ctx = MockContext(MockPool())
 
     result = await research_brief.handler(
@@ -127,10 +127,10 @@ async def test_research_brief_translates_empty_query_error_to_skipped(
 async def test_research_brief_translates_invalid_limit_error_to_skipped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake = FakeClient(
+    mock = MockSemanticScholarClient(
         return_value={"status": "error", "error": "limit must be positive"}
     )
-    _install_fake_client(monkeypatch, fake)
+    _install_mock_client(monkeypatch, mock)
     ctx = MockContext(MockPool())
 
     result = await research_brief.handler(
@@ -150,8 +150,8 @@ async def test_research_brief_passes_through_other_errors(
         "status": "error",
         "error": "DATABASE_URL is required for semantic_scholar.research_brief",
     }
-    fake = FakeClient(return_value=envelope)
-    _install_fake_client(monkeypatch, fake)
+    mock = MockSemanticScholarClient(return_value=envelope)
+    _install_mock_client(monkeypatch, mock)
     ctx = MockContext(MockPool())
 
     result = await research_brief.handler(
@@ -166,25 +166,25 @@ async def test_research_brief_passes_through_other_errors(
 async def test_research_brief_closes_client_on_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake = FakeClient(return_value={"status": "completed", "results_count": 0})
-    _install_fake_client(monkeypatch, fake)
+    mock = MockSemanticScholarClient(return_value={"status": "completed", "results_count": 0})
+    _install_mock_client(monkeypatch, mock)
     ctx = MockContext(MockPool())
 
     await research_brief.handler(research_brief.Input(query="anything"), ctx)
 
-    assert fake.entered is True
-    assert fake.exited is True
+    assert mock.entered is True
+    assert mock.exited is True
 
 
 @pytest.mark.asyncio
 async def test_research_brief_closes_client_on_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake = FakeClient(return_value={"status": "error", "error": "S2 down"})
-    _install_fake_client(monkeypatch, fake)
+    mock = MockSemanticScholarClient(return_value={"status": "error", "error": "S2 down"})
+    _install_mock_client(monkeypatch, mock)
     ctx = MockContext(MockPool())
 
     await research_brief.handler(research_brief.Input(query="anything"), ctx)
 
-    assert fake.entered is True
-    assert fake.exited is True
+    assert mock.entered is True
+    assert mock.exited is True

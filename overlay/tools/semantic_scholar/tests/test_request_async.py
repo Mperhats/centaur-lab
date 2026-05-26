@@ -37,7 +37,7 @@ from semantic_scholar.client import SemanticScholarClient
 # ---------------------------------------------------------------------------
 
 
-class _FakeResponse:
+class _MockResponse:
     """Minimal ``httpx.Response`` substitute supporting the fields
     ``_request`` / ``_request_async`` touch: ``status_code``, ``json``,
     ``raise_for_status``, ``request``, and ``text``."""
@@ -68,7 +68,7 @@ class _FakeResponse:
             )
 
 
-class _FakeAsyncClient:
+class _MockAsyncClient:
     """``httpx.AsyncClient`` stand-in that pops responses off a list.
 
     Supports the ``async with`` protocol the production code uses; each
@@ -76,13 +76,13 @@ class _FakeAsyncClient:
     the request shape after the retry loop drains.
     """
 
-    def __init__(self, responses: list[_FakeResponse]) -> None:
+    def __init__(self, responses: list[_MockResponse]) -> None:
         self._responses = list(responses)
         self.get_calls: list[dict[str, Any]] = []
         self.aenter_count = 0
         self.aexit_count = 0
 
-    async def __aenter__(self) -> _FakeAsyncClient:
+    async def __aenter__(self) -> _MockAsyncClient:
         self.aenter_count += 1
         return self
 
@@ -94,28 +94,28 @@ class _FakeAsyncClient:
         url: str,
         params: dict[str, Any] | None = None,
         headers: dict[str, str] | None = None,
-    ) -> _FakeResponse:
+    ) -> _MockResponse:
         self.get_calls.append({"url": url, "params": params, "headers": headers})
         if not self._responses:
-            raise RuntimeError("FakeAsyncClient: ran out of responses")
+            raise RuntimeError("MockAsyncClient: ran out of responses")
         return self._responses.pop(0)
 
 
-def _install_fake_async_client(
-    monkeypatch: pytest.MonkeyPatch, responses: list[_FakeResponse]
-) -> _FakeAsyncClient:
+def _install_mock_async_client(
+    monkeypatch: pytest.MonkeyPatch, responses: list[_MockResponse]
+) -> _MockAsyncClient:
     """Patch ``httpx.AsyncClient`` so ``_request_async`` constructs ours.
 
-    Returns the singleton ``_FakeAsyncClient`` so tests can inspect the
+    Returns the singleton ``_MockAsyncClient`` so tests can inspect the
     recorded ``get_calls`` after the retry loop exits.
     """
-    fake = _FakeAsyncClient(responses)
+    mock = _MockAsyncClient(responses)
 
-    def _factory(**_kwargs: Any) -> _FakeAsyncClient:
-        return fake
+    def _factory(**_kwargs: Any) -> _MockAsyncClient:
+        return mock
 
     monkeypatch.setattr(s2_client.httpx, "AsyncClient", _factory)
-    return fake
+    return mock
 
 
 def _install_sleep_recorders(
@@ -123,7 +123,7 @@ def _install_sleep_recorders(
 ) -> tuple[list[float], list[float]]:
     """Capture every ``asyncio.sleep`` and ``time.sleep`` call.
 
-    The async fake yields to the loop (so retries actually progress)
+    The async mock yields to the loop (so retries actually progress)
     without burning wall-clock time. ``time.sleep`` is never expected
     to fire from the async retry path; recording it lets the test fail
     loudly if a regression slips the blocking call back in.
@@ -133,17 +133,17 @@ def _install_sleep_recorders(
 
     real_asyncio_sleep = asyncio.sleep
 
-    async def _fake_asyncio_sleep(seconds: float) -> None:
+    async def _mock_asyncio_sleep(seconds: float) -> None:
         asyncio_sleep_calls.append(seconds)
         # Yield control to the event loop without an actual delay so the
         # retry loop keeps making progress in tests.
         await real_asyncio_sleep(0)
 
-    def _fake_time_sleep(seconds: float) -> None:
+    def _mock_time_sleep(seconds: float) -> None:
         time_sleep_calls.append(seconds)
 
-    monkeypatch.setattr(s2_client.asyncio, "sleep", _fake_asyncio_sleep)
-    monkeypatch.setattr(s2_client.time, "sleep", _fake_time_sleep)
+    monkeypatch.setattr(s2_client.asyncio, "sleep", _mock_asyncio_sleep)
+    monkeypatch.setattr(s2_client.time, "sleep", _mock_time_sleep)
     return asyncio_sleep_calls, time_sleep_calls
 
 
@@ -158,11 +158,11 @@ async def test_request_async_awaits_asyncio_sleep_on_429(
 ) -> None:
     """A 429 → 200 sequence must await ``asyncio.sleep`` for backoff and
     never call the blocking ``time.sleep``."""
-    fake_client = _install_fake_async_client(
+    mock_client = _install_mock_async_client(
         monkeypatch,
         [
-            _FakeResponse(429),
-            _FakeResponse(200, {"data": [{"paperId": "p1"}]}),
+            _MockResponse(429),
+            _MockResponse(200, {"data": [{"paperId": "p1"}]}),
         ],
     )
     asyncio_sleeps, time_sleeps = _install_sleep_recorders(monkeypatch)
@@ -173,13 +173,13 @@ async def test_request_async_awaits_asyncio_sleep_on_429(
     )
 
     assert result == {"data": [{"paperId": "p1"}]}
-    assert len(fake_client.get_calls) == 2
+    assert len(mock_client.get_calls) == 2
     # backoff = min(8.0, 2**0) on the first retry attempt
     assert asyncio_sleeps == [1.0]
     assert time_sleeps == []
     # async-with lifecycle was honored on the per-call client
-    assert fake_client.aenter_count == 1
-    assert fake_client.aexit_count == 1
+    assert mock_client.aenter_count == 1
+    assert mock_client.aexit_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -192,9 +192,9 @@ async def test_request_async_retries_transient_5xx(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """503 (Service Unavailable) is in the transient set; same retry shape."""
-    _install_fake_async_client(
+    _install_mock_async_client(
         monkeypatch,
-        [_FakeResponse(503), _FakeResponse(200, {"data": []})],
+        [_MockResponse(503), _MockResponse(200, {"data": []})],
     )
     asyncio_sleeps, time_sleeps = _install_sleep_recorders(monkeypatch)
 
@@ -216,16 +216,16 @@ async def test_request_async_raises_on_400_without_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A 400 must not be retried — same contract as the sync ``_request``."""
-    fake_client = _install_fake_async_client(
+    mock_client = _install_mock_async_client(
         monkeypatch,
-        [_FakeResponse(400, text="bad query")],
+        [_MockResponse(400, text="bad query")],
     )
     asyncio_sleeps, time_sleeps = _install_sleep_recorders(monkeypatch)
 
     client = SemanticScholarClient(api_key="")
     with pytest.raises(RuntimeError, match="Semantic Scholar API error"):
         await client._request_async("/paper/search")
-    assert len(fake_client.get_calls) == 1
+    assert len(mock_client.get_calls) == 1
     assert asyncio_sleeps == []
     assert time_sleeps == []
 
@@ -294,9 +294,9 @@ def test_search_async_recovers_from_live_429_without_blocking(
             }
         ]
     }
-    _install_fake_async_client(
+    _install_mock_async_client(
         monkeypatch,
-        [_FakeResponse(429), _FakeResponse(200, live_payload)],
+        [_MockResponse(429), _MockResponse(200, live_payload)],
     )
     asyncio_sleeps, time_sleeps = _install_sleep_recorders(monkeypatch)
 
@@ -333,8 +333,8 @@ async def test_search_papers_async_builds_year_filter(
     """``year_from`` must be projected as ``"<year>-"`` — same shape as
     the sync ``search_papers`` so callers can swap one for the other
     without surprise."""
-    _install_fake_async_client(
-        monkeypatch, [_FakeResponse(200, {"data": [{"paperId": "p1"}]})]
+    _install_mock_async_client(
+        monkeypatch, [_MockResponse(200, {"data": [{"paperId": "p1"}]})]
     )
 
     captured: dict[str, Any] = {}
@@ -377,8 +377,8 @@ async def test_request_async_passes_headers_when_api_key_set(
     """The ``x-api-key`` header must reach the live request when an api
     key is configured — regression guard against accidentally stripping
     headers in the async variant."""
-    fake_client = _install_fake_async_client(
-        monkeypatch, [_FakeResponse(200, {"data": []})]
+    mock_client = _install_mock_async_client(
+        monkeypatch, [_MockResponse(200, {"data": []})]
     )
     # No asyncio.sleep should fire on the happy path.
     _install_sleep_recorders(monkeypatch)
@@ -387,8 +387,8 @@ async def test_request_async_passes_headers_when_api_key_set(
     result = await client._request_async("/paper/search", params={"query": "x"})
 
     assert result == {"data": []}
-    assert len(fake_client.get_calls) == 1
-    headers = fake_client.get_calls[0]["headers"] or {}
+    assert len(mock_client.get_calls) == 1
+    headers = mock_client.get_calls[0]["headers"] or {}
     assert headers.get("x-api-key") == "secret-key-123"
 
 
@@ -398,6 +398,6 @@ async def test_request_async_passes_headers_when_api_key_set(
 # ---------------------------------------------------------------------------
 
 
-def test_fake_response_serializes_to_json() -> None:
+def test_mock_response_serializes_to_json() -> None:
     payload = {"data": [{"paperId": "x", "title": "y"}]}
-    assert json.loads(json.dumps(_FakeResponse(200, payload).json())) == payload
+    assert json.loads(json.dumps(_MockResponse(200, payload).json())) == payload
