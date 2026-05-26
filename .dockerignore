@@ -57,6 +57,14 @@ values*.yaml
 
 # Docker
 .dockerignore
+# Both Dockerfiles ride along into ``/overlay`` otherwise but neither is
+# read at runtime — the overlay is data-only (alpine ``COPY . /overlay``)
+# and ``Dockerfile.bfts-executor`` is consumed by its own publish job
+# (see ``.github/workflows/overlay.yml`` ``publish-bfts-executor``), then
+# pulled by tag from ``tools/bfts_executor/client.py``. Excluding keeps
+# ``/app/overlay/org`` minimal and the runtime payload self-evidently
+# code-only.
+Dockerfile*
 
 # Tests (root pytest suite + tool / workflow test trees never run inside
 # the API or sandbox pods)

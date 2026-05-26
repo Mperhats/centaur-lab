@@ -80,7 +80,22 @@ RUNFILE_NAME = "runfile.py"
 _AGENT_SANDBOX_GROUP = "agents.x-k8s.io"
 _AGENT_SANDBOX_VERSION = "v1alpha1"
 _AGENT_SANDBOX_PLURAL = "sandboxes"
-_DEFAULT_EXECUTOR_IMAGE = "bfts-executor:latest"
+_DEFAULT_EXECUTOR_IMAGE = os.getenv(  # noqa: TID251 - non-secret image tag set by Helm ``api.extraEnv``
+    "BFTS_EXECUTOR_IMAGE",
+    "ghcr.io/mperhats/centaur-lab/bfts-executor:latest",
+)
+"""Container image for BFTS-spawned Sandbox pods.
+
+Built and pushed by ``.github/workflows/overlay.yml`` (job
+``publish-bfts-executor``) on every push to ``main`` — tags ``:latest``
+and ``:sha-<commit>``. Production deploys should override
+``BFTS_EXECUTOR_IMAGE`` via Helm ``api.extraEnv`` to pin a sha tag; the
+``:latest`` default is for local k3s / quickstart only.
+
+Callers (typically ``workflows/bfts_root.py``) rely on this default and
+do not pass ``image=`` explicitly, so the env-var resolution happens
+once at module load — a chart redeploy is required to flip the tag.
+"""
 _DEFAULT_STORAGE_SIZE = "10Gi"
 _WORKSPACE_MOUNT_PATH = "/workspace"
 _WORKSPACE_VOLUME_NAME = "workspace"
@@ -254,8 +269,8 @@ class BFTSExecutor:
         sandbox_id: str,
         *,
         run_id: str,
-        image: str = "bfts-executor:latest",
-        storage_size: str = "10Gi",
+        image: str = _DEFAULT_EXECUTOR_IMAGE,
+        storage_size: str = _DEFAULT_STORAGE_SIZE,
         storage_class: str | None = None,
     ) -> str:
         api = self._require_api()

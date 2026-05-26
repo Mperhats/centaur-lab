@@ -5,12 +5,14 @@
 # /workspace/working — the path Sakana's prompts write to (research 02
 # §Code execution contract).
 #
-# Built separately from the overlay image:
-#   docker build -f Dockerfile.bfts-executor -t bfts-executor:latest .
+# Built by `.github/workflows/overlay.yml` (job `publish-bfts-executor`)
+# on every push to `main` and pushed to GHCR alongside the overlay image
+# at `ghcr.io/${repo}/bfts-executor:latest` + `:sha-<commit>`. Excluded
+# from the overlay payload via `.dockerignore` — sandbox pods reference
+# this image by tag (see `tools/bfts_executor/client.py`
+# `_DEFAULT_EXECUTOR_IMAGE`), they never read the file. Local build:
 #
-# The overlay Dockerfile (./Dockerfile) bakes this file in as inert
-# ballast — sandbox pods never read it; the tool only references the
-# tag at sandbox-creation time (see tools/bfts_executor/client.py:83).
+#   docker build -f Dockerfile.bfts-executor -t bfts-executor:latest .
 FROM python:3.11-slim
 
 RUN apt-get update \
