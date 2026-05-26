@@ -12,7 +12,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import save_papers
-from _paper_document import _content_hash, build_paper_document
+
+from shared.paper_document import _content_hash, build_paper_document
 
 from ._mocks import MetricsRecorder, MockContext, MockPool
 

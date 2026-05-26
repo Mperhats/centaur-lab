@@ -21,6 +21,11 @@ from __future__ import annotations
 
 import sys
 import types
+from pathlib import Path
+
+_OVERLAY_ROOT = Path(__file__).resolve().parents[2]  # overlay/
+if str(_OVERLAY_ROOT) not in sys.path:
+    sys.path.insert(0, str(_OVERLAY_ROOT))
 
 if "tools" not in sys.modules:
     _tools_pkg = types.ModuleType("tools")

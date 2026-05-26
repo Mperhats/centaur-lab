@@ -15,7 +15,7 @@ import pytest
 # name without changing the production layout.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from _paper_document import _content_hash, build_paper_document, upsert_document
+from shared.paper_document import _content_hash, build_paper_document, upsert_document
 
 from ._mocks import EXECUTE_ARG_INDEX, MockPool
 
