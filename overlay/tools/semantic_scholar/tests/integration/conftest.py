@@ -33,13 +33,18 @@ from __future__ import annotations
 
 import asyncio
 import os
-import re
 from pathlib import Path
-from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 import asyncpg
 import pytest
 import pytest_asyncio
+
+from centaur_lab.integration_db import (
+    can_connect,
+    dsn_with_db,
+    ensure_database,
+    run_migrations_async,
+)
 
 _TEST_DATABASE = "centaur_test"
 
@@ -67,72 +72,6 @@ def pytest_configure(config: pytest.Config) -> None:
     )
 
 
-def _dsn_with_db(dsn: str, database: str) -> str:
-    """Re-base a DSN onto a different database name."""
-    parts = urlsplit(dsn)
-    return urlunsplit(
-        SplitResult(
-            scheme=parts.scheme,
-            netloc=parts.netloc,
-            path=f"/{database}",
-            query=parts.query,
-            fragment=parts.fragment,
-        )
-    )
-
-
-async def _can_connect(dsn: str) -> bool:
-    try:
-        conn = await asyncpg.connect(dsn)
-    except Exception:
-        return False
-    try:
-        await conn.execute("SELECT 1")
-        return True
-    finally:
-        await conn.close()
-
-
-async def _ensure_database(admin_dsn: str, database: str) -> None:
-    """Create ``database`` if it doesn't already exist (no-op otherwise)."""
-    conn = await asyncpg.connect(admin_dsn)
-    try:
-        exists = await conn.fetchval(
-            "SELECT 1 FROM pg_database WHERE datname = $1", database
-        )
-        if not exists:
-            safe_db = database.replace('"', '""')
-            await conn.execute(f'CREATE DATABASE "{safe_db}"')
-    finally:
-        await conn.close()
-
-
-def _extract_up_sql(path: Path) -> str:
-    """Extract the ``-- migrate:up`` section from a dbmate-style migration file."""
-    text = path.read_text()
-    match = re.search(
-        r"-- migrate:up\s*\n(.*?)(?=-- migrate:down|$)", text, re.DOTALL
-    )
-    if not match:
-        raise ValueError(f"No '-- migrate:up' section found in {path}")
-    return match.group(1).strip()
-
-
-async def _run_migrations_async(dsn: str, migrations_dir: Path) -> None:
-    """Apply every ``-- migrate:up`` section in sorted order. Idempotent —
-    upstream migrations use ``CREATE TABLE IF NOT EXISTS`` and
-    ``CREATE INDEX IF NOT EXISTS`` everywhere, so re-running on an
-    existing DB is safe.
-    """
-    conn = await asyncpg.connect(dsn)
-    try:
-        for migration_file in sorted(migrations_dir.glob("*.sql")):
-            up_sql = _extract_up_sql(migration_file)
-            await conn.execute(up_sql)
-    finally:
-        await conn.close()
-
-
 @pytest.fixture(scope="session")
 def _test_dsn() -> str:
     """Resolve a DSN pointing at the dedicated ``centaur_test`` database.
@@ -154,16 +93,16 @@ def _test_dsn() -> str:
             "postgres://tempo:$PGPASSWORD@localhost:5432/ai_v2"
         )
 
-    admin_dsn = _dsn_with_db(dsn, "postgres")
-    test_dsn = _dsn_with_db(dsn, _TEST_DATABASE)
+    admin_dsn = dsn_with_db(dsn, "postgres")
+    test_dsn = dsn_with_db(dsn, _TEST_DATABASE)
 
-    if not asyncio.run(_can_connect(admin_dsn)):
+    if not asyncio.run(can_connect(admin_dsn)):
         pytest.skip(
             f"CENTAUR_TEST_DATABASE_URL is set but unreachable: {dsn}"
         )
 
-    asyncio.run(_ensure_database(admin_dsn, _TEST_DATABASE))
-    asyncio.run(_run_migrations_async(test_dsn, _MIGRATIONS_DIR))
+    asyncio.run(ensure_database(admin_dsn, _TEST_DATABASE))
+    asyncio.run(run_migrations_async(test_dsn, _MIGRATIONS_DIR))
     return test_dsn
 
 
