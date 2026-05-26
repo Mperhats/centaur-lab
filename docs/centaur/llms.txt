@@ -1,0 +1,25 @@
+# Centaur
+
+The production control plane for shared AI agents, tools, workflows, and sandboxes.
+
+- [Centaur](/index): Centaur is a production control plane for shared AI agents that run in isolated sandboxes and call approved tools.
+- [Architecture](/architecture): How Centaur runs agents with an API, Postgres, sandbox pods, tools, workflows, and iron-proxy.
+- [Brand](/brand): Centaur brand assets — lockups, marks, and usage guidance.
+- [Demo](/demo): Centaur Slack thread demo.
+- [Deploying in Production](/deploying-in-production): Configure secrets, Slack, harness credentials, Kubernetes sandboxes, and production verification for Centaur.
+- [Quickstart](/quickstart): Boot Centaur locally and verify the control plane.
+- [How is Centaur securing my secrets?](/security): Centaur's threat model and the mechanisms that defend against it: sandbox isolation, NetworkPolicy egress restriction, and iron-proxy secret binding.
+- [What is Centaur?](/what-is-centaur): Centaur is a production control plane for shared AI agents, durable execution, sandbox isolation, approved tools, and credential-safe automation.
+- [ACME example](/extend/acme-example): Use the centaur-acme overlay and centaur-acme-infra GitOps template as a forkable starting point for your own Centaur deployment.
+- [🚧 Creating Apps](/extend/apps): Work-in-progress design for deploying app-plane capabilities on Centaur.
+- [Using an overlay](/extend/overlay): Package and mount organization-specific Centaur tools, workflows, skills, personas, and prompts without forking the base repo.
+- [Creating Skills](/extend/skills): Add reusable sandbox-agent skills through overlay .agents/skills directories.
+- [Creating Tools](/extend/tools): Add Centaur tool plugins with client.py, pyproject metadata, and typed secret declarations.
+- [Creating Workflows](/extend/workflows): Add durable Centaur workflows with checkpointed steps, sleeps, events, child workflows, and agent turns.
+- [Slack ETL](/operate/slack-etl): Sync Slack channel history into Postgres, drain historical backfills, and project Slack context into searchable documents.
+- [Configuration](/reference/configuration): Centaur environment variables grouped by requirement and service.
+- [🚧 Advanced Permissioning](/secrets/advanced-permissioning): Work-in-progress design for per-user and per-channel iron-proxy credential grants.
+- [🚧 Using with AWS KMS](/secrets/aws-kms): Work-in-progress guide for resolving Centaur secrets with AWS KMS.
+- [Use Environment Variables](/secrets/environment): Configure Centaur to resolve tool and harness credentials from Kubernetes environment secrets.
+- [🚧 Using with GCP Secret Manager](/secrets/gcp-secret-manager): Work-in-progress guide for resolving Centaur secrets with GCP Secret Manager.
+- [Use 1Password](/secrets/onepassword): Configure Centaur to resolve tool and harness credentials from 1Password through iron-proxy.
