@@ -13,6 +13,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from bfts_root import Input, WORKFLOW_NAME, _sandbox_id
 
+from ._mocks import MockPool
+
 
 def test_workflow_name() -> None:
     assert WORKFLOW_NAME == "bfts_root"
@@ -23,7 +25,10 @@ def test_input_required_idea() -> None:
 
     inp = Input(idea={"name": "test", "Title": "X"})
     assert inp.idea["name"] == "test"
-    assert inp.num_drafts == 3
+    # Phase 4c.4: search-policy fields default to None so the resolver
+    # chain (Input → DB → env → default) actually reaches the lower
+    # tiers; the dataclass shouldn't pre-empt with hardcoded defaults.
+    assert inp.num_drafts is None
     assert inp.max_iters == 20
     llm = resolve_llm_settings(
         draft_model=inp.draft_model,
@@ -62,11 +67,17 @@ class _RootCtx:
     create/stop_sandbox invocations are observable.
     """
 
-    def __init__(self, *, run_id: str = "run-1") -> None:
+    def __init__(
+        self,
+        *,
+        run_id: str = "run-1",
+        pool: Any | None = None,
+    ) -> None:
         self.run_id = run_id
         self.tools = _Tools()
+        self._pool = pool if pool is not None else MockPool(fetchrow_result=None)
         self.step_calls: list[str] = []
-        self.start_workflow_calls: list[str] = []
+        self.start_workflow_calls: list[dict[str, Any]] = []
         self.wait_for_workflow_calls: list[str] = []
         self.logs: list[tuple[str, dict[str, Any]]] = []
         self.fail_on_step: dict[str, BaseException] = {}
@@ -91,7 +102,15 @@ class _RootCtx:
         trigger_key: str,
         eager_start: bool,
     ) -> dict[str, Any]:
-        self.start_workflow_calls.append(name)
+        self.start_workflow_calls.append(
+            {
+                "name": name,
+                "workflow_name": workflow_name,
+                "run_input": run_input,
+                "trigger_key": trigger_key,
+                "eager_start": eager_start,
+            }
+        )
         if name in self.fail_on_start:
             raise self.fail_on_start[name]
         return {"run_id": run_input["run_id"]}
@@ -118,7 +137,14 @@ class _BftsExecutorStub:
 
 
 def _input(num_drafts: int = 2) -> Input:
-    return Input(idea={"name": "toy"}, num_drafts=num_drafts, num_workers=1, max_iters=1)
+    return Input(
+        idea={"name": "toy"},
+        num_drafts=num_drafts,
+        num_workers=1,
+        max_debug_depth=3,
+        debug_prob=0.5,
+        max_iters=1,
+    )
 
 
 @pytest.mark.asyncio
@@ -230,3 +256,169 @@ async def test_failed_create_sandbox_does_not_attempt_stop() -> None:
     assert ctx.tools.bfts_executor.stop_sandbox.await_count == 1
     stops = [s for s in ctx.step_calls if s.startswith("stop_sandbox_")]
     assert stops == ["stop_sandbox_0"]
+
+
+# --- Phase 4c.4: search-config resolution + child-fan-out propagation ---
+#
+# After 4c.4 ``bfts_root.handler`` resolves search-policy fields once via
+# ``resolve_search_config(ctx._pool, ...)`` (Input → ``bfts_hyperparams``
+# row → ``BFTS_*`` env → module default) and threads the resolved values
+# into every child ``bfts_tree`` ``run_input`` so all siblings share one
+# config snapshot. The reflection-tuned DB row therefore takes effect on
+# the next run without operator action.
+
+
+@pytest.mark.asyncio
+async def test_handler_resolves_search_config_via_pool(monkeypatch) -> None:
+    """The handler must consult bfts_hyperparams via ctx._pool — without
+    that read the resolver chain skips the DB layer and reflection-tuned
+    values are silently ignored."""
+    import bfts_root
+
+    pool = MockPool(fetchrow_result=None)
+    ctx = _RootCtx(pool=pool)
+
+    await bfts_root.handler(_input(num_drafts=2), ctx)
+
+    assert len(pool.fetchrow_calls) == 1
+    query, _args = pool.fetchrow_calls[0]
+    assert "bfts_hyperparams" in query
+
+
+@pytest.mark.asyncio
+async def test_handler_forwards_resolved_search_config_to_each_child(
+    monkeypatch,
+) -> None:
+    """When Input leaves all four search fields None, the
+    ``bfts_hyperparams`` row's values flow through to every child's
+    run_input — this is the reflection-tuning hand-off."""
+    import bfts_root
+
+    monkeypatch.delenv("BFTS_DEBUG_PROB", raising=False)
+    monkeypatch.delenv("BFTS_MAX_DEBUG_DEPTH", raising=False)
+    monkeypatch.delenv("BFTS_NUM_DRAFTS", raising=False)
+    monkeypatch.delenv("BFTS_NUM_WORKERS", raising=False)
+    monkeypatch.delenv("BFTS_METRIC_REDUCER", raising=False)
+
+    pool = MockPool(
+        fetchrow_result={
+            "debug_prob": 0.7,
+            "max_debug_depth": 4,
+            "num_drafts": 2,
+            "num_workers": 5,
+            "metric_reducer": "min",
+        }
+    )
+    ctx = _RootCtx(pool=pool)
+
+    inp = Input(idea={"name": "toy"}, max_iters=1)  # all four overrides None
+    await bfts_root.handler(inp, ctx)
+
+    # DB row's num_drafts=2 → 2 trees fanned out.
+    assert len(ctx.start_workflow_calls) == 2
+    for call in ctx.start_workflow_calls:
+        ri = call["run_input"]
+        assert ri["debug_prob"] == 0.7
+        assert ri["max_debug_depth"] == 4
+        assert ri["num_workers"] == 5
+        assert ri["metric_reducer"] == "min"
+
+
+@pytest.mark.asyncio
+async def test_handler_input_override_propagates_to_children(
+    monkeypatch,
+) -> None:
+    """Explicit Input override beats the bfts_hyperparams DB row;
+    operator-supplied values always win."""
+    import bfts_root
+
+    monkeypatch.delenv("BFTS_DEBUG_PROB", raising=False)
+    monkeypatch.delenv("BFTS_NUM_DRAFTS", raising=False)
+    monkeypatch.delenv("BFTS_NUM_WORKERS", raising=False)
+
+    pool = MockPool(
+        fetchrow_result={
+            "debug_prob": 0.7,
+            "max_debug_depth": 4,
+            "num_drafts": 2,
+            "num_workers": 5,
+            "metric_reducer": "min",
+        }
+    )
+    ctx = _RootCtx(pool=pool)
+
+    inp = Input(
+        idea={"name": "toy"},
+        num_drafts=3,  # override → 3 trees, not the DB row's 2
+        debug_prob=0.1,  # override → 0.1, not 0.7
+        max_iters=1,
+    )
+    await bfts_root.handler(inp, ctx)
+
+    assert len(ctx.start_workflow_calls) == 3
+    for call in ctx.start_workflow_calls:
+        ri = call["run_input"]
+        assert ri["debug_prob"] == 0.1
+        # Non-overridden fields fall through to the DB row.
+        assert ri["max_debug_depth"] == 4
+        assert ri["num_workers"] == 5
+        assert ri["metric_reducer"] == "min"
+
+
+@pytest.mark.asyncio
+async def test_handler_uses_resolved_num_drafts_for_fan_out_count(
+    monkeypatch,
+) -> None:
+    """``num_drafts`` is the fan-out count: N trees, each with one root.
+    The handler must use the resolved value (not the Input default) so a
+    None Input + DB-tuned value still controls the fan-out width."""
+    import bfts_root
+
+    monkeypatch.delenv("BFTS_NUM_DRAFTS", raising=False)
+    pool = MockPool(
+        fetchrow_result={
+            "debug_prob": 0.5,
+            "max_debug_depth": 3,
+            "num_drafts": 4,  # → 4 trees
+            "num_workers": 1,
+            "metric_reducer": "mean",
+        }
+    )
+    ctx = _RootCtx(pool=pool)
+
+    inp = Input(idea={"name": "toy"}, max_iters=1)  # num_drafts=None
+    await bfts_root.handler(inp, ctx)
+
+    assert len(ctx.start_workflow_calls) == 4
+    assert ctx.tools.bfts_executor.create_sandbox.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_handler_logs_resolved_search_config(monkeypatch) -> None:
+    """Observability: the resolved search-config snapshot must be logged
+    so operators can see what knobs each run actually used."""
+    import bfts_root
+
+    pool = MockPool(
+        fetchrow_result={
+            "debug_prob": 0.4,
+            "max_debug_depth": 2,
+            "num_drafts": 2,
+            "num_workers": 3,
+            "metric_reducer": "mean",
+            "created_by": "reflection",
+        }
+    )
+    ctx = _RootCtx(pool=pool)
+
+    await bfts_root.handler(Input(idea={"name": "toy"}, max_iters=1), ctx)
+
+    resolved_logs = [
+        kw for ev, kw in ctx.logs if ev == "bfts_root_resolved_search_config"
+    ]
+    assert len(resolved_logs) == 1
+    log_kw = resolved_logs[0]
+    assert log_kw["debug_prob"] == 0.4
+    assert log_kw["num_drafts"] == 2
+    assert log_kw["num_workers"] == 3
+    assert log_kw["metric_reducer"] == "mean"

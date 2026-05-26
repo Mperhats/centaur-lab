@@ -34,10 +34,13 @@ def test_input_defaults() -> None:
     from _bfts_config import resolve_llm_settings
 
     inp = Input(run_id="r1", parent_run_id=None, idea={"name": "x"})
-    assert inp.num_drafts == 3
-    assert inp.num_workers == 4
-    assert inp.max_debug_depth == 3
-    assert inp.debug_prob == 0.5
+    # Phase 4c.4: search-policy fields default to None so the resolver
+    # chain (Input → DB → env → default) still reaches lower tiers when
+    # the parent forwarded the unresolved (or absent) value.
+    assert inp.num_drafts is None
+    assert inp.num_workers is None
+    assert inp.max_debug_depth is None
+    assert inp.debug_prob is None
     assert inp.max_iters == 20
     assert inp.seed == 0
     assert inp.llm_api_key_secret is None

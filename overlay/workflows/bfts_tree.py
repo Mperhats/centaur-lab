@@ -48,10 +48,17 @@ class Input:
     run_id: str                       # this tree's run_id (matches workflow's own run_id)
     parent_run_id: str | None         # bfts_root run that started us
     idea: dict[str, Any] = field(default_factory=dict)
-    num_drafts: int = 3
-    num_workers: int = 4
-    max_debug_depth: int = 3
-    debug_prob: float = 0.5
+    # Search-policy fields default to None so the resolver chain
+    # (Input → BFTS_* env → module default) reaches lower tiers even
+    # when bfts_tree is started standalone (e.g. tests/debugging). The
+    # parent bfts_root forwards already-resolved values here so the
+    # tree's resolve_search_settings call is effectively a passthrough
+    # on the happy path; the tree intentionally does NOT re-read the
+    # bfts_hyperparams DB row (the parent owns that layer).
+    num_drafts: int | None = None
+    num_workers: int | None = None
+    max_debug_depth: int | None = None
+    debug_prob: float | None = None
     max_iters: int = 20
     seed: int = 0
     sandbox_id: str = ""              # pre-provisioned by bfts_root
@@ -131,7 +138,20 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         vlm_model=inp.vlm_model,
         llm_api_key_secret=inp.llm_api_key_secret,
     )
-    search = resolve_search_settings(metric_reducer=inp.metric_reducer)
+    # Phase 4c.4: tree resolves all five search-policy fields through
+    # the sync (no-DB) resolver. On the happy path bfts_root has
+    # already forwarded resolved values via Input, so this is a
+    # passthrough; for standalone tree invocations the env/default
+    # tier still applies. The DB layer lives on bfts_root only —
+    # re-reading bfts_hyperparams here would risk siblings disagreeing
+    # if the table was updated mid-run.
+    search = resolve_search_settings(
+        debug_prob=inp.debug_prob,
+        max_debug_depth=inp.max_debug_depth,
+        num_drafts=inp.num_drafts,
+        num_workers=inp.num_workers,
+        metric_reducer=inp.metric_reducer,
+    )
 
     rng = random.Random(inp.seed)
     pool = ctx._pool
@@ -143,19 +163,20 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             run_id=inp.run_id,
             parent_run_id=inp.parent_run_id,
             idea=inp.idea,
+            # Persist the resolved snapshot so replay reproduces the
+            # exact run config even if bfts_hyperparams / env changes
+            # between runs (Phase 4c.4 contract).
             config={
-                "num_drafts": inp.num_drafts,
-                "num_workers": inp.num_workers,
-                "max_debug_depth": inp.max_debug_depth,
-                "debug_prob": inp.debug_prob,
+                "num_drafts": search.num_drafts,
+                "num_workers": search.num_workers,
+                "max_debug_depth": search.max_debug_depth,
+                "debug_prob": search.debug_prob,
                 "max_iters": inp.max_iters,
                 "seed": inp.seed,
                 "llm_api_key_secret": llm.llm_api_key_secret,
                 "draft_model": llm.draft_model,
                 "feedback_model": llm.feedback_model,
                 "vlm_model": llm.vlm_model,
-                # Persist the resolved reducer so replay is deterministic
-                # regardless of env / Input changes between runs.
                 "metric_reducer": search.metric_reducer,
             },
             seed=inp.seed,
@@ -163,10 +184,10 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     )
 
     cfg = SearchConfig(
-        num_drafts=inp.num_drafts,
-        num_workers=inp.num_workers,
-        max_debug_depth=inp.max_debug_depth,
-        debug_prob=inp.debug_prob,
+        num_drafts=search.num_drafts,
+        num_workers=search.num_workers,
+        max_debug_depth=search.max_debug_depth,
+        debug_prob=search.debug_prob,
     )
 
     iters_used = 0

@@ -4,10 +4,14 @@ Centaur config layering (matches ``slack_sync`` and overlay tools):
 
 1. **Per-run** — optional fields on ``bfts_root.Input`` / ``bfts_tree.Input``
    (workflow POST ``run_input`` JSON).
-2. **Deployment** — ``api.extraEnv`` in ``values.local.yaml`` (Helm → API pod
+2. **Reflection-tuned** — ``bfts_hyperparams`` latest row, written by the
+   ``bfts_reflection_nightly`` workflow and consumed by
+   ``resolve_search_config`` (search-policy fields only; LLM resolution
+   has no DB layer because the deployment env owns model selection).
+3. **Deployment** — ``api.extraEnv`` in ``values.local.yaml`` (Helm → API pod
    env vars ``BFTS_*`` below).
-3. **Code defaults** — constants in this module.
-4. **Credentials** — ``secret("ANTHROPIC_API_KEY")`` / ``secret("OPENAI_API_KEY")``
+4. **Code defaults** — constants in this module.
+5. **Credentials** — ``secret("ANTHROPIC_API_KEY")`` / ``secret("OPENAI_API_KEY")``
    placeholders resolved by iron-proxy (never ``os.getenv`` for keys).
 
 There is no separate workflow YAML config file; discovery is Python modules
@@ -17,8 +21,12 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from _bfts_metric import DEFAULT_REDUCER, REDUCERS
+
+if TYPE_CHECKING:
+    import asyncpg
 
 DEFAULT_LLM_API_KEY_SECRET = "ANTHROPIC_API_KEY"
 DEFAULT_DRAFT_MODEL = "claude-sonnet-4-20250514"
@@ -91,37 +99,208 @@ def resolve_llm_settings(
 class SearchSettings:
     """Resolved BFTS search-policy configuration for one tree run.
 
-    Sibling of ``LLMSettings`` (not merged into it: search and LLM are
-    independently tunable knobs and future Phase 4c work — ``debug_prob``,
-    ``max_debug_depth``, ``num_workers`` — lands here alongside
-    ``metric_reducer`` without churning the LLM dataclass).
+    Sibling of ``LLMSettings``. All five fields land here so a single
+    snapshot governs a tree's selector (``debug_prob``,
+    ``max_debug_depth``, ``num_workers``), draft fan-out
+    (``num_drafts``), and node scoring (``metric_reducer``).
+    Reflection-tuned values flow in via ``resolve_search_config`` (DB
+    layer); ``resolve_search_settings`` is the no-DB sync sibling.
     """
 
+    debug_prob: float
+    max_debug_depth: int
+    num_drafts: int
+    num_workers: int
     metric_reducer: str
+
+
+def _validate_reducer(reducer: str) -> str:
+    if reducer not in REDUCERS:
+        raise ValueError(
+            f"unknown metric_reducer: {reducer!r} (valid: {', '.join(REDUCERS)})"
+        )
+    return reducer
 
 
 def resolve_search_settings(
     *,
+    debug_prob: float | None = None,
+    max_debug_depth: int | None = None,
+    num_drafts: int | None = None,
+    num_workers: int | None = None,
     metric_reducer: str | None = None,
 ) -> SearchSettings:
     """Merge per-run Input overrides, deployment env, and code defaults.
 
-    Resolution order matches ``resolve_llm_settings``: explicit Input
-    value → ``BFTS_METRIC_REDUCER`` env (from Helm ``api.extraEnv``) →
-    module default ``"mean"``. Unknown reducer strings raise
-    ``ValueError`` here (fail-fast at run start) instead of deep inside
-    the selector loop.
+    Resolution order per field: explicit Input value → ``BFTS_*`` env
+    (from Helm ``api.extraEnv``) → module default constant. No DB
+    layer; ``bfts_tree`` calls this when its parent has either
+    forwarded already-resolved values or the tree was started
+    standalone for testing/debugging. ``bfts_root`` instead uses
+    ``resolve_search_config`` to layer ``bfts_hyperparams`` between
+    Input and env. Unknown reducer strings (Input or env) raise
+    ``ValueError`` here (fail-fast at run start).
     """
-    resolved = (
-        metric_reducer
-        or os.getenv(ENV_METRIC_REDUCER)
-        or DEFAULT_METRIC_REDUCER
+    return SearchSettings(
+        debug_prob=_resolve_float(
+            debug_prob, ENV_DEBUG_PROB, DEFAULT_DEBUG_PROB
+        ),
+        max_debug_depth=_resolve_int(
+            max_debug_depth, ENV_MAX_DEBUG_DEPTH, DEFAULT_MAX_DEBUG_DEPTH
+        ),
+        num_drafts=_resolve_int(
+            num_drafts, ENV_NUM_DRAFTS, DEFAULT_NUM_DRAFTS
+        ),
+        num_workers=_resolve_int(
+            num_workers, ENV_NUM_WORKERS, DEFAULT_NUM_WORKERS
+        ),
+        metric_reducer=_validate_reducer(
+            _resolve_str(
+                metric_reducer, ENV_METRIC_REDUCER, DEFAULT_METRIC_REDUCER
+            )
+        ),
     )
-    if resolved not in REDUCERS:
-        raise ValueError(
-            f"unknown metric_reducer: {resolved!r} (valid: {', '.join(REDUCERS)})"
-        )
-    return SearchSettings(metric_reducer=resolved)
+
+
+async def resolve_search_config(
+    pool: asyncpg.Pool | None,
+    *,
+    debug_prob: float | None = None,
+    max_debug_depth: int | None = None,
+    num_drafts: int | None = None,
+    num_workers: int | None = None,
+    metric_reducer: str | None = None,
+) -> SearchSettings:
+    """Same resolution as ``resolve_search_settings`` plus a DB layer.
+
+    Per-field order: explicit Input value → ``bfts_hyperparams`` latest
+    row (written by the nightly reflection workflow) → ``BFTS_*`` env →
+    module default. ``bfts_root`` uses this so reflection-tuned values
+    feed forward to subsequent runs without operator intervention; the
+    Input → DB → env → default chain is the canonical config story.
+
+    A ``None`` pool skips the DB read (used by tests and any caller
+    without a workflow context). DB columns that are ``NULL`` (legal
+    per ``bfts_hyperparams.notes``-only updates) fall through to the
+    env/default tier per field; this matches the per-field layering
+    contract — a NULL DB value is "absent", not "use the default".
+    """
+    db_row: dict[str, Any] | None = None
+    if pool is not None:
+        from _bfts_hyperparams import latest_hyperparams
+
+        db_row = await latest_hyperparams(pool)
+
+    return SearchSettings(
+        debug_prob=_resolve_float_with_db(
+            debug_prob, db_row, "debug_prob",
+            ENV_DEBUG_PROB, DEFAULT_DEBUG_PROB,
+        ),
+        max_debug_depth=_resolve_int_with_db(
+            max_debug_depth, db_row, "max_debug_depth",
+            ENV_MAX_DEBUG_DEPTH, DEFAULT_MAX_DEBUG_DEPTH,
+        ),
+        num_drafts=_resolve_int_with_db(
+            num_drafts, db_row, "num_drafts",
+            ENV_NUM_DRAFTS, DEFAULT_NUM_DRAFTS,
+        ),
+        num_workers=_resolve_int_with_db(
+            num_workers, db_row, "num_workers",
+            ENV_NUM_WORKERS, DEFAULT_NUM_WORKERS,
+        ),
+        metric_reducer=_validate_reducer(
+            _resolve_str_with_db(
+                metric_reducer, db_row, "metric_reducer",
+                ENV_METRIC_REDUCER, DEFAULT_METRIC_REDUCER,
+            )
+        ),
+    )
+
+
+def _resolve_float(
+    input_val: float | None, env_var: str, default: float
+) -> float:
+    if input_val is not None:
+        return float(input_val)
+    env = os.getenv(env_var)
+    if env is not None:
+        return float(env)
+    return float(default)
+
+
+def _resolve_int(
+    input_val: int | None, env_var: str, default: int
+) -> int:
+    if input_val is not None:
+        return int(input_val)
+    env = os.getenv(env_var)
+    if env is not None:
+        return int(env)
+    return int(default)
+
+
+def _resolve_str(
+    input_val: str | None, env_var: str, default: str
+) -> str:
+    if input_val is not None:
+        return input_val
+    env = os.getenv(env_var)
+    if env is not None:
+        return env
+    return default
+
+
+def _db_value(
+    db_row: dict[str, Any] | None, key: str
+) -> Any | None:
+    if db_row is None:
+        return None
+    return db_row.get(key)
+
+
+def _resolve_float_with_db(
+    input_val: float | None,
+    db_row: dict[str, Any] | None,
+    db_key: str,
+    env_var: str,
+    default: float,
+) -> float:
+    if input_val is not None:
+        return float(input_val)
+    db_val = _db_value(db_row, db_key)
+    if db_val is not None:
+        return float(db_val)
+    return _resolve_float(None, env_var, default)
+
+
+def _resolve_int_with_db(
+    input_val: int | None,
+    db_row: dict[str, Any] | None,
+    db_key: str,
+    env_var: str,
+    default: int,
+) -> int:
+    if input_val is not None:
+        return int(input_val)
+    db_val = _db_value(db_row, db_key)
+    if db_val is not None:
+        return int(db_val)
+    return _resolve_int(None, env_var, default)
+
+
+def _resolve_str_with_db(
+    input_val: str | None,
+    db_row: dict[str, Any] | None,
+    db_key: str,
+    env_var: str,
+    default: str,
+) -> str:
+    if input_val is not None:
+        return input_val
+    db_val = _db_value(db_row, db_key)
+    if db_val is not None:
+        return str(db_val)
+    return _resolve_str(None, env_var, default)
 
 
 def resolve_llm_api_key(secret_name: str) -> str:

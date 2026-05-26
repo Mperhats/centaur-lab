@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 if TYPE_CHECKING:
     from api.workflow_engine import WorkflowContext
 
-from _bfts_config import resolve_llm_settings, resolve_search_settings
+from _bfts_config import resolve_llm_settings, resolve_search_config
 
 WORKFLOW_NAME = "bfts_root"
 
@@ -30,10 +30,17 @@ WORKFLOW_NAME = "bfts_root"
 @dataclass
 class Input:
     idea: dict[str, Any] = field(default_factory=dict)
-    num_drafts: int = 3
-    num_workers: int = 4
-    max_debug_depth: int = 3
-    debug_prob: float = 0.5
+    # Search-policy fields default to None so the Phase 4c.4 resolver
+    # chain (Input → bfts_hyperparams DB row → BFTS_* env → module
+    # default) actually reaches the lower tiers; non-None dataclass
+    # defaults would short-circuit every other layer and silence the
+    # nightly reflection workflow's tuning. Operators set these on a
+    # POST run_input only when they want to override the
+    # reflection-tuned values.
+    num_drafts: int | None = None
+    num_workers: int | None = None
+    max_debug_depth: int | None = None
+    debug_prob: float | None = None
     max_iters: int = 20
     seed_base: int = 0
     # Optional per-run LLM overrides. When omitted, deployment env (BFTS_* in
@@ -42,10 +49,10 @@ class Input:
     draft_model: str | None = None
     feedback_model: str | None = None
     vlm_model: str | None = None
-    # Optional per-run search-policy override. Resolves through
-    # _bfts_config.resolve_search_settings (Input → BFTS_METRIC_REDUCER
-    # env → "mean"). The resolved value is persisted into
-    # bfts_runs.config_json by bfts_tree so replay is deterministic.
+    # Optional per-run search-policy override. Resolves alongside the
+    # other search-policy fields through resolve_search_config; the
+    # resolved value is persisted into bfts_runs.config_json by
+    # bfts_tree so replay is deterministic.
     metric_reducer: str | None = None
 
 
@@ -67,7 +74,28 @@ async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
         vlm_model=inp.vlm_model,
         llm_api_key_secret=inp.llm_api_key_secret,
     )
-    search = resolve_search_settings(metric_reducer=inp.metric_reducer)
+    # Resolve search-policy once at the root and thread the resolved
+    # snapshot into every child tree's run_input so all siblings share
+    # one coherent config (Phase 4c.4). Layering: Input override →
+    # bfts_hyperparams latest row (reflection-tuned) → BFTS_* env →
+    # module default. The DB read is on the parent only; tree handlers
+    # treat the values as authoritative and don't re-resolve.
+    search = await resolve_search_config(
+        ctx._pool,
+        debug_prob=inp.debug_prob,
+        max_debug_depth=inp.max_debug_depth,
+        num_drafts=inp.num_drafts,
+        num_workers=inp.num_workers,
+        metric_reducer=inp.metric_reducer,
+    )
+    ctx.log(
+        "bfts_root_resolved_search_config",
+        debug_prob=search.debug_prob,
+        max_debug_depth=search.max_debug_depth,
+        num_drafts=search.num_drafts,
+        num_workers=search.num_workers,
+        metric_reducer=search.metric_reducer,
+    )
 
     # Every Sandbox we successfully create lands here BEFORE start_workflow
     # is attempted, so a start_workflow failure (which leaves the CR behind)
@@ -79,7 +107,7 @@ async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
     body_succeeded = False
 
     try:
-        for i in range(inp.num_drafts):
+        for i in range(search.num_drafts):
             sandbox_id = _sandbox_id(run_id=ctx.run_id, tree_idx=i)
             await ctx.step(
                 f"create_sandbox_{i}",
@@ -99,9 +127,9 @@ async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
                     "parent_run_id": ctx.run_id,
                     "idea": inp.idea,
                     "num_drafts": 1,    # each child tree has 1 root; root-level num_drafts = num trees
-                    "num_workers": inp.num_workers,
-                    "max_debug_depth": inp.max_debug_depth,
-                    "debug_prob": inp.debug_prob,
+                    "num_workers": search.num_workers,
+                    "max_debug_depth": search.max_debug_depth,
+                    "debug_prob": search.debug_prob,
                     "max_iters": inp.max_iters,
                     "seed": inp.seed_base + i,
                     "sandbox_id": sandbox_id,
