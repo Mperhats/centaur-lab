@@ -18,6 +18,12 @@ log = logging.getLogger(__name__)
 
 DEFAULT_PAPER_FIELDS = "title,authors,year,abstract,citationCount,url,openAccessPdf"
 DEFAULT_REFERENCE_FIELDS = "title,authors,year,citationCount,url"
+# Sakana's writeup pipeline (mirrored in overlay/workflows/gather_citations.py)
+# needs S2-provided BibTeX strings, returned under the ``citationStyles`` field
+# as ``{"bibtex": "@article{...}"}``. Kept narrow on purpose — abstract /
+# openAccessPdf aren't needed for citation rendering and would inflate every
+# response.
+BIBTEX_PAPER_FIELDS = "title,authors,year,citationCount,url,citationStyles"
 
 DEFAULT_SEARCH_LIMIT = 10
 MAX_SEARCH_LIMIT = 50
