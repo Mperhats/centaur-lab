@@ -1,0 +1,322 @@
+"""Workflow: ideation — research topic to structured ``idea`` dict (Phase 4d.2).
+
+Turns a one-sentence research topic into a structured ``idea`` dict
+that ``bfts_root.Input.idea`` consumes directly. Port of Sakana's
+``.scientist/ai_scientist/perform_ideation_temp_free.py`` (research 02
+§Outer loop):
+
+1. Search Semantic Scholar for ``seed_paper_limit`` seed papers grounding
+   the topic in real literature.
+2. Call the draft LLM with a ``finalize_idea`` function spec so the model
+   emits the structured proposal directly (avoids the regex-based
+   ``ACTION:`` / ``ARGUMENTS:`` parsing Sakana uses for OpenAI-only
+   text-mode tools — our ``_bfts_llm.call_with_function`` works against
+   both Anthropic and OpenAI shapes).
+3. Optionally re-invoke the LLM ``critic_retries`` times for refinement;
+   each retry sees the prior draft and a "sharpen the hypothesis" prompt.
+
+Returned envelope is ``{"idea": <dict>, "seed_papers": [<paperId>, ...]}``
+so a downstream ``bfts_root`` POST can pass ``run_input["idea"]`` straight
+through and the citation step (Phase 4d.3) can key its lookups on the
+``paperId`` strings.
+
+``SCHEDULE`` is the empty dict: ideation is user-triggered via a manual
+POST to ``/workflows/runs``; a populated SCHEDULE would burn LLM budget
+firing orphan runs on a timer with no topic.
+"""
+from __future__ import annotations
+
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+if TYPE_CHECKING:
+    from api.workflow_engine import WorkflowContext
+
+from _bfts_config import resolve_llm_api_key, resolve_llm_settings
+from _bfts_llm import LLMCall, call_with_function
+
+WORKFLOW_NAME = "ideation"
+SCHEDULE: dict[str, Any] = {}
+
+_DEFAULT_SEED_PAPER_LIMIT = 10
+# Draft-temp matches ``_bfts_expand._DRAFT_TEMP`` (creative generation);
+# critic-temp drops to feedback-temp so refinements stay close to the
+# original proposal.
+_IDEATION_TEMP = 1.0
+_CRITIC_TEMP = 0.5
+_SEED_ABSTRACT_CHARS = 600
+
+# Full Sakana ``FinalizeIdea`` schema. The plan only requires the first
+# four downstream; the rest are emitted so the ``_bfts_expand`` prompt
+# (which renders the entire idea dict as markdown headers) sees the same
+# fields Sakana's ``parallel_agent`` does. The tests assert the loose
+# subset so a future schema change can drop optional fields without
+# churning every test.
+_REQUIRED_IDEA_FIELDS: tuple[str, ...] = (
+    "Name",
+    "Title",
+    "Short Hypothesis",
+    "Related Work",
+    "Abstract",
+    "Experiments",
+    "Risk Factors and Limitations",
+)
+
+
+@dataclass
+class Input:
+    """User-triggered input for the ``ideation`` workflow.
+
+    ``topic`` is the only required field; the LLM-override fields default
+    to ``None`` so ``resolve_llm_settings`` reaches the BFTS_* env / module
+    defaults rather than being short-circuited by a hardcoded default.
+    """
+
+    topic: str
+    seed_paper_limit: int = _DEFAULT_SEED_PAPER_LIMIT
+    critic_retries: int = 0
+    draft_model: str | None = None
+    llm_api_key_secret: str | None = None
+
+
+# Mirrors Sakana's FinalizeIdea schema verbatim
+# (.scientist/ai_scientist/perform_ideation_temp_free.py:26-39). Field
+# descriptions are condensed but preserve the constraints the prompt
+# relies on (lowercase ``Name`` with underscores, conference-format
+# abstract, feasible experiments).
+_IDEA_FUNCTION_SPEC: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "finalize_idea",
+        "description": "Emit a structured research proposal as a single JSON object.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "Name": {
+                    "type": "string",
+                    "description": (
+                        "Short descriptor. Lowercase, no spaces, underscores allowed."
+                    ),
+                },
+                "Title": {
+                    "type": "string",
+                    "description": "Catchy informative title for the proposal.",
+                },
+                "Short Hypothesis": {
+                    "type": "string",
+                    "description": (
+                        "Concise main hypothesis or research question; justify "
+                        "why this is the best setting to investigate it."
+                    ),
+                },
+                "Related Work": {
+                    "type": "string",
+                    "description": (
+                        "Most relevant related work and how the proposal "
+                        "distinguishes from it (not a trivial extension)."
+                    ),
+                },
+                "Abstract": {
+                    "type": "string",
+                    "description": "Conference-format abstract (~250 words).",
+                },
+                "Experiments": {
+                    "type": "string",
+                    "description": (
+                        "Experiments to validate the proposal — specific, "
+                        "feasible at academic scale, with evaluation metrics."
+                    ),
+                },
+                "Risk Factors and Limitations": {
+                    "type": "string",
+                    "description": "Potential risks and limitations of the proposal.",
+                },
+            },
+            "required": list(_REQUIRED_IDEA_FIELDS),
+        },
+    },
+}
+
+
+_SYSTEM_PROMPT = (
+    "You are an experienced AI researcher proposing high-impact research "
+    "ideas resembling exciting grant proposals. Be very creative and think "
+    "out of the box; each proposal should stem from a simple and elegant "
+    "question or observation. Clearly distinguish from existing literature. "
+    "Ensure proposals do not require resources beyond what an academic lab "
+    "could afford, and would lead to papers publishable at top ML conferences."
+)
+
+
+def _format_seed_papers(papers: list[dict[str, Any]]) -> str:
+    """Render seed papers as a bullet list the LLM can ground on.
+
+    Truncates abstracts to ``_SEED_ABSTRACT_CHARS`` so a 10-paper search
+    stays well under prompt budgets even when S2 returns long abstracts.
+    """
+    if not papers:
+        return "(no seed literature available)"
+    lines: list[str] = []
+    for paper in papers:
+        title = paper.get("title") or "(untitled)"
+        year = paper.get("year") or "?"
+        abstract = (paper.get("abstract") or "").strip()
+        if len(abstract) > _SEED_ABSTRACT_CHARS:
+            abstract = abstract[:_SEED_ABSTRACT_CHARS] + "…"
+        lines.append(f"- ({year}) {title}\n  {abstract}")
+    return "\n".join(lines)
+
+
+def _ideation_prompt(*, topic: str, papers: list[dict[str, Any]]) -> str:
+    return (
+        _SYSTEM_PROMPT
+        + "\n\n# Research topic\n\n"
+        + topic
+        + "\n\n# Seed literature\n\n"
+        + _format_seed_papers(papers)
+        + "\n\n# Task\n\n"
+        "Propose ONE novel research idea grounded in the seed literature "
+        "above but clearly distinguished from it. Invoke the "
+        "`finalize_idea` function with the structured proposal. Ensure "
+        "every required field is populated and that `Name` is lowercase "
+        "with underscores (no spaces)."
+    )
+
+
+def _critique_prompt(*, topic: str, idea: dict[str, Any], round_index: int) -> str:
+    rendered = "\n\n".join(
+        f"## {key}\n{idea.get(key, '')}" for key in _REQUIRED_IDEA_FIELDS
+    )
+    return (
+        _SYSTEM_PROMPT
+        + "\n\n# Research topic\n\n"
+        + topic
+        + "\n\n# Draft proposal (round "
+        + str(round_index + 1)
+        + ")\n\n"
+        + rendered
+        + "\n\n# Task\n\n"
+        "Carefully consider the quality, novelty, and feasibility of the "
+        "proposal above. Refine it: sharpen the hypothesis, verify the "
+        "experiments are feasible at academic scale, and improve novelty "
+        "vs. the existing literature. Stick to the spirit of the original "
+        "idea unless there are glaring issues. Invoke `finalize_idea` "
+        "with the revised proposal."
+    )
+
+
+async def _synthesize(
+    *,
+    api_key: str,
+    draft_model: str,
+    topic: str,
+    papers: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return await call_with_function(
+        LLMCall(
+            model=draft_model,
+            temperature=_IDEATION_TEMP,
+            api_key=api_key,
+            prompt=_ideation_prompt(topic=topic, papers=papers),
+        ),
+        function_spec=_IDEA_FUNCTION_SPEC,
+    )
+
+
+async def _critique(
+    *,
+    api_key: str,
+    draft_model: str,
+    topic: str,
+    idea: dict[str, Any],
+    round_index: int,
+) -> dict[str, Any]:
+    return await call_with_function(
+        LLMCall(
+            model=draft_model,
+            temperature=_CRITIC_TEMP,
+            api_key=api_key,
+            prompt=_critique_prompt(
+                topic=topic, idea=idea, round_index=round_index
+            ),
+        ),
+        function_spec=_IDEA_FUNCTION_SPEC,
+    )
+
+
+def _seed_paper_ids(papers: list[dict[str, Any]]) -> list[str]:
+    """Extract the S2 paperIds in result order.
+
+    Silently skips entries without a ``paperId`` — S2 always returns it
+    for ``/paper/search`` regardless of ``fields``, but a future S2
+    response shape change shouldn't crash ideation.
+    """
+    out: list[str] = []
+    for paper in papers or []:
+        if not isinstance(paper, dict):
+            continue
+        pid = paper.get("paperId")
+        if pid:
+            out.append(str(pid))
+    return out
+
+
+async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
+    if not inp.topic or not inp.topic.strip():
+        msg = "topic cannot be empty"
+        raise ValueError(msg)
+
+    llm = resolve_llm_settings(
+        draft_model=inp.draft_model,
+        llm_api_key_secret=inp.llm_api_key_secret,
+    )
+    api_key = resolve_llm_api_key(llm.llm_api_key_secret)
+    topic = inp.topic.strip()
+
+    papers = await ctx.step(
+        "seed_search",
+        lambda: ctx.tools.semantic_scholar.search_papers(
+            query=topic, limit=inp.seed_paper_limit
+        ),
+    )
+
+    idea = await ctx.step(
+        "synthesize_idea",
+        lambda: _synthesize(
+            api_key=api_key,
+            draft_model=llm.draft_model,
+            topic=topic,
+            papers=papers,
+        ),
+    )
+
+    # Each retry needs a unique deterministic step name so workflow
+    # replay maps cached step rows back to the right call. The
+    # critic-retries=0 default skips this loop entirely (opt-in only).
+    retries = max(0, inp.critic_retries)
+    for round_index in range(retries):
+        idea = await ctx.step(
+            f"validate_idea_{round_index}",
+            lambda current=idea, i=round_index: _critique(
+                api_key=api_key,
+                draft_model=llm.draft_model,
+                topic=topic,
+                idea=current,
+                round_index=i,
+            ),
+        )
+
+    seed_paper_ids = _seed_paper_ids(papers)
+
+    ctx.log(
+        "ideation_completed",
+        topic=topic,
+        seed_papers=len(seed_paper_ids),
+        draft_model=llm.draft_model,
+        critic_retries=retries,
+    )
+    return {"idea": idea, "seed_papers": seed_paper_ids}
