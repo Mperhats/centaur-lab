@@ -19,7 +19,7 @@ from centaur_lab.paper_fulltext import (
     upsert_paper_archive,
 )
 from centaur_sdk import secret
-from semantic_scholar import pdf_fetch, pdf_parse
+from tools.semantic_scholar import pdf_fetch, pdf_parse
 
 log = logging.getLogger(__name__)
 
