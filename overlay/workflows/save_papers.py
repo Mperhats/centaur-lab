@@ -36,8 +36,9 @@ from typing import TYPE_CHECKING, Any, Literal
 if TYPE_CHECKING:
     from api.workflow_engine import WorkflowContext
 
-from semantic_scholar import projections
 from semantic_scholar.client import SemanticScholarClient
+from semantic_scholar.projections.brief import build_brief_document, render_brief
+from semantic_scholar.projections.paper import build_paper_document
 from semanticscholar.Paper import Paper
 
 try:
@@ -208,7 +209,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             continue
 
         saved_papers.append(paper)
-        document = projections.build_paper_document(paper, query=inp.query)
+        document = build_paper_document(paper, query=inp.query)
         _observe_doc_size(document)
         action = await _upsert_document(ctx._pool, document)
         _record_doc_change(document, action)
@@ -236,8 +237,8 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
 
     if saved_papers:
         brief_query = _brief_query_for_save(inp.paper_ids, inp.query)
-        markdown = projections.render_brief(brief_query, None, saved_papers)
-        brief_doc = projections.build_brief_document(
+        markdown = render_brief(brief_query, None, saved_papers)
+        brief_doc = build_brief_document(
             brief_query, None, len(saved_papers), saved_papers, markdown
         )
         _observe_doc_size(brief_doc)
@@ -250,7 +251,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         # link changed (None → brief_doc["document_id"]).
         for paper in saved_papers:
             try:
-                paper_doc = projections.build_paper_document(
+                paper_doc = build_paper_document(
                     paper,
                     query=brief_query,
                     parent_document_id=brief_doc["document_id"],

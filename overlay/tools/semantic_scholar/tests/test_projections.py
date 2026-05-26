@@ -1,8 +1,10 @@
-"""Unit tests for ``semantic_scholar.projections`` — pure projection functions.
+"""Unit tests for the ``semantic_scholar.projections`` package — pure projections.
 
-Covers the projection helpers at their tool-scoped home plus the
-``build_paper_archive_row`` projection that the workflow handler
-consumes when producing a ``paper_archives`` row.
+Covers the four projection strategies (``paper``, ``fulltext``,
+``archive``, ``brief``) under one file. The strategies live in separate
+modules to mirror the ``pdf/fetch/`` and ``pdf/parse/`` layout, but
+they share the same content_hash contract and ``Paper`` fixtures, so a
+single test module keeps the shared setup once.
 """
 
 from __future__ import annotations
@@ -13,15 +15,17 @@ from typing import Any
 import pytest
 from semanticscholar.Paper import Paper
 
-from semantic_scholar.projections import (
-    FULLTEXT_BODY_MAX_BYTES,
+from semantic_scholar.projections.archive import build_paper_archive_row
+from semantic_scholar.projections.brief import (
     brief_id_for,
     build_brief_document,
-    build_fulltext_document,
-    build_paper_archive_row,
-    build_paper_document,
     render_brief,
 )
+from semantic_scholar.projections.fulltext import (
+    FULLTEXT_BODY_MAX_BYTES,
+    build_fulltext_document,
+)
+from semantic_scholar.projections.paper import build_paper_document
 from semantic_scholar.utils import content_hash
 
 _RECENCY_TOLERANCE = timedelta(seconds=30)

@@ -47,7 +47,10 @@ from semanticscholar.Paper import Paper
 from semanticscholar.SemanticScholarException import SemanticScholarException
 
 from centaur_sdk import secret
-from semantic_scholar import projections
+from semantic_scholar.projections.archive import build_paper_archive_row
+from semantic_scholar.projections.brief import build_brief_document, render_brief
+from semantic_scholar.projections.fulltext import build_fulltext_document
+from semantic_scholar.projections.paper import build_paper_document
 from semantic_scholar.utils import derive_pdf_url
 
 log = logging.getLogger(__name__)
@@ -285,8 +288,8 @@ class SemanticScholarClient:
             log.warning("semantic_scholar research_brief search failed", exc_info=True)
             return {"status": "error", "query": normalized_query, "error": str(exc)}
 
-        markdown = projections.render_brief(normalized_query, year_from, papers)
-        brief_doc = projections.build_brief_document(
+        markdown = render_brief(normalized_query, year_from, papers)
+        brief_doc = build_brief_document(
             normalized_query, year_from, clamped_limit, papers, markdown
         )
 
@@ -294,7 +297,7 @@ class SemanticScholarClient:
         for paper in papers:
             try:
                 paper_docs.append(
-                    projections.build_paper_document(
+                    build_paper_document(
                         paper,
                         query=normalized_query,
                         parent_document_id=brief_doc["document_id"],
@@ -425,8 +428,8 @@ class SemanticScholarClient:
                 "error": str(exc),
             }
 
-        paper_doc = projections.build_paper_document(paper)
-        fulltext_doc = projections.build_fulltext_document(
+        paper_doc = build_paper_document(paper)
+        fulltext_doc = build_fulltext_document(
             paper,
             parsed_text=parsed_text,
             parser_used=parser_used,
@@ -434,7 +437,7 @@ class SemanticScholarClient:
             pdf_sha256=pdf_sha256,
             source_url=url,
         )
-        archive_row = projections.build_paper_archive_row(
+        archive_row = build_paper_archive_row(
             paper,
             data=data,
             mime=mime,
