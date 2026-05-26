@@ -22,7 +22,10 @@ try:
     from api.vm_metrics import (
         record_company_context_documents_changed as _record_changed,
     )
-except ImportError:  # pragma: no cover - exercised outside the API pod
+except ImportError:
+    # The api package is on sys.path inside the production API pod but not
+    # during local pytest runs; fall back to no-op stubs so workflow code
+    # can call emit_document_metrics unconditionally.
     def _observe_size(source: str, source_type: str, chars: int) -> None:
         return None
 
