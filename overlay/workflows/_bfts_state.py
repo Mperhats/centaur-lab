@@ -180,7 +180,8 @@ async def list_nodes_for_run(
                n.plan, n.code, n.term_out_json, n.exec_time_seconds, n.exc_type,
                n.exc_info_json, n.exc_stack_json, n.metric_json, n.is_buggy,
                n.is_buggy_plots, n.debug_depth, n.analysis, n.vlm_feedback_summary,
-               (SELECT COUNT(*) FROM bfts_nodes c WHERE c.parent_node_id = n.node_id)
+               (SELECT COUNT(*) FROM bfts_nodes c
+                   WHERE c.parent_node_id = n.node_id AND c.run_id = n.run_id)
                    AS child_count
         FROM bfts_nodes n
         WHERE n.run_id = $1

@@ -85,14 +85,20 @@ def test_max_debug_depth_excludes_node() -> None:
 
 
 def test_buggy_internal_node_not_selected_for_debug() -> None:
-    """Sakana's selector debugs only buggy LEAVES — a buggy node that
-    already has a child must not appear in ``_buggy_leaf_nodes`` and must
-    not be picked for re-debugging.
+    """Sakana's selector debugs only buggy LEAVES — a buggy internal node
+    whose subtree has already been expanded (one good child) must not
+    appear in ``_buggy_leaf_nodes`` and must not be picked for re-debugging.
 
-    Fixture is intentionally shaped as DAO rows + run through ``_to_noderef``
-    so the round-trip covers the ``is_leaf`` computation (the prior bug:
-    ``_to_noderef`` hardcoded ``is_leaf=True`` for every row, defeating the
-    selector's leaf filter).
+    Fixture: parent is buggy but has a good (non-buggy) child. Pre-fix,
+    ``_to_noderef`` hardcoded ``is_leaf=True`` for every row so
+    ``_buggy_leaf_nodes`` returned ``[parent]`` and the selector — with
+    ``debug_prob=1.0`` and only one buggy candidate — deterministically
+    picked the parent for re-debug. Post-fix, ``child_count=1`` flips
+    ``is_leaf`` to ``False`` on the parent, leaving ``_buggy_leaf_nodes``
+    empty and forcing the selector to fall through to improving the good
+    child. The DAO-row → ``_to_noderef`` → ``select_next`` round-trip is
+    intentional so both halves of the fix (DAO column + ref construction)
+    are covered.
     """
     parent_row = {
         "node_id": "aaaa-parent",
@@ -107,8 +113,8 @@ def test_buggy_internal_node_not_selected_for_debug() -> None:
     child_row = {
         "node_id": "bbbb-child",
         "parent_node_id": "aaaa-parent",
-        "is_buggy": True,
-        "is_buggy_plots": None,
+        "is_buggy": False,
+        "is_buggy_plots": False,
         "debug_depth": 1,
         "metric_json": None,
         "stage_name": "debug",
@@ -124,9 +130,11 @@ def test_buggy_internal_node_not_selected_for_debug() -> None:
     cfg = SearchConfig(num_drafts=1, num_workers=1, max_debug_depth=3, debug_prob=1.0)
     selected = select_next(nodes=[parent_ref, child_ref], cfg=cfg, rng=random.Random(0))
 
-    # The internal parent must NEVER be picked for debug. The selector may
-    # legitimately fall through to draft (None) when no buggy leaf is
-    # eligible after filtering; only the parent is forbidden.
+    # The internal parent must NEVER be picked for debug. With the child
+    # flipped to good, pre-fix this assertion failed deterministically:
+    # ``_buggy_leaf_nodes`` saw the parent as a leaf (the hardcoded bug)
+    # and ``debug_prob=1.0`` plus a single candidate forced the selector
+    # to return [parent].
     assert all(
         sel is None or sel.node_id != parent_ref.node_id for sel in selected
     ), f"internal buggy node was selected for debug: {selected}"
