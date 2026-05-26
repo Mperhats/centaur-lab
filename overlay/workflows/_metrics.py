@@ -1,5 +1,10 @@
 """Wrapper around api.vm_metrics that degrades to no-ops outside the API pod.
 
+The leading underscore mirrors the workflow loader's ``startswith("_")``
+skip convention and signals that this module is not a workflow handler.
+Imported by sibling workflow modules (``save_papers.py``,
+``research_brief.py``) at every ``upsert_document`` call site.
+
 The workflow loader runs inside the API pod where ``api.vm_metrics`` resolves
 cleanly, so production calls land in the real Prometheus counters. Our local
 unit tests run without the ``api`` package on sys.path, so the fallback stubs

@@ -43,20 +43,6 @@ _PAPER_173BA: dict[str, Any] = {
 }
 
 
-_PAPER_OTHER: dict[str, Any] = {
-    "paperId": "ffffffffffffffffffffffffffffffffffffffff",
-    "title": "Another Paper",
-    "abstract": "Another abstract.",
-    "year": 2024,
-    "authors": [{"authorId": "2", "name": "Jane Doe"}],
-    "venue": "arXiv",
-    "url": "https://example.com/other",
-    "externalIds": {},
-    "citationCount": 1,
-    "referenceCount": 5,
-}
-
-
 @pytest.mark.asyncio
 async def test_save_papers_writes_paper_row_with_full_shape(
     db_pool: Any, monkeypatch: pytest.MonkeyPatch
