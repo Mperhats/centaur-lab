@@ -23,7 +23,9 @@ from semantic_scholar.client import SemanticScholarClient
 
 def _install_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATABASE_URL", "postgres://test/db")
-    monkeypatch.setattr("semantic_scholar.client.secret", lambda _k, default="": default)
+    monkeypatch.setattr(
+        "semantic_scholar.client.secret", lambda _k, default="": default, raising=True
+    )
 
 
 def _install_search_papers(
@@ -41,7 +43,7 @@ def _install_search_papers(
             raise exc
         return list(papers or [])
 
-    monkeypatch.setattr(SemanticScholarClient, "search_papers", _search_papers)
+    monkeypatch.setattr(SemanticScholarClient, "search_papers", _search_papers, raising=True)
     return calls
 
 
@@ -63,8 +65,8 @@ def _install_metrics(monkeypatch: pytest.MonkeyPatch) -> _MetricsRecorder:
     import centaur_lab.brief as brief_module
 
     recorder = _MetricsRecorder()
-    monkeypatch.setattr(brief_module, "observe_document_size", recorder.observe)
-    monkeypatch.setattr(brief_module, "record_document_change", recorder.record)
+    monkeypatch.setattr(brief_module, "observe_document_size", recorder.observe, raising=True)
+    monkeypatch.setattr(brief_module, "record_document_change", recorder.record, raising=True)
     return recorder
 
 
@@ -116,7 +118,7 @@ def test_research_brief_non_positive_limit_returns_error(monkeypatch: pytest.Mon
 def test_research_brief_no_database_url_returns_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """Missing ``DATABASE_URL`` returns the env error envelope and skips I/O."""
     monkeypatch.delenv("DATABASE_URL", raising=False)
-    monkeypatch.setattr("semantic_scholar.client.secret", lambda _key, default="": "")
+    monkeypatch.setattr("semantic_scholar.client.secret", lambda _key, default="": "", raising=True)
     connect_calls = install_mock_conn(monkeypatch, MockAsyncpgConn())
     search_calls = _install_search_papers(monkeypatch, [])
 
@@ -130,6 +132,28 @@ def test_research_brief_no_database_url_returns_error(monkeypatch: pytest.Monkey
     assert search_calls == []
 
 
+def test_research_brief_clamps_limit_above_max(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``limit`` is clamped to ``MAX_RESEARCH_BRIEF_LIMIT`` before reaching S2.
+
+    The workflow's input schema bounds limit to 1..100, but the client clamps
+    further to 1..``MAX_RESEARCH_BRIEF_LIMIT`` (currently 20) to keep the
+    S2 fan-out and per-brief LLM/index budget bounded. Asserts the *clamped*
+    value reaches ``search_papers``, not the raw user input.
+    """
+    from semantic_scholar.client import MAX_RESEARCH_BRIEF_LIMIT
+
+    _install_database_url(monkeypatch)
+    install_mock_conn(monkeypatch, MockAsyncpgConn())
+    search_calls = _install_search_papers(monkeypatch, [])
+
+    result = _client().research_brief("anything", limit=100)
+
+    assert result["status"] == "completed"
+    assert search_calls == [
+        {"query": "anything", "limit": MAX_RESEARCH_BRIEF_LIMIT, "year_from": None}
+    ]
+
+
 def test_research_brief_persists_brief_and_papers_with_parent_link(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -138,13 +162,15 @@ def test_research_brief_persists_brief_and_papers_with_parent_link(
     mock = MockAsyncpgConn()
     install_mock_conn(monkeypatch, mock)
     papers = [_paper("p1"), _paper("p2"), _paper("p3")]
-    _install_search_papers(monkeypatch, papers)
+    search_calls = _install_search_papers(monkeypatch, papers)
 
-    result = _client().research_brief("active inference")
+    result = _client().research_brief("active inference", limit=3, year_from=2020)
 
     assert result["status"] == "completed"
     brief_document_id = result["brief_document_id"]
     assert brief_document_id
+
+    assert search_calls == [{"query": "active inference", "limit": 3, "year_from": 2020}]
 
     # 1 brief + 3 paper upserts = 4 execute calls.
     assert len(mock.execute_calls) == 4
