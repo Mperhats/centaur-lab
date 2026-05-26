@@ -573,3 +573,8 @@ async def _sleep(seconds: float) -> None:
     import asyncio
 
     await asyncio.sleep(seconds)
+
+
+def _client() -> BFTSExecutor:
+    """Centaur tool factory: invoked once per API pod at discovery time."""
+    return BFTSExecutor(sandbox_api=_KubernetesSandboxAPI())
