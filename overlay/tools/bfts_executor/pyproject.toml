@@ -5,7 +5,7 @@ version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
     "kubernetes-asyncio>=29.0.0",
-    "httpx>=0.27.0",
+    "aiohttp>=3.9.0",
     "dataclasses-json>=0.6.0",
 ]
 

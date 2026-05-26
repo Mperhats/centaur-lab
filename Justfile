@@ -331,3 +331,11 @@ bfts-platform-smoke:
     fi
     echo "unexpected exec output: '${out}'" >&2
     exit 1
+
+# Build the bfts-executor:latest image used by Sandbox pods the BFTS
+# tool spawns. Docker Desktop's k8s shares the host image cache so
+# pullPolicy: IfNotPresent finds the local tag without a registry.
+# See docs/superpowers/plans/2026-05-25-bfts-on-centaur.md (Phase 1).
+[group('bfts')]
+bfts-build-executor:
+    docker build -f overlay/Dockerfile.bfts-executor -t bfts-executor:latest overlay
