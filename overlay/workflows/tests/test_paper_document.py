@@ -145,6 +145,35 @@ async def test_upsert_document_branches_across_insert_update_noop() -> None:
 
 
 @pytest.mark.asyncio
+async def test_upsert_document_respects_document_parent_when_kwarg_omitted() -> None:
+    """Locks the contract that ``upsert_document`` reads
+    ``document["parent_document_id"]`` when the kwarg is omitted.
+
+    ``build_fulltext_document`` (paper_fulltext.py) requires
+    ``parent_document_id: str`` and bakes it into the returned dict, then
+    ``_archive_paper_async`` calls ``upsert_document(pool, fulltext_doc)``
+    without re-passing the value. Without this fallback the paper_fulltext
+    row's parent linkage is silently NULLed and the compound content_hash
+    diverges from what was first persisted. A previous P1 audit mistakenly
+    flagged the fallback branch as dead — the audit had stale mental
+    state from before the archive flow landed (commit 5ae216c). This test
+    prevents the same misread next time.
+    """
+    doc = build_paper_document(_sample_paper())
+    doc["parent_document_id"] = "semantic_scholar:paper:parent"
+    pool = MockPool(existing_hash=None)
+
+    result = await upsert_document(pool, doc)
+
+    assert result == "inserted"
+    assert len(pool.execute_calls) == 1
+    _query, args = pool.execute_calls[0]
+    assert args[EXECUTE_ARG_INDEX["parent_document_id"]] == "semantic_scholar:paper:parent"
+    expected_hash = _content_hash(doc["content_hash"], "semantic_scholar:paper:parent")
+    assert args[EXECUTE_ARG_INDEX["content_hash"]] == expected_hash
+
+
+@pytest.mark.asyncio
 async def test_upsert_document_relinks_parent_when_content_unchanged() -> None:
     """A paper saved with no parent should be re-parented when later
     encountered as part of a research brief — the intrinsic content didn't
