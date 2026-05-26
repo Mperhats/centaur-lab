@@ -195,7 +195,7 @@ def research_brief_cmd(
     """Build and persist a research brief on a topic.
 
     Calls SemanticScholarClient.research_brief, which searches Semantic
-    Scholar, renders a Markdown lit-review, and writes the brief plus
+    Scholar, renders a Markdown lit review, and writes the brief plus
     its citing papers to company_context_documents for future RAG
     retrieval. Idempotent on (query, year_from) — re-running with the
     same inputs updates the existing rows in place.
