@@ -17,12 +17,15 @@
 # Submodules — vendored upstream source trees, never shipped in the
 # overlay image. ``.centaur`` is the base platform; ``.scientist`` is
 # AI-Scientist-v2 (the BFTS reference implementation we port from).
-# ``centaur_sdk`` is a dev-only repo-root symlink into
+# ``packages/centaur_sdk`` is a dev-only symlink into
 # ``.centaur/centaur_sdk`` (see pyproject.toml); the API pod has its
-# own ``/app/centaur_sdk/`` so the overlay must not ship one.
+# own ``/app/centaur_sdk/`` baked into its image so the overlay must
+# not ship a copy. ``packages/bfts_sdk`` IS overlay payload and is
+# shipped — it lands at ``/app/overlay/org/packages/bfts_sdk`` and
+# resolves through the overlay root that TOOL_DIRS puts on sys.path.
 .centaur
 .scientist
-centaur_sdk
+packages/centaur_sdk
 
 # Dev/ops directories at the repo root that aren't part of the overlay.
 # ``db``, ``clusters``, ``infra``, ``cloudflared``, and ``docs`` were

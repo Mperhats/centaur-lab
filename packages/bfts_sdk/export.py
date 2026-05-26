@@ -12,7 +12,7 @@ from typing import Any
 
 import asyncpg
 
-from bfts.metric import DEFAULT_REDUCER, ScoreResult, score
+from packages.bfts_sdk.metric import DEFAULT_REDUCER, ScoreResult, score
 
 
 def select_best(

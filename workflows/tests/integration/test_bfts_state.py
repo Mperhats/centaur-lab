@@ -14,7 +14,7 @@ import asyncpg
 import pytest
 import pytest_asyncio
 
-from bfts.state import insert_node, insert_run, list_nodes_for_run, update_node_metric
+from packages.bfts_sdk.state import insert_node, insert_run, list_nodes_for_run, update_node_metric
 
 pytestmark = pytest.mark.skipif(
     not os.getenv("CENTAUR_TEST_DATABASE_URL"),

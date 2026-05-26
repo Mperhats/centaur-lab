@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from api.workflow_engine import WorkflowContext
 
-from bfts.config import resolve_llm_settings, resolve_search_config
+from packages.bfts_sdk.config import resolve_llm_settings, resolve_search_config
 
 WORKFLOW_NAME = "bfts_root"
 

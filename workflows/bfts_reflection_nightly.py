@@ -26,14 +26,14 @@ if TYPE_CHECKING:
 
 import asyncpg
 
-from bfts.config import (
+from packages.bfts_sdk.config import (
     DEFAULT_DEBUG_PROB,
     DEFAULT_MAX_DEBUG_DEPTH,
     DEFAULT_METRIC_REDUCER,
     DEFAULT_NUM_DRAFTS,
     DEFAULT_NUM_WORKERS,
 )
-from bfts.hyperparams import insert_hyperparams, latest_hyperparams
+from packages.bfts_sdk.hyperparams import insert_hyperparams, latest_hyperparams
 
 WORKFLOW_NAME = "bfts_reflection_nightly"
 

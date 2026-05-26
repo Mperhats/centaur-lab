@@ -1,8 +1,18 @@
+# Single source of truth for the BFTS VLM tool's runtime deps; same
+# three consumers as the other tools (tool_manager registration,
+# entrypoint.sh dep install, workspace ``uv sync``). See
+# ``tools/bfts_executor/pyproject.toml`` for the full pattern.
+#
+# ``optional_secrets`` (vs ``secrets``): the agent gets this tool even
+# without an Anthropic / OpenAI key, since the tool can fall back to
+# whichever provider is configured. iron-proxy still substitutes the
+# resolved key on outbound requests when present.
 [project]
-name = "bfts_vlm"
-description = "VLM review of BFTS plots (Sakana _analyze_plots_with_vlm parity, OpenAI / Anthropic vision)"
+name = "bfts-vlm"
+description = "VLM review of BFTS plots (Sakana _analyze_plots_with_vlm parity, OpenAI / Anthropic vision)."
 version = "0.1.0"
 requires-python = ">=3.11"
+license = "Apache-2.0 OR MIT"
 dependencies = [
     "httpx>=0.27.0",
 ]
@@ -10,6 +20,12 @@ dependencies = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+# Tool manifest, not a publishable wheel — opt out of building so uv
+# treats this as a workspace member that only contributes its
+# ``[project].dependencies`` to the root ``.venv``.
+[tool.uv]
+package = false
 
 [tool.centaur]
 module = "client.py"

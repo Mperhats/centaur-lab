@@ -23,7 +23,7 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from bfts.metric import DEFAULT_REDUCER, REDUCERS
+from packages.bfts_sdk.metric import DEFAULT_REDUCER, REDUCERS
 
 if TYPE_CHECKING:
     import asyncpg
@@ -279,7 +279,7 @@ async def resolve_search_config(
     """
     db_row: dict[str, Any] | None = None
     if pool is not None:
-        from bfts.hyperparams import latest_hyperparams
+        from packages.bfts_sdk.hyperparams import latest_hyperparams
 
         db_row = await latest_hyperparams(pool)
 

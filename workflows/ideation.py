@@ -32,8 +32,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from api.workflow_engine import WorkflowContext
 
-from bfts.config import resolve_llm_api_key, resolve_llm_settings
-from bfts.llm import LLMCall, call_with_function
+from packages.bfts_sdk.config import resolve_llm_api_key, resolve_llm_settings
+from packages.bfts_sdk.llm import LLMCall, call_with_function
 
 WORKFLOW_NAME = "ideation"
 SCHEDULE: dict[str, Any] = {}

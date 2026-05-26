@@ -5,34 +5,66 @@ description = "centaur-scientist organization overlay for Centaur (BFTS / AI-Sci
 requires-python = ">=3.11"
 license = "Apache-2.0 OR MIT"
 
-# Aggregated dev/test deps for ``tools/``, ``workflows/``, and the
-# ``bfts/`` controller package — one ``uv sync`` provisions a single
-# ``.venv`` that every per-tool / per-workflow test file can resolve
-# against. Per-tool ``pyproject.toml`` files (``tools/<name>/pyproject.toml``)
-# still exist and own their ``[tool.centaur]`` blocks (this is how the
-# upstream API pod's ``tool_manager`` discovers tools at startup, see
-# ``.centaur/services/api/api/tool_manager.py:1574-1683``); they are not
-# the source of dev deps.
+# Workspace members declared as path deps so ``uv sync`` (no flags)
+# installs every member's runtime deps into the root ``.venv``
+# automatically. Each member opts out of building (``[tool.uv].package
+# = false``), so uv pulls in the member's ``[project].dependencies``
+# without trying to construct a wheel for the tool/package itself.
 #
-# ``centaur_sdk`` is intentionally not listed here: upstream's
-# ``centaur_sdk/pyproject.toml`` declares ``packages = ["."]`` which
-# flattens module files into the wheel root, so a normal ``pip install``
-# / ``uv add`` does not expose ``from centaur_sdk import …``. Instead we
-# expose the SDK via a ``centaur_sdk`` → ``.centaur/centaur_sdk``
-# symlink at the repo root, which lets every Python tool that already
-# has the repo root on ``sys.path`` (pytest, ``uv run python -m …``,
-# IDEs, mypy / pyright) resolve the package directly. Bumping the
-# ``.centaur`` submodule pin updates the SDK in lockstep with the API.
+# Per-tool runtime deps live in ``tools/<name>/pyproject.toml`` —
+# that's the file upstream's API entrypoint
+# (.centaur/services/api/entrypoint.sh) scans on pod startup to
+# ``uv pip install`` every overlay tool's deps before launching
+# uvicorn. The workspace config below makes ``uv sync`` aggregate the
+# same per-tool ``[project].dependencies`` blocks into the local
+# ``.venv`` so the dev/test environment matches what the API pod
+# sees, with zero duplicated dependency lists.
+#
+# ``packages/bfts_sdk`` is the only ``packages/*`` member: it's the
+# BFTS controller, imported by workflows as
+# ``from packages.bfts_sdk.config import …``. ``package = false`` keeps
+# uv from trying to wheel-build it; consumers resolve the module
+# directly from the source tree via the repo root being on
+# ``sys.path`` (pytest ``pythonpath`` below + API pod ``TOOL_DIRS``).
+#
+# ``centaur_sdk`` is intentionally not declared anywhere as a dep:
+# upstream's ``centaur_sdk/pyproject.toml`` declares
+# ``packages = ["."]`` which flattens module files into the wheel
+# root, so ``pip install`` / ``uv add`` does not expose
+# ``from centaur_sdk import …``. We expose the SDK via a
+# ``packages/centaur_sdk`` → ``.centaur/centaur_sdk`` symlink (with
+# ``packages/`` on ``pythonpath`` below), which lets every Python
+# entrypoint that already has the repo root on ``sys.path`` (pytest,
+# ``uv run python -m …``, IDEs, mypy / pyright) resolve the package
+# directly during dev. The API pod ships its own
+# ``/app/centaur_sdk/`` installed as a real venv package, so prod
+# never reads the symlink. Bumping the ``.centaur`` submodule pin
+# updates the SDK in lockstep with the API. ``packages/centaur_sdk``
+# is explicitly NOT a workspace member because its upstream pyproject
+# is not opted out of building and would confuse uv.
 dependencies = [
-    "aiohttp>=3.9.0",
-    "asyncpg>=0.30.0",
-    "dataclasses-json>=0.6.0",
-    "httpx>=0.27.0",
-    "kubernetes-asyncio>=29.0.0",
-    "python-dotenv>=1.0.0",
-    "rich>=13.0.0",
-    "typer>=0.12.0",
+    "bfts-sdk",
+    "bfts-executor",
+    "bfts-vlm",
+    "semantic-scholar",
 ]
+
+[tool.uv.workspace]
+members = [
+    "tools/*",
+    "packages/bfts_sdk",
+]
+
+[tool.uv.sources]
+bfts-sdk = { workspace = true }
+bfts-executor = { workspace = true }
+bfts-vlm = { workspace = true }
+semantic-scholar = { workspace = true }
+
+# This repo is a Docker image build context, not a publishable Python
+# distribution — tell uv not to build the overlay itself.
+[tool.uv]
+package = false
 
 [dependency-groups]
 dev = [
@@ -40,11 +72,6 @@ dev = [
     "pytest-asyncio>=0.23.0",
     "ruff>=0.6.0",
 ]
-
-# This repo is a Docker image build context, not a publishable Python
-# distribution — tell uv not to build the overlay itself.
-[tool.uv]
-package = false
 
 [tool.pytest.ini_options]
 # Only integration tests live in-tree right now (see
@@ -55,13 +82,20 @@ package = false
 # workflow handlers stabilize. A single ``uv run pytest`` from the
 # repo root walks both integration trees.
 testpaths = ["tools", "workflows"]
-# Repo root on the path so ``from tools.bfts_executor.client import …``,
-# ``from workflows.bfts_tree import …``, and ``from bfts.config import …``
-# all resolve identically — byte-identical to how the API pod sets up
-# TOOL_DIRS / WORKFLOW_DIRS at startup. ``centaur_sdk`` resolves through
-# the symlink at the repo root (see the ``dependencies`` comment above),
-# so we don't need ``.centaur`` on the path here anymore.
-pythonpath = ["."]
+# - Repo root on the path so ``from tools.bfts_executor.client import …``
+#   and ``from workflows.bfts_tree import …`` resolve as namespace
+#   packages — byte-identical to how the API pod sets up TOOL_DIRS /
+#   WORKFLOW_DIRS at startup.
+# - ``packages/`` on the path so ``from centaur_sdk import secret``
+#   resolves through the ``packages/centaur_sdk`` → ``.centaur/centaur_sdk``
+#   symlink during local dev (the API pod has ``centaur_sdk`` installed
+#   as a real venv package via its own Dockerfile and ignores the
+#   symlink). BFTS callers stay namespaced as
+#   ``from packages.bfts_sdk.config import …`` so the same imports
+#   resolve in the API pod where TOOL_DIRS already puts the overlay
+#   root on ``sys.path``; we don't need a separate ``bfts_sdk``-on-path
+#   entry there.
+pythonpath = [".", "packages"]
 asyncio_mode = "strict"
 # ``importlib`` is required because we have multiple sibling
 # ``tests/`` packages (one each under ``workflows/`` and

@@ -42,13 +42,13 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from api.workflow_engine import WorkflowContext
 
-from bfts.config import (
+from packages.bfts_sdk.config import (
     DEFAULT_PRIOR_ATTEMPTS_WINDOW,
     resolve_llm_api_key,
     resolve_llm_settings,
 )
-from bfts.expand import ExpandContext, expand_node
-from bfts.state import (
+from packages.bfts_sdk.expand import ExpandContext, expand_node
+from packages.bfts_sdk.state import (
     list_recent_node_summaries,
     mark_buggy_plots,
     update_node_metric,

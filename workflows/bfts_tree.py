@@ -22,14 +22,14 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from api.workflow_engine import WorkflowContext
 
-from bfts.config import (
+from packages.bfts_sdk.config import (
     DEFAULT_METRIC_REDUCER,
     resolve_llm_settings,
     resolve_search_settings,
 )
-from bfts.metric import score
-from bfts.select import NodeRef, SearchConfig, select_next
-from bfts.state import (
+from packages.bfts_sdk.metric import score
+from packages.bfts_sdk.select import NodeRef, SearchConfig, select_next
+from packages.bfts_sdk.state import (
     insert_node,
     insert_run,
     list_nodes_for_run,
@@ -400,7 +400,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     final_nodes = await ctx.step(
         "list_nodes_final", lambda: list_nodes_for_run(pool, run_id=inp.run_id)
     )
-    from bfts.export import (  # local import keeps top tidy
+    from packages.bfts_sdk.export import (  # local import keeps top tidy
         render_tree_dot,
         select_best,
         write_best_artifact,

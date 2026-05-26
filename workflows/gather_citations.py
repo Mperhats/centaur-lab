@@ -39,10 +39,10 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from api.workflow_engine import WorkflowContext
 
-from bfts.config import resolve_llm_api_key, resolve_llm_settings
-from bfts.export import write_references_artifact
-from bfts.llm import LLMCall, call_with_function
-from bfts.state import fetch_best_node_for_run
+from packages.bfts_sdk.config import resolve_llm_api_key, resolve_llm_settings
+from packages.bfts_sdk.export import write_references_artifact
+from packages.bfts_sdk.llm import LLMCall, call_with_function
+from packages.bfts_sdk.state import fetch_best_node_for_run
 from tools.semantic_scholar.client import BIBTEX_PAPER_FIELDS
 
 WORKFLOW_NAME = "gather_citations"

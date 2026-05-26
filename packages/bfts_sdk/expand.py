@@ -28,13 +28,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from bfts.config import (
+from packages.bfts_sdk.config import (
     DEFAULT_DRAFT_MODEL,
     DEFAULT_FEEDBACK_MODEL,
     DEFAULT_VLM_MODEL,
 )
-from bfts.llm import LLMCall, call_for_text, call_with_function, extract_code
-from bfts.prompts import (
+from packages.bfts_sdk.llm import LLMCall, call_for_text, call_with_function, extract_code
+from packages.bfts_sdk.prompts import (
     METRIC_PARSE_SPEC,
     PROMPT_IMPL_GUIDELINE,
     PROMPT_RESP_FMT,
