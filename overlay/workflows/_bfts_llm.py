@@ -16,6 +16,7 @@ iron-proxy at the header layer (research 03 §Secrets / iron-proxy).
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from typing import Any
@@ -25,6 +26,63 @@ import httpx
 _ANTHROPIC_VERSION = "2023-06-01"
 _OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
 _ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
+
+_RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
+"""HTTP status codes worth retrying. 429 (rate limit) + the 5xx family
+that providers use for transient outages. Other 4xx errors are caller
+bugs (auth, malformed body) and must not retry."""
+
+_RETRY_MAX_ATTEMPTS = 4
+"""Total attempts including the first call. 4 → up to 3 retries.
+Total worst-case wall time: 1 + 2 + 4 = 7s of sleep + 4 request
+durations. Mirrors Sakana's ``backoff.on_exception(... max_time=60)``
+posture (.scientist/ai_scientist/treesearch/backend/utils.py) without
+adding the ``backoff`` package as a dep."""
+
+_RETRY_BASE_DELAY_S = 1.0
+"""Initial backoff. Doubles each retry: 1s, 2s, 4s."""
+
+
+async def _post_with_retry(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    json: dict[str, Any],
+    headers: dict[str, str],
+) -> httpx.Response:
+    """POST with exponential backoff on transient errors.
+
+    Retries on ``_RETRY_STATUS`` (429 + 5xx) and ``httpx.RequestError``
+    (connect / read / write / timeout errors). Non-retryable 4xx
+    (incl. 401/403/404) raise the standard ``LLM call failed: <code>``
+    error from the caller after a single attempt. Sleeps 1s, 2s, 4s
+    between attempts. Max 4 total attempts (3 retries).
+
+    Returns the final ``httpx.Response`` so the caller's existing
+    ``if resp.status_code != 200: raise`` block handles both
+    permanent 4xx and exhausted-retry 5xx the same way.
+    """
+    resp: httpx.Response | None = None
+    for attempt in range(_RETRY_MAX_ATTEMPTS):
+        try:
+            resp = await client.post(url, json=json, headers=headers)
+        except httpx.RequestError as e:
+            if attempt + 1 >= _RETRY_MAX_ATTEMPTS:
+                raise RuntimeError(f"LLM call network error: {e}") from e
+            await asyncio.sleep(_RETRY_BASE_DELAY_S * (2 ** attempt))
+            continue
+        if (
+            resp.status_code in _RETRY_STATUS
+            and attempt + 1 < _RETRY_MAX_ATTEMPTS
+        ):
+            await asyncio.sleep(_RETRY_BASE_DELAY_S * (2 ** attempt))
+            continue
+        return resp
+    # All attempts exhausted with retryable status codes only — return
+    # the final response so the caller raises with its standard error
+    # message + body excerpt.
+    assert resp is not None
+    return resp
 
 
 @dataclass
@@ -119,7 +177,8 @@ async def _call_with_function_openai(
         },
     }
     async with httpx.AsyncClient(timeout=call.timeout) as client:
-        resp = await client.post(
+        resp = await _post_with_retry(
+            client,
             _OPENAI_CHAT_URL,
             json=body,
             headers={"Authorization": f"Bearer {call.api_key}"},
@@ -155,7 +214,8 @@ async def _call_with_function_anthropic(
         "tool_choice": {"type": "tool", "name": tool["name"]},
     }
     async with httpx.AsyncClient(timeout=call.timeout) as client:
-        resp = await client.post(
+        resp = await _post_with_retry(
+            client,
             _ANTHROPIC_MESSAGES_URL,
             json=body,
             headers=_anthropic_headers(call.api_key),
@@ -185,7 +245,8 @@ async def _call_for_text_openai(call: LLMCall) -> str:
         "messages": [{"role": "user", "content": call.prompt}],
     }
     async with httpx.AsyncClient(timeout=call.timeout) as client:
-        resp = await client.post(
+        resp = await _post_with_retry(
+            client,
             _OPENAI_CHAT_URL,
             json=body,
             headers={"Authorization": f"Bearer {call.api_key}"},
@@ -207,7 +268,8 @@ async def _call_for_text_anthropic(call: LLMCall) -> str:
         "messages": [{"role": "user", "content": call.prompt}],
     }
     async with httpx.AsyncClient(timeout=call.timeout) as client:
-        resp = await client.post(
+        resp = await _post_with_retry(
+            client,
             _ANTHROPIC_MESSAGES_URL,
             json=body,
             headers=_anthropic_headers(call.api_key),
