@@ -17,7 +17,9 @@ Actionable items only. Completed audits and pre-reorg backlog live in git histor
       --jq '.[0] | {name, created_at, tags: .metadata.container.tags}'
     ```
 
-- [ ] **Spin up `centaur-lab-infra`** (sibling GitOps repo) shaped after [`paradigmxyz/centaur-acme-infra`](https://github.com/paradigmxyz/centaur-acme-infra). Argo CD apps + pinned overlay image tags + Helm values live there, not in this overlay repo. Pre-reorg `infra/argocd/` and `clusters/centaur-lab/argocd/` directories were deleted; recover the values shape from the `chore/reorganize` history if you need a starting point.
+- [ ] **Spin up `centaur-lab-infra`** (sibling GitOps repo) shaped after [`paradigmxyz/centaur-acme-infra`](https://github.com/paradigmxyz/centaur-acme-infra). The contract is documented in the [README's Deploying section](../README.md#deploying); Argo CD apps + pinned overlay image tags + Helm values live there. Pre-reorg `infra/argocd/` and `clusters/centaur-lab/argocd/` were deleted from this repo; recover the values shape from the `chore/reorganize` history if you need a starting point.
+
+- [ ] **Decide on `cloudflared/` placement.** Currently lives in this repo because the local stack runs on the developer's laptop, and the tunnel routes webhook traffic to that local cluster. Arguably belongs in `centaur-lab-infra` since it's deploy-adjacent (gateway to the local cluster). Move when convenient; not blocking.
 
 ## Do not build
 

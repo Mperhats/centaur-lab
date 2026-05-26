@@ -13,9 +13,9 @@
 #
 # Build context exclusions live in ``.dockerignore`` — that file is the
 # single point of truth for "what does the overlay image NOT ship"
-# (dev caches, lockfiles, tests, Justfile remnants, README-style docs,
-# the ``.centaur`` submodule, ``cloudflared/``, ``docs/``, ``tmp/``
-# scratch, and any local Helm values).
+# (dev caches, lockfiles, tests, README-style docs, the ``.centaur``
+# submodule, ``cloudflared/``, ``docs/``, ``scripts/`` dev tooling,
+# ``tmp/`` scratch, and any local Helm values).
 #
 # The chart's overlay-bootstrap initContainer copies ``sourcePath``
 # (default ``/overlay``) into the API pod at ``/app/overlay/org`` and

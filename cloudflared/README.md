@@ -13,28 +13,24 @@ providers (GitHub, etc.) can deliver events to your laptop.
 The tunnel runs as a launchd user agent (`com.local-labs.centaur-tunnel`),
 auto-starts on login, and auto-restarts on crash. You don't manage it
 per-session. The only per-session thing is the two `kubectl port-forward`s
-backing the tunnel's local targets — `just dev` owns both:
-
-```bash
-just dev   # backgrounds port-forwards (3001 + 8000), tails Slackbot logs in foreground
-```
-
-Ctrl-C `just dev` to stop the port-forwards; the tunnel keeps running.
+backing the tunnel's local targets — owned by your local stack (port 8000
+for the Centaur API, 3001 for the Slackbot).
 
 ## Managing the tunnel agent
 
-All commands live in this directory's Justfile, invoked via the `cloudflared`
-module from the repo root. Service recipes are gated by Just's `[macos]`
-attribute — on Linux they're simply hidden, and you'd write a sibling
-systemd-user-unit variant (`[linux]`) when needed.
+All commands live in this directory's `Justfile`. Run them from inside
+`cloudflared/`. Service recipes are gated by Just's `[macos]` attribute —
+on Linux they're simply hidden, and you'd write a sibling systemd-user-unit
+variant (`[linux]`) when needed.
 
 ```bash
-just cloudflared::status                 # is the agent loaded? running? pid?
-just cloudflared::logs                   # tail ~/Library/Logs/centaur-tunnel.log
-just cloudflared::install-service        # idempotent install / re-install
-just cloudflared::uninstall-service      # remove the agent (confirms)
-just --yes cloudflared::uninstall-service  # skip the confirm prompt
-just cloudflared::run                    # foreground run for debugging (uninstall first to avoid connector race)
+cd cloudflared/
+just status                 # is the agent loaded? running? pid?
+just logs                   # tail ~/Library/Logs/centaur-tunnel.log
+just install-service        # idempotent install / re-install
+just uninstall-service      # remove the agent (confirms)
+just --yes uninstall-service  # skip the confirm prompt
+just run                    # foreground run for debugging (uninstall first to avoid connector race)
 ```
 
 ## One-time setup on a fresh machine
@@ -81,14 +77,14 @@ both.
 5. Install the launch agent (one-time per machine):
 
    ```bash
-   just cloudflared::install-service
+   cd cloudflared/ && just install-service
    ```
 
 6. Verify it's connected:
 
    ```bash
-   just cloudflared::status   # should show state = running, pid = N
-   just cloudflared::logs     # should show "Registered tunnel connection" lines
+   just status   # should show state = running, pid = N
+   just logs     # should show "Registered tunnel connection" lines
    ```
 
 ## Why a hand-rolled plist instead of `cloudflared service install`?
@@ -127,18 +123,19 @@ rule would shadow the Slackbot route.
 After editing `config.yml`, reload the agent:
 
 ```bash
-just --yes cloudflared::uninstall-service
-just cloudflared::install-service
+cd cloudflared/
+just --yes uninstall-service && just install-service
 ```
 
 ## Tearing it down
 
-To stop the tunnel agent: `just cloudflared::uninstall-service`.
+To stop the tunnel agent: `just uninstall-service` (from `cloudflared/`).
 
 To delete the tunnel entirely (e.g. rotating it):
 
 ```bash
-just cloudflared::uninstall-service
+cd cloudflared/
+just uninstall-service
 cloudflared tunnel delete centaur-dev
 ```
 

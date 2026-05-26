@@ -11,7 +11,7 @@ This module is read-only with respect to Postgres. ``research_brief``
 and ``archive_paper`` return *projection bundles* — dicts shaped for
 the inlined ``_upsert_document`` / ``_upsert_paper_archive`` helpers in
 each workflow handler — and never open a pool of their own. Workflow
-handlers in ``overlay/workflows/`` own all DB writes; the agent-facing
+handlers in ``workflows/`` own all DB writes; the agent-facing
 contract is "tool returns the rows, caller persists them".
 
 The typed objects returned by ``search_papers`` / ``get_paper`` /

@@ -34,9 +34,9 @@ infra
 .worktrees
 
 # Helm values + GitOps configs (consumed at deploy time, not runtime).
-# values.*.yaml at the repo root is no longer tracked — Helm values
-# live in clusters/centaur-lab/argocd/values/ — but we keep the rule
-# defensive in case a local user writes their own.
+# Helm values for any centaur-lab cluster live in the sibling
+# centaur-lab-infra repo — but we keep this rule defensive in case a
+# local user writes their own values*.yaml at the repo root.
 values*.yaml
 
 # Virtual environments

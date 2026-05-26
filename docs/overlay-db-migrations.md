@@ -1,95 +1,166 @@
-# Overlay DB migrations
+# Overlay DB migrations playbook
 
-Overlay-owned Postgres schema changes run on every API pod startup,
-tracked separately from upstream's. This doc covers only the bits
-specific to migrations — the overlay layout, mount paths, and image
-packaging are documented upstream in
-[`.centaur/docs/public/md/extend/overlay.md`](../.centaur/docs/public/md/extend/overlay.md).
-**Read that first.** Then come back here.
+Practical guide for adding org-specific schema in centaur-lab without forking upstream Centaur.
 
-## How dbmate finds overlay migrations
+## TL;DR
 
-`api.db.run_migrations()`
-(`.centaur/services/api/api/db.py:115-174`) iterates the
-`MigrationSet`s returned by `get_migration_sets()`:
+- **Reuse `company_context_documents`** for org-specific *documents* (papers, briefs, notes): JSONB `metadata`, discriminated by `source` + `source_type`. centaur-lab already does this for Semantic Scholar.
+- **Add overlay migrations** only for new tables/indexes/columns upstream will never ship (e.g. `lab_experiments`).
+- **Layout:** SQL files live under `services/api/db/migrations/` at the repo root. They ship in the overlay image via `Dockerfile`'s `COPY . /overlay`, get mounted at `/app/overlay/org/services/api/db/migrations/` by the chart's overlay-bootstrap initContainer, and the API pod's startup applies pending migrations through dbmate.
+- **Per migration:** `.centaur/contrib/scripts/dbmate --set overlay new <name>` -> edit SQL -> `dbmate --set overlay status|up` -> bump the overlay image tag in the centaur-lab-infra Helm values; API restart applies pending overlay migrations automatically.
+- **Tracking:** core uses `schema_migrations`; overlay uses `schema_migrations_overlay` (separate version sequences, no collisions).
 
-| Set | Source dir | Tracking table |
-|-----|-----------|----------------|
-| `core` | `.centaur/services/api/db/migrations/` | `schema_migrations` |
-| `overlay` | `${CENTAUR_OVERLAY_DIR}/services/api/db/migrations/` | `schema_migrations_overlay` |
+## Decision tree
 
-`CENTAUR_OVERLAY_DIR` resolves to `/app/overlay/org` in the API
-container, so the overlay migrations dir resolves to
-`/app/overlay/org/services/api/db/migrations/`. The overlay set is
-added only when the env var is set AND the directory exists on disk.
+1. **Is it org-specific document/knowledge data** (searchable text, metadata, parent/child links)?
+   -> **Reuse `company_context_documents`**. Pick a new `source` (e.g. `semantic_scholar`) and `source_type` (e.g. `paper`).
+2. **Does it need relational structure** (FKs, unique constraints across rows, non-document queries) that JSONB can't express cleanly?
+   -> **Overlay migration** (new table).
+3. **Could upstream plausibly add this in ~6 months?**
+   -> File upstream issue first; avoid overlay schema that blocks upstream merges.
+4. **Is it a column on an upstream-owned table?**
+   -> Strong bias against overlay `ALTER TABLE`; prefer new overlay-owned table or JSONB in `company_context_documents`.
 
-Separate tracking tables mean the two streams version independently —
-upstream can release a `037_*.sql` while we ship `20260601000001_*.sql`
-without collision.
+## Reuse path: `company_context_documents`
 
-## Authoring a migration
+### Schema (upstream migration 022)
 
-dbmate's timestamp convention:
+| Column | Type | Notes |
+|--------|------|-------|
+| `document_id` | TEXT PK | Stable id, e.g. `semantic_scholar:paper:{id}` |
+| `source` | TEXT NOT NULL | Namespace, e.g. `semantic_scholar`, `slack` |
+| `source_type` | TEXT NOT NULL | Discriminator within source |
+| `source_document_id` | TEXT NOT NULL | External id |
+| `source_chunk_id` | TEXT NOT NULL DEFAULT `''` | Chunk id (usually empty) |
+| `parent_document_id` | TEXT FK -> self | Parent/child linking |
+| `title`, `body`, `url` | TEXT | Searchable content |
+| `author_id`, `author_name` | TEXT | |
+| `access_scope` | TEXT DEFAULT `company` | |
+| `occurred_at`, `source_updated_at` | TIMESTAMPTZ | Event vs sync time |
+| `content_hash` | TEXT | Idempotent upserts |
+| `metadata` | JSONB DEFAULT `{}` | Structured extras |
+| `created_at`, `updated_at` | TIMESTAMPTZ | |
 
-```
-services/api/db/migrations/YYYYMMDDHHMMSS_<short_name>.sql
-```
+**Indexes:** `(source, source_type, occurred_at DESC)`, `parent_document_id`, `source_updated_at DESC`, GIN on `metadata`. BM25 index added in upstream migration 023.
 
-Each file has `-- migrate:up` and `-- migrate:down`. dbmate is
-**strictly forward-only at runtime**: any version not present in
-`schema_migrations_overlay` is applied in lexical order, then the
-version is inserted into the tracking table. It never rolls back or
-re-runs an already-applied version — even if the source changed.
+**Unique:** `(source, source_type, source_document_id, source_chunk_id)`.
 
-Example:
-[`services/api/db/migrations/20260526000001_add_paper_archives.sql`](../services/api/db/migrations/20260526000001_add_paper_archives.sql).
+### `source_type` values in centaur-lab
 
-## How files reach the pod
+| `source_type` | `source` | Where |
+|---------------|----------|-------|
+| `paper` | `semantic_scholar` | `tools/semantic_scholar/projections/paper.py` |
+| `paper_fulltext` | `semantic_scholar` | `tools/semantic_scholar/projections/fulltext.py` |
+| `research_brief` | `semantic_scholar` | `tools/semantic_scholar/projections/brief.py` |
+| `slack_channel_day` | `slack` | `.centaur/workflows/company_context_documents.py` (upstream) |
+| `slack_thread` | `slack` | `.centaur/workflows/company_context_documents.py` (upstream) |
 
-The overlay image must include `services/`. Upstream's canonical
-`COPY . /overlay` Dockerfile pattern ships every overlay-extensible
-surface automatically; per-directory `COPY tools / COPY workflows / ...`
-selective patterns are an anti-pattern — they silently drop any future
-surface upstream adds. (See [`Dockerfile`](../Dockerfile) for the
-active recipe and [`.dockerignore`](../.dockerignore) for what's
-excluded.)
+### Code pattern (centaur-lab)
 
-Verify after a deploy:
+`save_papers` (in `workflows/save_papers.py`) calls `build_paper_document` (`source="semantic_scholar"`, `source_type="paper"`, `metadata={paperId, year, doi, query, ...}`) then `upsert_document` via asyncpg `INSERT ... ON CONFLICT (document_id) DO UPDATE WHERE content_hash IS DISTINCT FROM EXCLUDED.content_hash`. The follow-up brief workflow writes a `research_brief` parent row.
+
+### When reuse is enough vs not
+
+| Enough | Not enough |
+|--------|------------|
+| Searchable documents with JSONB metadata | Multi-table relational model |
+| Parent/child via `parent_document_id` | Cross-row constraints beyond self-FK |
+| BM25 retrieval via existing index | New index type upstream won't add |
+| Org-specific `source`/`source_type` namespace | Mutating upstream-owned tables |
+
+## New table path: overlay migrations
+
+### Mechanics
+
+| What | Detail |
+|------|--------|
+| Host repo path | `services/api/db/migrations/` |
+| API env | `CENTAUR_OVERLAY_DIR` = chart `overlay.mountPath` (default `/app/overlay/org`), set in centaur-lab-infra Helm values |
+| Resolved path in pod | `$CENTAUR_OVERLAY_DIR/services/api/db/migrations/` |
+| Tracking table | `schema_migrations_overlay` |
+| When applied | **API startup only** -- `create_pool()` -> `run_migrations()` runs dbmate `up` for core then overlay |
+| Worker | Reuses API pool; does **not** run migrations independently |
+| Deploy | Bump the overlay image tag in centaur-lab-infra; the chart's overlay-bootstrap initContainer copies the new image into `/app/overlay/org`, and API restart applies pending migrations |
+
+The overlay's first real migration ships at [`services/api/db/migrations/20260526000001_add_paper_archives.sql`](../services/api/db/migrations/20260526000001_add_paper_archives.sql).
+
+### Per-migration workflow
+
+**1. Scaffold** (from repo root, with a local cluster running):
 
 ```bash
-kubectl exec -n centaur-system deploy/centaur-centaur-api -c api -- \
-  ls /app/overlay/org/services/api/db/migrations/
+export CENTAUR_OVERLAY_HOST_DIR="$PWD"
+export CENTAUR_NAMESPACE=centaur-system   # centaur-lab default
+
+.centaur/contrib/scripts/dbmate --set overlay new add_lab_experiments
+# -> creates services/api/db/migrations/<NNN>_add_lab_experiments.sql
 ```
 
-If the directory is missing, the API pod logs `migrations_dir_missing`
-(warn level) at startup and silently skips the overlay set —
-applications that depend on overlay-only tables then fail at runtime
-with `relation "<name>" does not exist`.
+**2. Edit file** -- numbered `NNN_snake_case.sql`; only `-- migrate:up` / `-- migrate:down` sections (no manual `BEGIN`/`COMMIT`; dbmate wraps each section in a transaction).
 
-## Pitfalls
+**3. Local validation**
 
-### Stale tracking-table markers
-
-If a migration version is recorded in `schema_migrations_overlay` but
-the table the migration was supposed to create no longer exists in the
-DB (e.g. someone applied it manually from a laptop, then the table got
-dropped during a Postgres restore), dbmate will silently skip the
-version on the next pod start. Fix:
-
-```sql
-DELETE FROM schema_migrations_overlay WHERE version = '<version>';
+```bash
+.centaur/contrib/scripts/dbmate --set overlay status
+.centaur/contrib/scripts/dbmate --set overlay up
+.centaur/contrib/scripts/dbmate --set overlay rollback   # rolls back last
 ```
 
-Roll the API pod and dbmate will re-apply.
+Without `DATABASE_URL`, the wrapper reads it from the running API pod via `kubectl exec`.
 
-### Rewriting an already-applied migration
+**4. Deploy**
 
-Same trap — the tracking-table version pins the old definition.
-**Always write a new dated file** instead of editing an applied one.
+1. Merge to `main` in this repo -> CI publishes a new overlay image tag (`sha-<sha>`).
+2. In `centaur-lab-infra`, bump `overlay.image.tag` to the new SHA.
+3. Argo CD reconciles -> API pod restarts -> overlay migrations apply at startup.
 
-### Deleting an already-applied migration file
+Verify in pod:
 
-dbmate doesn't complain (it only iterates files on disk and inserts
-markers; it doesn't audit that every applied version still has a
-file). The schema then becomes unreproducible from the repo. Don't do
-this unless the version was never deployed anywhere.
+```bash
+kubectl exec -n centaur-system deploy/centaur-centaur-api -- \
+  ls -la /app/overlay/org/services/api/db/migrations/
+```
+
+### Local dev stack
+
+Cluster bring-up + `kubectl port-forward` are owned by the centaur-lab-infra repo (the upstream `Justfile` lives in `.centaur/Justfile` and is invoked from there with deploy-time secrets). Once the stack is up, Postgres is accessible via:
+
+```bash
+kubectl port-forward -n centaur-system svc/centaur-centaur-postgres 5432:5432
+# DSN: postgres://tempo:$PGPASSWORD@localhost:5432/ai_v2
+# Password sourced from the centaur-infra-env Secret (set up by infra repo)
+```
+
+## Gotchas
+
+| Topic | Detail |
+|-------|--------|
+| **dbmate host path default** | Wrapper default `CENTAUR_OVERLAY_HOST_DIR` = `.centaur/../centaur-paradigm` (upstream's reference layout), **not** centaur-lab's repo root. Always `export CENTAUR_OVERLAY_HOST_DIR=$PWD`. |
+| **dbmate script path** | Real path is `.centaur/contrib/scripts/dbmate`. Upstream `AGENTS.md` references `./scripts/dbmate` (their layout). |
+| **Overlay set visibility** | `--set overlay` only listed if host dir exists (`list_sets` checks directory). |
+| **Transactions** | No core migration uses `BEGIN`/`COMMIT`. dbmate auto-wraps each `migrate:up`/`migrate:down` block. |
+| **Down command** | SQL `-- migrate:down` section; CLI subcommand is `rollback` (not `down`). |
+| **Numbering** | Auto-incremented `NNN_` prefix or timestamp; both work. The first overlay migration uses a timestamp (`20260526000001_`) so subsequent ones don't collide on a small numeric counter. |
+| **Overlay dir gate** | API includes overlay set only when `CENTAUR_OVERLAY_DIR` is set **and** migrations dir exists in container. |
+| **Missing dbmate binary** | API logs warning and skips migrations (`FileNotFoundError` caught) -- do not rely on this in prod. |
+
+## References
+
+| Claim | Source |
+|-------|--------|
+| `get_migration_sets`, path resolution, tracking tables | `.centaur/services/api/api/db.py:14-87` |
+| `run_migrations`, dbmate invocation | `.centaur/services/api/api/db.py:115-174` |
+| Migrations at API startup | `.centaur/services/api/api/db.py:99-100`, `.centaur/services/api/api/app.py:173` |
+| `schema_migrations` / `schema_migrations_overlay` | `.centaur/services/api/api/db.py:15-16` |
+| dbmate `--set overlay`, `new`, `status`, `up`, `rollback` | `.centaur/contrib/scripts/dbmate:18-215` |
+| Overlay host/container path env vars | `.centaur/contrib/scripts/dbmate:10-13` |
+| Default overlay host = `../centaur-paradigm` | `.centaur/contrib/scripts/dbmate:10` |
+| Numbered file naming | `.centaur/contrib/scripts/dbmate:91-126` |
+| `company_context_documents` schema | `.centaur/services/api/db/migrations/022_add_company_context_documents.sql` |
+| BM25 index | `.centaur/services/api/db/migrations/023_add_company_context_documents_bm25.sql` |
+| Overlay mount + migrations mention | `.centaur/docs/public/md/extend/overlay.md:45-46` |
+| `CENTAUR_OVERLAY_DIR` chart wiring | `.centaur/contrib/chart/templates/workloads.yaml:204-207`, `.centaur/contrib/chart/values.yaml:92` |
+| Overlay bootstrap copy | `.centaur/contrib/chart/templates/workloads.yaml:134-149` |
+| centaur-lab Dockerfile (single `COPY . /overlay`) | [`Dockerfile`](../Dockerfile) |
+| First centaur-lab overlay migration | [`services/api/db/migrations/20260526000001_add_paper_archives.sql`](../services/api/db/migrations/20260526000001_add_paper_archives.sql) |
+| Paper upsert pattern | [`tools/semantic_scholar/projections/paper.py`](../tools/semantic_scholar/projections/paper.py), [`workflows/save_papers.py`](../workflows/save_papers.py) |

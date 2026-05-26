@@ -33,9 +33,9 @@ cloudflared/cert.pem
 # Git worktrees (subagent-driven-development isolation)
 .worktrees/
 
-# Local scratch directory (legacy tests-old/ migration buffer, ad-hoc
-# notebooks, anything you don't want to commit). Never ships in the
-# overlay image — also excluded by .dockerignore.
+# Local scratch directory (ad-hoc notebooks, anything you don't want
+# to commit). Never ships in the overlay image — also excluded by
+# .dockerignore.
 /tmp/
 
 # Editor / OS

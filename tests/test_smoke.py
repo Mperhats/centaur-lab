@@ -1,9 +1,7 @@
 """Smoke test that the overlay packages import.
 
-Tests are migrated from ``tests-old/`` one at a time. This file is the
-ACME-style entrypoint: keep it small, don't grow it past a few minutes
-of runtime, and let new test files land alongside it as we re-author
-each suite from ``tests-old/``.
+ACME-style entrypoint — keep it small, don't grow it past a few minutes
+of runtime, and let new test files land alongside it as the suite grows.
 """
 
 from __future__ import annotations

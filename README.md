@@ -35,6 +35,22 @@ The repo follows the
 overlay layout. For background on the model itself, see
 [Using an overlay](https://centaur.run/extend/overlay).
 
+## Deploying
+
+This repo only ships the **overlay image**. Deploys live in the sibling
+[`centaur-lab-infra`](https://github.com/paradigmxyz/centaur-acme-infra)
+repo (Argo CD apps + Helm values). The contract is:
+
+1. Merge to `main` here. CI publishes
+   `ghcr.io/<owner>/centaur-lab/centaur-overlay:sha-<sha>` (and `:latest`).
+2. In `centaur-lab-infra`, bump `overlay.image.tag` to the new SHA. Argo
+   CD reconciles, the API pod restarts, and overlay migrations apply at
+   startup (see [`docs/overlay-db-migrations.md`](docs/overlay-db-migrations.md)).
+
+Cluster bring-up, secret bootstrap, and the `kubectl port-forward`s for
+local dev are owned by the infra repo too — this repo carries no
+`values.yaml`, no Argo CD manifests, and no cluster credentials.
+
 ## Updating the SDK
 
 The `centaur_sdk` symlink resolves to whatever `.centaur` is pinned at,
