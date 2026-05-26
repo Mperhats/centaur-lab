@@ -424,3 +424,19 @@ bfts-toy-run:
     echo "bfts_root run ${run_id} did not reach terminal in time" >&2
     exec_curl "http://localhost:8000/workflows/runs/${run_id}" | jq >&2
     exit 1
+
+# Phase 3 smoke: run a toy BFTS + assert best_solution.py exists.
+[group('bfts')]
+bfts-verify-best:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just bfts-toy-run
+    api_deploy="deploy/${CENTAUR_RELEASE}-centaur-api"
+    count=$(kubectl exec -n $CENTAUR_NAMESPACE $api_deploy -- psql "$DATABASE_URL" -tAc \
+      "SELECT count(*) FROM bfts_artifacts WHERE relative_path = 'best_solution.py';")
+    if [ "$count" -ge "1" ]; then
+      echo "BFTS-VERIFY-BEST OK ($count artifacts)"
+      exit 0
+    fi
+    echo "no best_solution.py written" >&2
+    exit 1
