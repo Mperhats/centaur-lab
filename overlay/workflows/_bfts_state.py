@@ -70,6 +70,10 @@ async def update_node_metric(
     analysis: str | None,
     plan: str | None = None,
     code: str | None = None,
+    parse_metrics_code: str | None = None,
+    parse_term_out: list[str] | None = None,
+    plot_code: str | None = None,
+    plot_term_out: list[str] | None = None,
 ) -> None:
     """Write the post-execution result for a node.
 
@@ -79,10 +83,18 @@ async def update_node_metric(
       writes SQL ``NULL`` to the column; pass an empty container
       (``[]`` / ``{}`` / ``""``) to record empty-but-present. Callers MUST
       NOT conflate the two.
-    - ``plan``, ``code``: passing ``None`` leaves the column unchanged
-      (``COALESCE`` semantics) — useful when the caller only has the
-      post-execution result and wants to preserve the value written by
-      ``insert_node``. Pass an explicit string to overwrite.
+    - ``plan``, ``code``, ``parse_metrics_code``, ``plot_code``: passing
+      ``None`` leaves the column unchanged (``COALESCE`` semantics) —
+      useful when the caller only has the post-execution result and wants
+      to preserve the value written by ``insert_node`` or an earlier
+      update. Pass an explicit string to overwrite. This applies to all
+      TEXT columns (both ``NOT NULL DEFAULT ''`` and nullable) so callers
+      never have to special-case the buggy short-circuit, which omits
+      parse-/plot-step outputs entirely.
+    - ``parse_term_out``, ``plot_term_out``: JSONB columns follow the
+      same SQL-``NULL``-vs-empty-list contract as ``metric`` / ``exc_info``
+      — ``None`` means "no payload" (the metric-parse / plot sub-step did
+      not run), ``[]`` means "ran and produced no stdout".
     """
     await pool.execute(
         """
@@ -97,9 +109,10 @@ async def update_node_metric(
             analysis = $9,
             plan = COALESCE($10, plan),
             code = COALESCE($11, code),
-            -- parse_* / plot_* / plot_code intentionally NOT updated here:
-            -- they land in a separate update from Task 3.x once the
-            -- metric-parse sub-step and plot exec sub-step are in scope.
+            parse_metrics_code = COALESCE($12, parse_metrics_code),
+            parse_term_out_json = $13::jsonb,
+            plot_code = COALESCE($14, plot_code),
+            plot_term_out_json = $15::jsonb,
             updated_at = NOW()
         WHERE node_id = $1
         """,
@@ -114,6 +127,10 @@ async def update_node_metric(
         analysis,
         plan,
         code,
+        parse_metrics_code,
+        json.dumps(parse_term_out) if parse_term_out is not None else None,
+        plot_code,
+        json.dumps(plot_term_out) if plot_term_out is not None else None,
     )
 
 

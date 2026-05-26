@@ -26,5 +26,6 @@ asyncio_mode = "strict"
 [tool.centaur]
 module = "client.py"
 optional_secrets = [
+    {type = "http", name = "ANTHROPIC_API_KEY", match_headers = ["x-api-key"], hosts = ["api.anthropic.com"]},
     {type = "http", name = "OPENAI_API_KEY", match_headers = ["authorization"], hosts = ["api.openai.com"]},
 ]

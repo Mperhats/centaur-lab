@@ -44,6 +44,12 @@ api:
   # workflow that fans out to children.
   extraEnv:
     WORKFLOW_WORKER_CONCURRENCY: "16"
+    # BFTS LLM defaults (deployment-wide). Override per run via bfts_root
+    # run_input JSON; see overlay/workflows/_bfts_config.py.
+    BFTS_DRAFT_MODEL: "claude-sonnet-4-20250514"
+    BFTS_FEEDBACK_MODEL: "claude-sonnet-4-20250514"
+    BFTS_VLM_MODEL: "claude-sonnet-4-20250514"
+    BFTS_LLM_API_KEY_SECRET: "ANTHROPIC_API_KEY"
 
   # The chart's default for `:latest`-tagged images is Always, which makes
   # kubelet try to pull centaur-api:latest from a public registry instead of

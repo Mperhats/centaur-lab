@@ -22,6 +22,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 if TYPE_CHECKING:
     from api.workflow_engine import WorkflowContext
 
+from _bfts_config import resolve_llm_settings
+
 WORKFLOW_NAME = "bfts_root"
 
 
@@ -34,6 +36,12 @@ class Input:
     debug_prob: float = 0.5
     max_iters: int = 20
     seed_base: int = 0
+    # Optional per-run LLM overrides. When omitted, deployment env (BFTS_* in
+    # values.local.yaml api.extraEnv) and _bfts_config defaults apply.
+    llm_api_key_secret: str | None = None
+    draft_model: str | None = None
+    feedback_model: str | None = None
+    vlm_model: str | None = None
 
 
 def _sandbox_id(*, run_id: str, tree_idx: int) -> str:
@@ -48,55 +56,106 @@ def _sandbox_id(*, run_id: str, tree_idx: int) -> str:
 
 
 async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
+    llm = resolve_llm_settings(
+        draft_model=inp.draft_model,
+        feedback_model=inp.feedback_model,
+        vlm_model=inp.vlm_model,
+        llm_api_key_secret=inp.llm_api_key_secret,
+    )
+
+    # Every Sandbox we successfully create lands here BEFORE start_workflow
+    # is attempted, so a start_workflow failure (which leaves the CR behind)
+    # is still cleaned up by the finally block. `children` separately holds
+    # only fully-started trees that the wait loop iterates.
+    sandboxes_to_clean: list[tuple[int, str]] = []
     children: list[dict[str, Any]] = []
-    for i in range(inp.num_drafts):
-        sandbox_id = _sandbox_id(run_id=ctx.run_id, tree_idx=i)
-        await ctx.step(
-            f"create_sandbox_{i}",
-            lambda sid=sandbox_id: ctx.tools.bfts_executor.create_sandbox(
-                sandbox_id=sid,
-                run_id=ctx.run_id,
-            ),
-        )
-        child_run_id = f"{ctx.run_id}:tree:{i}"
-        child = await ctx.start_workflow(
-            f"start_tree_{i}",
-            workflow_name="bfts_tree",
-            run_input={
-                "run_id": child_run_id,
-                "parent_run_id": ctx.run_id,
-                "idea": inp.idea,
-                "num_drafts": 1,    # each child tree has 1 root; root-level num_drafts = num trees
-                "num_workers": inp.num_workers,
-                "max_debug_depth": inp.max_debug_depth,
-                "debug_prob": inp.debug_prob,
-                "max_iters": inp.max_iters,
-                "seed": inp.seed_base + i,
-                "sandbox_id": sandbox_id,
-            },
-            trigger_key=child_run_id,
-            eager_start=True,
-        )
-        children.append(
-            {"run_id": child["run_id"], "tree_index": i, "sandbox_id": sandbox_id}
-        )
-
     results: list[dict[str, Any]] = []
-    for child in children:
-        res = await ctx.wait_for_workflow(
-            f"wait_tree_{child['tree_index']}", run_id=child["run_id"]
-        )
-        results.append(res)
+    body_succeeded = False
 
-    # Tear down each per-tree Sandbox now that all children are terminal.
-    # PVC follows owner refs (Spec correction #12 + agent-sandbox
-    # `shutdownPolicy: "Retain"` is overridden by an explicit delete).
-    for child in children:
-        await ctx.step(
-            f"stop_sandbox_{child['tree_index']}",
-            lambda sid=child["sandbox_id"]: ctx.tools.bfts_executor.stop_sandbox(
-                sandbox_id=sid
-            ),
-        )
+    try:
+        for i in range(inp.num_drafts):
+            sandbox_id = _sandbox_id(run_id=ctx.run_id, tree_idx=i)
+            await ctx.step(
+                f"create_sandbox_{i}",
+                lambda sid=sandbox_id: ctx.tools.bfts_executor.create_sandbox(
+                    sandbox_id=sid,
+                    run_id=ctx.run_id,
+                ),
+            )
+            sandboxes_to_clean.append((i, sandbox_id))
+
+            child_run_id = f"{ctx.run_id}:tree:{i}"
+            child = await ctx.start_workflow(
+                f"start_tree_{i}",
+                workflow_name="bfts_tree",
+                run_input={
+                    "run_id": child_run_id,
+                    "parent_run_id": ctx.run_id,
+                    "idea": inp.idea,
+                    "num_drafts": 1,    # each child tree has 1 root; root-level num_drafts = num trees
+                    "num_workers": inp.num_workers,
+                    "max_debug_depth": inp.max_debug_depth,
+                    "debug_prob": inp.debug_prob,
+                    "max_iters": inp.max_iters,
+                    "seed": inp.seed_base + i,
+                    "sandbox_id": sandbox_id,
+                    "llm_api_key_secret": llm.llm_api_key_secret,
+                    "draft_model": llm.draft_model,
+                    "feedback_model": llm.feedback_model,
+                    "vlm_model": llm.vlm_model,
+                },
+                trigger_key=child_run_id,
+                eager_start=True,
+            )
+            children.append(
+                {"run_id": child["run_id"], "tree_index": i, "sandbox_id": sandbox_id}
+            )
+
+        for child in children:
+            res = await ctx.wait_for_workflow(
+                f"wait_tree_{child['tree_index']}", run_id=child["run_id"]
+            )
+            results.append(res)
+
+        body_succeeded = True
+    finally:
+        # Best-effort teardown of every Sandbox we provisioned. Each
+        # stop_sandbox is its own ctx.step so the engine checkpoints it,
+        # but a stuck CR (e.g. finalizer still running) must not block the
+        # other stops. We collect per-tree errors and surface them after
+        # the loop: aggregated re-raise on the happy path (so the failure
+        # is visible), structured log only when the body already raised
+        # (so the root-cause exception keeps its propagation slot).
+        # PVC follows owner refs (Spec correction #12 + agent-sandbox
+        # `shutdownPolicy: "Retain"` is overridden by an explicit delete).
+        teardown_errors: list[tuple[int, BaseException]] = []
+        for tree_index, sandbox_id in sandboxes_to_clean:
+            try:
+                await ctx.step(
+                    f"stop_sandbox_{tree_index}",
+                    lambda sid=sandbox_id: ctx.tools.bfts_executor.stop_sandbox(
+                        sandbox_id=sid
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001 — aggregated below
+                teardown_errors.append((tree_index, exc))
+
+        if teardown_errors:
+            ctx.log(
+                "bfts_root_teardown_errors",
+                run_id=ctx.run_id,
+                errors=[
+                    {"tree_index": idx, "error": repr(exc)}
+                    for idx, exc in teardown_errors
+                ],
+            )
+            if body_succeeded:
+                raise RuntimeError(
+                    "bfts_root teardown failed for "
+                    + ", ".join(
+                        f"tree_index={idx}: {exc!r}"
+                        for idx, exc in teardown_errors
+                    )
+                )
 
     return {"trees": children, "results": results}

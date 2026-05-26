@@ -1,4 +1,4 @@
-"""Test: _bfts_llm wraps OpenAI chat-completions with function-call extraction."""
+"""Test: _bfts_llm wraps OpenAI/Anthropic LLM calls with function-call extraction."""
 from __future__ import annotations
 
 import json as json_module
@@ -65,6 +65,55 @@ async def test_function_call_extraction(monkeypatch: pytest.MonkeyPatch) -> None
     )
     assert out == {"is_bug": False, "summary": "ok"}
     assert captured["url"].endswith("/v1/chat/completions")
+
+
+@pytest.mark.asyncio
+async def test_anthropic_function_call_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_post(self, url, json=None, headers=None, **_):
+        captured["url"] = url
+        captured["headers"] = headers
+        return httpx.Response(
+            200,
+            json={
+                "content": [{
+                    "type": "tool_use",
+                    "id": "toolu_x",
+                    "name": "submit_review",
+                    "input": {"is_bug": False, "summary": "ok"},
+                }]
+            },
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    out = await call_with_function(
+        LLMCall(
+            model="claude-sonnet-4-20250514",
+            temperature=0.5,
+            api_key="sk-ant-test",
+            prompt="judge",
+        ),
+        function_spec={
+            "type": "function",
+            "function": {
+                "name": "submit_review",
+                "description": "judge",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "is_bug": {"type": "boolean"},
+                        "summary": {"type": "string"},
+                    },
+                    "required": ["is_bug", "summary"],
+                },
+            },
+        },
+    )
+    assert out == {"is_bug": False, "summary": "ok"}
+    assert captured["url"].endswith("/v1/messages")
+    assert captured["headers"]["x-api-key"] == "sk-ant-test"
 
 
 def test_extract_code_happy_path() -> None:

@@ -1,7 +1,6 @@
 """Test: VLMReviewer.analyze_plots returns the contract shape."""
 from __future__ import annotations
 
-import json as _json
 import sys
 from pathlib import Path
 
@@ -22,24 +21,18 @@ async def test_analyze_returns_contract_shape(monkeypatch: pytest.MonkeyPatch, t
         return httpx.Response(
             200,
             json={
-                "choices": [{
-                    "message": {
-                        "tool_calls": [{
-                            "id": "x",
-                            "type": "function",
-                            "function": {
-                                "name": "submit_vlm_feedback",
-                                "arguments": _json.dumps({
-                                    "plot_analyses": [
-                                        {"analysis": "looks fine"},
-                                        {"analysis": "also fine"},
-                                    ],
-                                    "valid_plots_received": True,
-                                    "vlm_feedback_summary": "plots are clean and informative",
-                                }),
-                            },
-                        }]
-                    }
+                "content": [{
+                    "type": "tool_use",
+                    "id": "toolu_x",
+                    "name": "submit_vlm_feedback",
+                    "input": {
+                        "plot_analyses": [
+                            {"analysis": "looks fine"},
+                            {"analysis": "also fine"},
+                        ],
+                        "valid_plots_received": True,
+                        "vlm_feedback_summary": "plots are clean and informative",
+                    },
                 }]
             },
             request=httpx.Request("POST", url),

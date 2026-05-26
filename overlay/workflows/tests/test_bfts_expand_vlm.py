@@ -54,7 +54,7 @@ async def test_expand_node_runs_vlm_after_plot() -> None:
         "vlm_analyze": {"is_valid": True, "per_plot_analyses": [], "summary": "ok"},
     }
     ctx = _Ctx(canned)
-    expand_ctx = ExpandContext(sandbox_id="s", parent_node=None, idea={}, openai_api_key="k", node_id="n1")
+    expand_ctx = ExpandContext(sandbox_id="s", parent_node=None, idea={}, llm_api_key="k", node_id="n1")
     result = await expand_node(ctx=ctx, expand_ctx=expand_ctx)
     assert "vlm_analyze" in ctx.calls
     assert result["is_buggy_plots"] is False

@@ -49,3 +49,24 @@ async def write_best_artifact(
         artifact_id, node_id, code.encode("utf-8"),
     )
     return artifact_id
+
+
+async def write_best_node_id_artifact(
+    pool: asyncpg.Pool, *, node_id: str
+) -> str:
+    """Persist a pointer artifact (`best_node_id.txt`) naming the best node.
+
+    Mirrors `write_best_artifact`: idempotent ON CONFLICT upsert keyed by
+    (node_id, relative_path). Lets downstream tooling locate the winning
+    node from artifact storage alone without re-querying `bfts_runs`.
+    """
+    artifact_id = uuid.uuid4().hex
+    await pool.execute(
+        """
+        INSERT INTO bfts_artifacts (artifact_id, node_id, kind, relative_path, bytes)
+        VALUES ($1, $2, 'metadata', 'best_node_id.txt', $3)
+        ON CONFLICT (node_id, relative_path) DO UPDATE SET bytes = EXCLUDED.bytes
+        """,
+        artifact_id, node_id, node_id.encode("utf-8"),
+    )
+    return artifact_id

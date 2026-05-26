@@ -12,7 +12,6 @@ See docs/superpowers/plans/2026-05-25-bfts-on-centaur.md (Phase 2).
 from __future__ import annotations
 
 import json
-import os
 import random
 import sys
 import uuid
@@ -37,6 +36,8 @@ from _bfts_state import (
     update_node_metric,
 )
 
+from _bfts_config import resolve_llm_api_key, resolve_llm_settings
+
 WORKFLOW_NAME = "bfts_tree"
 
 
@@ -52,7 +53,12 @@ class Input:
     max_iters: int = 20
     seed: int = 0
     sandbox_id: str = ""              # pre-provisioned by bfts_root
-    openai_api_key_secret: str = "OPENAI_API_KEY"   # iron-proxy substitutes
+    # Optional per-run overrides; bfts_root passes resolved values. When
+    # bfts_tree is started directly, deployment env (BFTS_*) applies.
+    llm_api_key_secret: str | None = None
+    draft_model: str | None = None
+    feedback_model: str | None = None
+    vlm_model: str | None = None
 
 
 def _parse_metric_json(raw: Any) -> dict[str, Any]:
@@ -101,6 +107,14 @@ def _root_id(row: dict[str, Any]) -> str:
 
 
 async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
+    llm = resolve_llm_settings(
+        draft_model=inp.draft_model,
+        feedback_model=inp.feedback_model,
+        vlm_model=inp.vlm_model,
+        llm_api_key_secret=inp.llm_api_key_secret,
+    )
+    llm_api_key = resolve_llm_api_key(llm.llm_api_key_secret)
+
     rng = random.Random(inp.seed)
     pool = ctx._pool
 
@@ -118,6 +132,10 @@ async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
                 "debug_prob": inp.debug_prob,
                 "max_iters": inp.max_iters,
                 "seed": inp.seed,
+                "llm_api_key_secret": llm.llm_api_key_secret,
+                "draft_model": llm.draft_model,
+                "feedback_model": llm.feedback_model,
+                "vlm_model": llm.vlm_model,
             },
             seed=inp.seed,
         ),
@@ -129,8 +147,6 @@ async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
         max_debug_depth=inp.max_debug_depth,
         debug_prob=inp.debug_prob,
     )
-
-    openai_api_key = os.getenv(inp.openai_api_key_secret) or ""
 
     iters_used = 0
     while iters_used < inp.max_iters:
@@ -183,8 +199,11 @@ async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
                 sandbox_id=inp.sandbox_id,
                 parent_node=parent_row,
                 idea=inp.idea,
-                openai_api_key=openai_api_key,
+                llm_api_key=llm_api_key,
                 node_id=node_id,
+                draft_model=llm.draft_model,
+                feedback_model=llm.feedback_model,
+                vlm_model=llm.vlm_model,
             )
             result = await expand_node(ctx=ctx, expand_ctx=expand_ctx)
             await ctx.step(
@@ -202,6 +221,15 @@ async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
                     analysis=r["analysis"],
                     plan=r["plan"],
                     code=r["code"],
+                    # parse_*/plot_* fields are only populated on the good
+                    # path (the buggy short-circuit return dict omits them).
+                    # `.get(...)` → None → COALESCE / SQL-NULL preserves the
+                    # existing column value, matching the contract documented
+                    # on update_node_metric.
+                    parse_metrics_code=r.get("parse_metrics_code"),
+                    parse_term_out=r.get("parse_term_out"),
+                    plot_code=r.get("plot_code"),
+                    plot_term_out=r.get("plot_term_out"),
                 ),
             )
             if "is_buggy_plots" in result:
@@ -220,7 +248,11 @@ async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
     final_nodes = await ctx.step(
         "list_nodes_final", lambda: list_nodes_for_run(pool, run_id=inp.run_id)
     )
-    from _bfts_export import select_best, write_best_artifact   # local import keeps top tidy
+    from _bfts_export import (  # local import keeps top tidy
+        select_best,
+        write_best_artifact,
+        write_best_node_id_artifact,
+    )
 
     best = select_best(final_nodes)
     if best is not None:
@@ -229,8 +261,18 @@ async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
             lambda: write_best_artifact(pool, node_id=best["node_id"], code=best["code"]),
         )
         await ctx.step(
+            "write_best_node_id_artifact",
+            lambda: write_best_node_id_artifact(pool, node_id=best["node_id"]),
+        )
+        await ctx.step(
             "set_best",
             lambda: set_best_node(pool, run_id=inp.run_id, best_node_id=best["node_id"]),
+        )
+        ctx.log(
+            "export_best",
+            run_id=inp.run_id,
+            best_node_id=best["node_id"],
+            node_count=len(final_nodes),
         )
 
     return {

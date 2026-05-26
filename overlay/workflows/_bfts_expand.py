@@ -28,12 +28,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
+from _bfts_config import (
+    DEFAULT_DRAFT_MODEL,
+    DEFAULT_FEEDBACK_MODEL,
+    DEFAULT_LLM_API_KEY_SECRET,
+    DEFAULT_VLM_MODEL,
+)
 from _bfts_llm import LLMCall, call_for_text, call_with_function, extract_code
 from _bfts_prompts import METRIC_PARSE_SPEC, REVIEW_FUNC_SPEC, render_prompts
 
 
-_DRAFT_MODEL = "gpt-4o-2024-11-20"        # Sakana default for agent.code (research 02 §c)
-_FEEDBACK_MODEL = "gpt-4o-2024-11-20"     # Sakana default for agent.feedback
 _DRAFT_TEMP = 1.0
 _FEEDBACK_TEMP = 0.5
 
@@ -43,8 +47,11 @@ class ExpandContext:
     sandbox_id: str
     parent_node: Optional[dict[str, Any]]   # row dict from bfts_nodes; None = new draft
     idea: dict[str, Any]
-    openai_api_key: str
+    llm_api_key: str
     node_id: str
+    draft_model: str = DEFAULT_DRAFT_MODEL
+    feedback_model: str = DEFAULT_FEEDBACK_MODEL
+    vlm_model: str = DEFAULT_VLM_MODEL
 
 
 def _branch(parent: Optional[dict[str, Any]]) -> str:
@@ -95,9 +102,9 @@ def _plot_prompt(code: str, metric: dict[str, Any]) -> str:
 async def _propose_code(expand_ctx: ExpandContext) -> dict[str, Any]:
     text = await call_for_text(
         LLMCall(
-            model=_DRAFT_MODEL,
+            model=expand_ctx.draft_model,
             temperature=_DRAFT_TEMP,
-            api_key=expand_ctx.openai_api_key,
+            api_key=expand_ctx.llm_api_key,
             prompt=_propose_prompt(expand_ctx),
         )
     )
@@ -105,24 +112,28 @@ async def _propose_code(expand_ctx: ExpandContext) -> dict[str, Any]:
     return {"plan": plan, "code": code}
 
 
-async def _bug_judge(text_blobs: list[str], openai_api_key: str) -> dict[str, Any]:
+async def _bug_judge(
+    text_blobs: list[str], *, llm_api_key: str, feedback_model: str
+) -> dict[str, Any]:
     return await call_with_function(
         LLMCall(
-            model=_FEEDBACK_MODEL,
+            model=feedback_model,
             temperature=_FEEDBACK_TEMP,
-            api_key=openai_api_key,
+            api_key=llm_api_key,
             prompt="Judge whether this experiment succeeded:\n\n" + "\n\n".join(text_blobs),
         ),
         function_spec=REVIEW_FUNC_SPEC,
     )
 
 
-async def _metric_extract(parse_term_out: list[str], openai_api_key: str) -> dict[str, Any]:
+async def _metric_extract(
+    parse_term_out: list[str], *, llm_api_key: str, feedback_model: str
+) -> dict[str, Any]:
     return await call_with_function(
         LLMCall(
-            model=_FEEDBACK_MODEL,
+            model=feedback_model,
             temperature=_FEEDBACK_TEMP,
-            api_key=openai_api_key,
+            api_key=llm_api_key,
             prompt="Extract metrics from this stdout:\n\n" + "\n".join(parse_term_out)[-3000:],
         ),
         function_spec=METRIC_PARSE_SPEC,
@@ -151,7 +162,8 @@ async def expand_node(*, ctx: Any, expand_ctx: ExpandContext) -> dict[str, Any]:
         "bug_judge",
         lambda: _bug_judge(
             [proposed["code"], "\n".join(exec_res["term_out"])],
-            expand_ctx.openai_api_key,
+            llm_api_key=expand_ctx.llm_api_key,
+            feedback_model=expand_ctx.feedback_model,
         ),
     )
     is_buggy = bool(judge["is_bug"]) or exec_res["exc_type"] is not None
@@ -185,7 +197,11 @@ async def expand_node(*, ctx: Any, expand_ctx: ExpandContext) -> dict[str, Any]:
 
     metric = await ctx.step(
         "metric_extract",
-        lambda: _metric_extract(parse_exec["term_out"], expand_ctx.openai_api_key),
+        lambda: _metric_extract(
+            parse_exec["term_out"],
+            llm_api_key=expand_ctx.llm_api_key,
+            feedback_model=expand_ctx.feedback_model,
+        ),
     )
 
     plot_code = await ctx.step(
@@ -214,11 +230,15 @@ async def expand_node(*, ctx: Any, expand_ctx: ExpandContext) -> dict[str, Any]:
     ]
 
     if plot_paths:
+        vlm_model = expand_ctx.vlm_model
         vlm = await ctx.step(
             "vlm_analyze",
-            lambda: ctx.tools.bfts_vlm.analyze_plots(
-                plot_paths=plot_paths,
-                task_desc=str(expand_ctx.idea.get("Title", "")),
+            lambda paths=plot_paths, desc=str(expand_ctx.idea.get("Title", "")), m=vlm_model: (
+                ctx.tools.bfts_vlm.analyze_plots(
+                    plot_paths=paths,
+                    task_desc=desc,
+                    model=m,
+                )
             ),
         )
     else:
@@ -251,9 +271,9 @@ async def _metric_parse_inline(
 ) -> str:
     text = await call_for_text(
         LLMCall(
-            model=_DRAFT_MODEL,
+            model=expand_ctx.draft_model,
             temperature=_DRAFT_TEMP,
-            api_key=expand_ctx.openai_api_key,
+            api_key=expand_ctx.llm_api_key,
             prompt=_metric_parse_prompt(proposed["code"], exec_res["term_out"]),
         )
     )
@@ -266,9 +286,9 @@ async def _plot_propose_inline(
 ) -> str:
     text = await call_for_text(
         LLMCall(
-            model=_DRAFT_MODEL,
+            model=expand_ctx.draft_model,
             temperature=_DRAFT_TEMP,
-            api_key=expand_ctx.openai_api_key,
+            api_key=expand_ctx.llm_api_key,
             prompt=_plot_prompt(proposed["code"], metric),
         )
     )

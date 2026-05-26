@@ -44,7 +44,7 @@ async def test_draft_expansion_calls_in_order() -> None:
     }
     ctx = _RecordingCtx(canned)
     expand_ctx = ExpandContext(
-        sandbox_id="sbx-1", parent_node=None, idea={}, openai_api_key="sk-test", node_id="n-1"
+        sandbox_id="sbx-1", parent_node=None, idea={}, llm_api_key="sk-test", node_id="n-1"
     )
     result = await expand_node(ctx=ctx, expand_ctx=expand_ctx)
     # Sakana's pipeline order, every entry one ctx.step:
@@ -62,6 +62,29 @@ async def test_draft_expansion_calls_in_order() -> None:
     assert result["code"] == "print(1)"
     assert result["is_buggy"] is False
     assert result["term_out"] == ["hi\n"]
+    # Good-path expansion must surface the metric-parse + plot sub-step
+    # outputs so bfts_tree can persist them via update_node_metric.
+    assert result["parse_metrics_code"] == "print('m')"
+    assert result["parse_term_out"] == ["m\n"]
+    assert result["plot_code"] == "import matplotlib"
+    assert result["plot_term_out"] == []
+
+
+@pytest.mark.asyncio
+async def test_buggy_path_omits_parse_and_plot_keys() -> None:
+    """The buggy short-circuit return dict must NOT contain parse_*/plot_*
+    keys — bfts_tree relies on `.get()` defaults to pass None for unchanged
+    columns."""
+    canned = {
+        "draft_propose": {"plan": "p", "code": "raise RuntimeError()"},
+        "draft_exec": {"term_out": ["err\n"], "exec_time": 0.1, "exc_type": "SubprocessError", "exc_info": {"exit_code": 1}, "exc_stack": None},
+        "bug_judge": {"is_bug": True, "summary": "raised"},
+    }
+    ctx = _RecordingCtx(canned)
+    expand_ctx = ExpandContext(sandbox_id="sbx-1", parent_node=None, idea={}, llm_api_key="sk-test", node_id="n-bug")
+    result = await expand_node(ctx=ctx, expand_ctx=expand_ctx)
+    for k in ("parse_metrics_code", "parse_term_out", "plot_code", "plot_term_out"):
+        assert k not in result
 
 
 @pytest.mark.asyncio
@@ -72,7 +95,7 @@ async def test_buggy_exec_skips_plotting() -> None:
         "bug_judge": {"is_bug": True, "summary": "raised"},
     }
     ctx = _RecordingCtx(canned)
-    expand_ctx = ExpandContext(sandbox_id="sbx-1", parent_node=None, idea={}, openai_api_key="sk-test", node_id="n-2")
+    expand_ctx = ExpandContext(sandbox_id="sbx-1", parent_node=None, idea={}, llm_api_key="sk-test", node_id="n-2")
     result = await expand_node(ctx=ctx, expand_ctx=expand_ctx)
     # On buggy exec, plotting + metric_extract are skipped.
     assert ctx.calls == ["draft_propose", "draft_exec", "bug_judge"]
