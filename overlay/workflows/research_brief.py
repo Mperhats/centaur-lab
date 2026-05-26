@@ -21,7 +21,11 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from api.workflow_engine import WorkflowContext
 
-from tools.semantic_scholar.client import SemanticScholarClient
+from tools.semantic_scholar.client import (
+    RESEARCH_BRIEF_EMPTY_QUERY_ERROR,
+    RESEARCH_BRIEF_INVALID_LIMIT_ERROR,
+    SemanticScholarClient,
+)
 
 WORKFLOW_NAME = "research_brief"
 
@@ -39,10 +43,12 @@ class Input:
 # two input-validation cases. The pre-T3 workflow returned a ``"skipped"``
 # envelope with a distinct ``reason`` instead; preserve that shape so external
 # callers (Justfile smoke recipes, direct posters to ``/workflows/runs``)
-# observe no contract change.
+# observe no contract change. Keys are the tool method's exported error
+# constants so any future reword surfaces as an ImportError at the top of
+# this module rather than a silent drift that drops translations.
 _SKIPPED_TRANSLATIONS: dict[str, dict[str, str]] = {
-    "query cannot be empty": {"status": "skipped", "reason": "empty_query"},
-    "limit must be positive": {"status": "skipped", "reason": "invalid_limit"},
+    RESEARCH_BRIEF_EMPTY_QUERY_ERROR: {"status": "skipped", "reason": "empty_query"},
+    RESEARCH_BRIEF_INVALID_LIMIT_ERROR: {"status": "skipped", "reason": "invalid_limit"},
 }
 
 
@@ -74,5 +80,14 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             ctx.log("research_brief_skipped", reason=translated["reason"])
             return translated
 
-    ctx.log("research_brief_delegated", status=result.get("status"))
+    ctx.log(
+        "research_brief_delegated",
+        status=result.get("status"),
+        brief_document_id=result.get("brief_document_id"),
+        brief_action=result.get("brief_action"),
+        results_count=result.get("results_count"),
+        papers_inserted=result.get("papers_inserted"),
+        papers_updated=result.get("papers_updated"),
+        papers_noop=result.get("papers_noop"),
+    )
     return result

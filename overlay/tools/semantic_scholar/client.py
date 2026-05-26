@@ -47,6 +47,16 @@ MAX_HYBRID_SEARCH_LIMIT = 50
 DEFAULT_RESEARCH_BRIEF_LIMIT = 5
 MAX_RESEARCH_BRIEF_LIMIT = 20
 
+# Input-validation error strings emitted by ``research_brief``. Promoted to
+# module-level constants so the workflow wrapper at
+# ``overlay/workflows/research_brief.py`` can key its
+# ``error → skipped`` translation table on them by import — any future
+# reword surfaces as an ``ImportError`` rather than a silent contract drift
+# that strands external callers (Justfile smoke recipes, direct posters to
+# ``/workflows/runs``) on the wrong envelope shape.
+RESEARCH_BRIEF_EMPTY_QUERY_ERROR = "query cannot be empty"
+RESEARCH_BRIEF_INVALID_LIMIT_ERROR = "limit must be positive"
+
 # Brief markdown rendering knobs. Mirror the workflow constants from
 # ``overlay/workflows/research_brief.py`` so the rendered output is
 # byte-identical to the legacy path until Task 3 collapses the workflow
@@ -437,16 +447,22 @@ class SemanticScholarClient:
     MAX_RETRIES = 4
 
     def __init__(self, api_key: str | None = None, timeout: float = 30.0):
-        self._api_key = api_key if api_key is not None else self._resolve_api_key()
+        # Store the constructor-injected key as-is; resolve any fallback
+        # lazily at request time. Eager resolution here runs during the
+        # ToolManager's _collect_methods() pass when ToolContext.secrets
+        # is still empty, so the per-call secret never lands in the header.
+        self._api_key = api_key
         self._timeout = timeout
         self._client: httpx.Client | None = None
 
-    @staticmethod
-    def _resolve_api_key() -> str:
+    def _get_api_key(self) -> str | None:
+        """Get API key from instance or env var."""
         # The tool works anonymously; default to "" so callers don't have to
         # branch on None. Iron-proxy only injects the real value when the
         # header is actually present, so an empty string keeps requests
         # anonymous instead of breaking them.
+        if self._api_key:
+            return self._api_key
         return secret("SEMANTIC_SCHOLAR_API_KEY", "")
 
     @property
@@ -456,8 +472,9 @@ class SemanticScholarClient:
         return self._client
 
     def _headers(self) -> dict[str, str]:
-        if self._api_key:
-            return {"x-api-key": self._api_key}
+        api_key = self._get_api_key()
+        if api_key:
+            return {"x-api-key": api_key}
         return {}
 
     def _request(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -762,10 +779,10 @@ class SemanticScholarClient:
         """
         normalized_query = query.strip() if query else ""
         if not normalized_query:
-            return {"status": "error", "error": "query cannot be empty"}
+            return {"status": "error", "error": RESEARCH_BRIEF_EMPTY_QUERY_ERROR}
 
         if limit <= 0:
-            return {"status": "error", "error": "limit must be positive"}
+            return {"status": "error", "error": RESEARCH_BRIEF_INVALID_LIMIT_ERROR}
 
         database_url = _resolve_database_url()
         if not database_url:
@@ -862,6 +879,7 @@ class SemanticScholarClient:
             await conn.close()
 
     def close(self) -> None:
+        """Close the HTTP client."""
         if self._client is not None:
             self._client.close()
             self._client = None

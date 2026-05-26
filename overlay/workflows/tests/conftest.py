@@ -40,4 +40,10 @@ if "tools.semantic_scholar" not in sys.modules:
 if "tools.semantic_scholar.client" not in sys.modules:
     _client_stub = types.ModuleType("tools.semantic_scholar.client")
     _client_stub.SemanticScholarClient = object  # type: ignore[attr-defined]
+    # research_brief.py imports these constants for its error → skipped
+    # translation table; keep the stub values byte-identical to the real
+    # ones in overlay/tools/semantic_scholar/client.py so wrapper tests
+    # that hand-craft error envelopes still match by string.
+    _client_stub.RESEARCH_BRIEF_EMPTY_QUERY_ERROR = "query cannot be empty"  # type: ignore[attr-defined]
+    _client_stub.RESEARCH_BRIEF_INVALID_LIMIT_ERROR = "limit must be positive"  # type: ignore[attr-defined]
     sys.modules["tools.semantic_scholar.client"] = _client_stub
