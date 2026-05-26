@@ -50,6 +50,15 @@ api:
     # BFTS_MAX_DEBUG_DEPTH: "3"
     # BFTS_NUM_DRAFTS: "4"
     # BFTS_NUM_WORKERS: "2"
+    # F.2 prior-attempts memory window (last K node summaries injected
+    # into draft/improve propose prompts). Code default = 5; set to 0
+    # to disable.
+    # BFTS_PRIOR_ATTEMPTS_WINDOW: "5"
+    # F.4 multi-seed re-evaluation. Number of seed children fanned out
+    # from the best Stage-1 node after `set_best`. Set to 0 to skip
+    # (default); 2 here exercises the fan-out + aggregate path on
+    # every toy run so the F.4 path can't silently regress.
+    BFTS_NUM_SEEDS: "2"
 
   # The chart's default for `:latest`-tagged images is Always, which makes
   # kubelet try to pull centaur-api:latest from a public registry instead of
@@ -98,6 +107,19 @@ agentSandbox:
   enabled: true
   image:
     tag: v0.4.6
+  controller:
+    # Required so the agent-sandbox controller reconciles the
+    # extensions.agents.x-k8s.io/v1alpha1 CRDs (SandboxTemplate,
+    # SandboxClaim, SandboxWarmPool) that back BFTS sandboxing — see
+    # docs/superpowers/plans/2026-05-26-bfts-agent-sandbox-extensions.md.
+    # Without this the extension CRDs accept objects but nothing
+    # materializes them.
+    extensions: true
+    # Headroom for BFTS fan-out: each bfts_root run creates num_drafts
+    # claims ~simultaneously. The chart's default of 1 would serialize
+    # cold-start across trees.
+    sandboxClaimConcurrentWorkers: 25
+    sandboxWarmPoolConcurrentWorkers: 5
 
 slackbot:
   # Slack ingress enabled. Requires real SLACK_BOT_TOKEN and
