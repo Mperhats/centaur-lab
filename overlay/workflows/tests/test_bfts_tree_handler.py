@@ -87,6 +87,60 @@ def test_parse_metric_json_garbage_returns_worst() -> None:
     assert _parse_metric_json(42) == {"_worst": True}
 
 
+def test_to_noderef_computes_is_leaf_from_child_count() -> None:
+    """``_to_noderef`` must derive ``is_leaf`` from the row's ``child_count``
+    column produced by ``list_nodes_for_run``'s correlated subquery.
+
+    Internal nodes (``child_count >= 1``) must round-trip as
+    ``is_leaf=False`` so ``_bfts_select._buggy_leaf_nodes`` skips them.
+    Leaves (``child_count == 0``) must round-trip as ``is_leaf=True``.
+    """
+    from bfts_tree import _to_noderef
+
+    internal_row: dict[str, Any] = {
+        "node_id": "n-internal",
+        "parent_node_id": None,
+        "is_buggy": True,
+        "is_buggy_plots": None,
+        "debug_depth": 0,
+        "metric_json": None,
+        "stage_name": "draft",
+        "child_count": 2,
+    }
+    leaf_row: dict[str, Any] = {
+        "node_id": "n-leaf",
+        "parent_node_id": "n-internal",
+        "is_buggy": True,
+        "is_buggy_plots": None,
+        "debug_depth": 1,
+        "metric_json": None,
+        "stage_name": "debug",
+        "child_count": 0,
+    }
+
+    assert _to_noderef(internal_row).is_leaf is False
+    assert _to_noderef(leaf_row).is_leaf is True
+
+
+def test_to_noderef_missing_child_count_defaults_to_leaf() -> None:
+    """Backward-compat: rows without ``child_count`` (older test fixtures,
+    or pre-migration callers) default to ``is_leaf=True``. The DAO is the
+    source of truth for this column; absence means it was not queried."""
+    from bfts_tree import _to_noderef
+
+    row: dict[str, Any] = {
+        "node_id": "n-x",
+        "parent_node_id": None,
+        "is_buggy": False,
+        "is_buggy_plots": False,
+        "debug_depth": 0,
+        "metric_json": None,
+        "stage_name": "draft",
+    }
+
+    assert _to_noderef(row).is_leaf is True
+
+
 # --- Handler-level VLM wiring tests --------------------------------------
 #
 # These tests assert that `bfts_tree.handler` invokes the

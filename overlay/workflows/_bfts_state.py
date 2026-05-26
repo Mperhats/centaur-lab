@@ -168,16 +168,23 @@ async def list_nodes_for_run(
     strings — callers must ``json.loads(...)`` them. Centaur's asyncpg
     pool does not register a JSONB codec; we follow the same convention
     so the schema matches what every other Centaur DAO sees.
+
+    ``child_count`` is computed as a correlated subquery so callers
+    (``bfts_tree._to_noderef`` → ``_bfts_select._buggy_leaf_nodes``) can
+    derive ``is_leaf`` accurately. The subquery is fine at BFTS scale
+    (≤ ~50 nodes per run); a materialized CTE would be over-engineering.
     """
     rows = await pool.fetch(
         """
-        SELECT node_id, run_id, parent_node_id, step, stage_name, plan, code,
-               term_out_json, exec_time_seconds, exc_type, exc_info_json,
-               exc_stack_json, metric_json, is_buggy, is_buggy_plots, debug_depth,
-               analysis, vlm_feedback_summary
-        FROM bfts_nodes
-        WHERE run_id = $1
-        ORDER BY step ASC
+        SELECT n.node_id, n.run_id, n.parent_node_id, n.step, n.stage_name,
+               n.plan, n.code, n.term_out_json, n.exec_time_seconds, n.exc_type,
+               n.exc_info_json, n.exc_stack_json, n.metric_json, n.is_buggy,
+               n.is_buggy_plots, n.debug_depth, n.analysis, n.vlm_feedback_summary,
+               (SELECT COUNT(*) FROM bfts_nodes c WHERE c.parent_node_id = n.node_id)
+                   AS child_count
+        FROM bfts_nodes n
+        WHERE n.run_id = $1
+        ORDER BY n.step ASC
         """,
         run_id,
     )

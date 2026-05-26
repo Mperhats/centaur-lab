@@ -89,6 +89,10 @@ def _should_terminate(nodes: list[dict[str, Any]], iters_used: int, max_iters: i
 
 
 def _to_noderef(row: dict[str, Any]) -> NodeRef:
+    # ``child_count`` comes from the correlated subquery in
+    # ``_bfts_state.list_nodes_for_run``. Missing key (older callers /
+    # test fixtures) defaults to 0 → ``is_leaf=True``, matching the
+    # pre-fix behavior for rows the DAO didn't populate.
     return NodeRef(
         node_id=row["node_id"],
         parent_id=row.get("parent_node_id"),
@@ -98,7 +102,7 @@ def _to_noderef(row: dict[str, Any]) -> NodeRef:
         debug_depth=int(row.get("debug_depth") or 0),
         metric_score=score(_parse_metric_json(row.get("metric_json"))),
         stage_name=row.get("stage_name", "draft"),
-        is_leaf=True,
+        is_leaf=(int(row.get("child_count") or 0) == 0),
     )
 
 

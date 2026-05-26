@@ -10,6 +10,7 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from _bfts_select import NodeRef, SearchConfig, select_next
+from bfts_tree import _to_noderef
 
 
 @dataclass
@@ -81,6 +82,54 @@ def test_max_debug_depth_excludes_node() -> None:
     selected = select_next(nodes=[n], cfg=cfg, rng=rng)
     # No debuggable, no good_nodes → fall back to drafting (None).
     assert selected == [None]
+
+
+def test_buggy_internal_node_not_selected_for_debug() -> None:
+    """Sakana's selector debugs only buggy LEAVES — a buggy node that
+    already has a child must not appear in ``_buggy_leaf_nodes`` and must
+    not be picked for re-debugging.
+
+    Fixture is intentionally shaped as DAO rows + run through ``_to_noderef``
+    so the round-trip covers the ``is_leaf`` computation (the prior bug:
+    ``_to_noderef`` hardcoded ``is_leaf=True`` for every row, defeating the
+    selector's leaf filter).
+    """
+    parent_row = {
+        "node_id": "aaaa-parent",
+        "parent_node_id": None,
+        "is_buggy": True,
+        "is_buggy_plots": None,
+        "debug_depth": 0,
+        "metric_json": None,
+        "stage_name": "draft",
+        "child_count": 1,
+    }
+    child_row = {
+        "node_id": "bbbb-child",
+        "parent_node_id": "aaaa-parent",
+        "is_buggy": True,
+        "is_buggy_plots": None,
+        "debug_depth": 1,
+        "metric_json": None,
+        "stage_name": "debug",
+        "child_count": 0,
+    }
+
+    parent_ref = _to_noderef(parent_row)
+    child_ref = _to_noderef(child_row)
+
+    assert parent_ref.is_leaf is False, "internal node (has a child) must not be is_leaf"
+    assert child_ref.is_leaf is True, "leaf node (no children) must be is_leaf"
+
+    cfg = SearchConfig(num_drafts=1, num_workers=1, max_debug_depth=3, debug_prob=1.0)
+    selected = select_next(nodes=[parent_ref, child_ref], cfg=cfg, rng=random.Random(0))
+
+    # The internal parent must NEVER be picked for debug. The selector may
+    # legitimately fall through to draft (None) when no buggy leaf is
+    # eligible after filtering; only the parent is forbidden.
+    assert all(
+        sel is None or sel.node_id != parent_ref.node_id for sel in selected
+    ), f"internal buggy node was selected for debug: {selected}"
 
 
 def test_seed_determinism() -> None:
