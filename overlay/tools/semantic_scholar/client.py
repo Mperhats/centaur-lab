@@ -12,7 +12,14 @@ import asyncpg
 import httpx
 
 from centaur_lab.brief import persist_research_brief_from_papers
+from centaur_lab.paper_document import build_paper_document, upsert_document
+from centaur_lab.paper_fulltext import (
+    build_fulltext_document,
+    compute_pdf_sha256,
+    upsert_paper_archive,
+)
 from centaur_sdk import secret
+from semantic_scholar import pdf_fetch, pdf_parse
 
 log = logging.getLogger(__name__)
 
@@ -24,6 +31,11 @@ MAX_SEARCH_LIMIT = 50
 
 DEFAULT_RESEARCH_BRIEF_LIMIT = 5
 MAX_RESEARCH_BRIEF_LIMIT = 20
+
+MAX_PDF_BYTES = 50 * 1024 * 1024  # 50 MiB hard cap on per-paper PDF download
+PDF_DOWNLOAD_TIMEOUT_S = 60.0
+PDF_USER_AGENT = "centaur-scientist/0.1 (paper-archive; +https://centaur.run)"
+ARCHIVE_PARSER_MIN_SIZE = 100  # mirrors AI-Scientist-v2 load_paper min_size guard
 
 # Input-validation error strings emitted by ``research_brief``. Promoted to
 # module-level constants so the workflow wrapper at
@@ -89,6 +101,29 @@ class SemanticScholarClient:
 
     async def _connect(self) -> asyncpg.Connection:
         return await asyncpg.connect(self._require_database_url(), command_timeout=30)
+
+    def _acquire_pool_for_archive(self) -> Any:
+        """Return an async context manager yielding a pool-like object for the archive flow.
+
+        Default impl opens a fresh single-connection ``asyncpg`` connection
+        (``fetchval`` / ``execute`` work the same on Connection and Pool) and
+        closes it on exit, mirroring the per-call connect pattern in
+        ``_research_brief_async``. Workflow handlers and tests override this
+        method on the instance so they can reuse an existing pool — keeping
+        the override surface as a single method (instead of threading the
+        pool through every internal call) keeps the orchestration code clean.
+        """
+        database_url = self._require_database_url()
+
+        class _ConnAsPool:
+            async def __aenter__(self) -> Any:
+                self._conn = await asyncpg.connect(database_url, command_timeout=60)
+                return self._conn
+
+            async def __aexit__(self, *exc: Any) -> None:
+                await self._conn.close()
+
+        return _ConnAsPool()
 
     def _get_api_key(self) -> str | None:
         """Get API key from instance or env var."""
@@ -358,6 +393,34 @@ class SemanticScholarClient:
             log.warning("semantic_scholar research_brief failed", exc_info=True)
             return {"status": "error", "error": str(exc)}
 
+    def archive_paper(
+        self,
+        paper_id: str,
+        source_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Download, parse, and persist a paper's PDF (agent-facing tool method).
+
+        Resolves the PDF URL via :func:`pdf_fetch.derive_pdf_url`
+        (``openAccessPdf.url`` first, arXiv fallback second), downloads with
+        a 50 MiB cap, parses via the ``pymupdf4llm`` → ``pymupdf`` → ``pypdf``
+        fallback chain, and persists three rows: a raw-bytes row in
+        ``paper_archives``, a metadata row (``source_type="paper"``) in
+        ``company_context_documents``, and a parsed-text row
+        (``source_type="paper_fulltext"``, parented off the metadata row).
+
+        Idempotent on ``(paper_id, pdf_sha256)`` — re-running on an unchanged
+        PDF returns ``status="noop"`` without re-parsing or rewriting.
+
+        Returns ``{"status": "completed" | "skipped" | "noop" | "error", ...}``.
+        Never raises (catches at the boundary and returns an error envelope).
+        """
+        try:
+            return asyncio.run(self._archive_paper_async(paper_id, source_url=source_url))
+        # Boundary: agent-facing wrapper must never raise — translate to error envelope.
+        except Exception as exc:
+            log.warning("archive_paper_failed", exc_info=True)
+            return {"status": "error", "paper_id": paper_id, "error": str(exc)}
+
     async def _research_brief_async(
         self,
         *,
@@ -397,6 +460,137 @@ class SemanticScholarClient:
             return {"status": "completed", **result}
         finally:
             await conn.close()
+
+    async def _archive_paper_async(
+        self,
+        paper_id: str,
+        *,
+        source_url: str | None = None,
+    ) -> dict[str, Any]:
+        """Coroutine sibling of :meth:`archive_paper` for in-loop callers.
+
+        Performs the same fetch → parse → persist pipeline but in the
+        caller's running event loop. Workflow handlers reuse their pool by
+        overriding ``_acquire_pool_for_archive`` on the instance.
+
+        Returns the same envelope shape as :meth:`archive_paper`. Never raises
+        for expected failure modes (HTTP error, parse error, oversized PDF,
+        no PDF URL) — always returns ``{"status": "skipped" | "noop" | "error"
+        | "completed", ...}``. Programming errors (asyncpg pool down, missing
+        DATABASE_URL, etc.) propagate to the caller's wrapper.
+        """
+        normalized_id = (paper_id or "").strip()
+        if not normalized_id:
+            return {"status": "error", "paper_id": paper_id, "error": "paper_id cannot be empty"}
+
+        try:
+            paper = await asyncio.to_thread(self.get_paper, normalized_id)
+        except (ValueError, RuntimeError) as exc:
+            return {"status": "error", "paper_id": normalized_id, "error": str(exc)}
+
+        url = source_url or pdf_fetch.derive_pdf_url(paper)
+        if not url:
+            return {"status": "skipped", "paper_id": normalized_id, "reason": "no_pdf_url"}
+
+        try:
+            data, mime = await asyncio.to_thread(
+                pdf_fetch.download_pdf,
+                url,
+                timeout=PDF_DOWNLOAD_TIMEOUT_S,
+                max_bytes=MAX_PDF_BYTES,
+                user_agent=PDF_USER_AGENT,
+            )
+        except pdf_fetch.PdfTooLargeError:
+            return {
+                "status": "skipped",
+                "paper_id": normalized_id,
+                "reason": "too_large",
+                "source_url": url,
+            }
+        except pdf_fetch.PdfFetchError as exc:
+            return {
+                "status": "error",
+                "paper_id": normalized_id,
+                "source_url": url,
+                "error": str(exc),
+            }
+
+        pdf_sha256 = compute_pdf_sha256(data)
+
+        async with self._acquire_pool_for_archive() as pool:
+            existing = await pool.fetchval(
+                "SELECT pdf_sha256 FROM paper_archives WHERE paper_id = $1",
+                normalized_id,
+            )
+            if existing == pdf_sha256:
+                return {
+                    "status": "noop",
+                    "paper_id": normalized_id,
+                    "source_url": url,
+                    "archive_action": "noop",
+                    "pdf_sha256": pdf_sha256,
+                }
+
+            try:
+                parsed_text, parser_used = await asyncio.to_thread(
+                    pdf_parse.parse_pdf_to_markdown,
+                    data,
+                    ARCHIVE_PARSER_MIN_SIZE,
+                )
+            except pdf_parse.PdfParseError as exc:
+                return {
+                    "status": "error",
+                    "paper_id": normalized_id,
+                    "source_url": url,
+                    "error": str(exc),
+                }
+
+            paper_doc = build_paper_document(paper)
+            paper_action = await upsert_document(pool, paper_doc)
+
+            fulltext_doc = build_fulltext_document(
+                paper,
+                parsed_text=parsed_text,
+                parent_document_id=paper_doc["document_id"],
+                parser_used=parser_used,
+                truncated=False,
+                pdf_sha256=pdf_sha256,
+                source_url=url,
+            )
+            fulltext_action = await upsert_document(pool, fulltext_doc)
+
+            archive_action = await upsert_paper_archive(
+                pool,
+                {
+                    "paper_id": normalized_id,
+                    "source_url": url,
+                    "mime_type": mime,
+                    "size_bytes": len(data),
+                    "pdf_sha256": pdf_sha256,
+                    "pdf_bytes": data,
+                    "parsed_text": parsed_text,
+                    "parser_used": parser_used,
+                    "truncated": fulltext_doc["metadata"]["truncated"],
+                    "metadata": {
+                        "paperId": normalized_id,
+                        "url": paper_doc["url"],
+                    },
+                },
+            )
+
+        return {
+            "status": "completed",
+            "paper_id": normalized_id,
+            "source_url": url,
+            "parser_used": parser_used,
+            "pdf_sha256": pdf_sha256,
+            "size_bytes": len(data),
+            "paper_document_id": paper_doc["document_id"],
+            "paper_action": paper_action,
+            "fulltext_document_id": fulltext_doc["document_id"],
+            "fulltext_action": fulltext_action,
+            "archive_action": archive_action,
+        }
 
     def close(self) -> None:
         """Close the HTTP client."""
