@@ -509,6 +509,65 @@ class SemanticScholarClient:
             f"Semantic Scholar request failed after {self.MAX_RETRIES} attempts: {last_exc}"
         )
 
+    async def _request_async(
+        self, path: str, params: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Async sibling of ``_request`` — ``await asyncio.sleep`` for backoff.
+
+        Mirrors the retry policy of the sync ``_request`` (transient 429/5xx
+        gets exponential backoff up to 8s; any other 4xx raises immediately)
+        but uses an ``httpx.AsyncClient`` and ``await asyncio.sleep`` so the
+        retry sleeps don't block the asyncio event loop the way ``time.sleep``
+        does. Mirrors ``_exa_search_async`` in
+        ``.centaur/tools/research/websearch/client.py``.
+
+        The ``AsyncClient`` is created per-call rather than cached on the
+        instance (Option A in the review): the sync entry points
+        (``search`` / ``research_brief``) drive their own ``asyncio.run``
+        loop, and ``httpx.AsyncClient`` binds its internal anyio primitives
+        to the event loop it's instantiated under — so a cached client
+        would crash on the second ``asyncio.run`` with "Future attached to a
+        different loop". Per-call ``async with`` keeps lifecycle trivial
+        (no ``aclose`` to wire through ``__exit__``) and matches upstream
+        websearch's pattern exactly.
+        """
+        url = f"{self.BASE_URL}{path}"
+        last_exc: Exception | None = None
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            for attempt in range(self.MAX_RETRIES):
+                try:
+                    response = await client.get(
+                        url, params=params, headers=self._headers()
+                    )
+                    if response.status_code in (429, 502, 503, 504):
+                        last_exc = httpx.HTTPStatusError(
+                            f"transient {response.status_code}",
+                            request=response.request,
+                            response=response,
+                        )
+                        if attempt < self.MAX_RETRIES - 1:
+                            await asyncio.sleep(min(8.0, 2**attempt))
+                            continue
+                    response.raise_for_status()
+                    return response.json()
+                except httpx.HTTPStatusError as exc:
+                    body = exc.response.text if exc.response is not None else ""
+                    status = exc.response.status_code if exc.response is not None else "?"
+                    raise RuntimeError(
+                        f"Semantic Scholar API error ({status}): {body}"
+                    ) from exc
+                except httpx.RequestError as exc:
+                    last_exc = exc
+                    if attempt < self.MAX_RETRIES - 1:
+                        await asyncio.sleep(min(8.0, 2**attempt))
+                        continue
+                    raise RuntimeError(
+                        f"Semantic Scholar request failed: {exc}"
+                    ) from exc
+        raise RuntimeError(
+            f"Semantic Scholar request failed after {self.MAX_RETRIES} attempts: {last_exc}"
+        )
+
     def search_papers(
         self,
         query: str,
@@ -537,6 +596,35 @@ class SemanticScholarClient:
         if year_from is not None:
             params["year"] = f"{year_from}-"
         payload = self._request("/paper/search", params=params)
+        results = payload.get("data", [])
+        return [item for item in results if isinstance(item, dict)]
+
+    async def search_papers_async(
+        self,
+        query: str,
+        limit: int = 10,
+        year_from: int | None = None,
+        fields: str = DEFAULT_PAPER_FIELDS,
+    ) -> list[dict]:
+        """Async variant of ``search_papers`` for use inside coroutines.
+
+        Identical input validation and query-parameter shaping as
+        ``search_papers``; delegates to ``_request_async`` so retry backoff
+        awaits instead of blocking the event loop. Use this whenever the
+        caller is already running inside a coroutine (e.g. ``_search_async``,
+        ``_research_brief_async``); call the sync ``search_papers`` from
+        sync code paths.
+        """
+        if not query or not query.strip():
+            raise ValueError("query cannot be empty.")
+        params: dict[str, Any] = {
+            "query": query.strip(),
+            "limit": max(1, min(limit, 100)),
+            "fields": fields,
+        }
+        if year_from is not None:
+            params["year"] = f"{year_from}-"
+        payload = await self._request_async("/paper/search", params=params)
         results = payload.get("data", [])
         return [item for item in results if isinstance(item, dict)]
 
@@ -694,7 +782,10 @@ class SemanticScholarClient:
             live_results: list[dict[str, Any]] = []
             live_error: str | None = None
             try:
-                raw_live = self.search_papers(
+                # Async-aware retry: ``search_papers_async`` → ``_request_async``
+                # awaits ``asyncio.sleep`` on backoff instead of blocking the
+                # event loop with ``time.sleep``. See review.md A5.
+                raw_live = await self.search_papers_async(
                     query,
                     limit=limit,
                     year_from=effective_year_from,
@@ -817,15 +908,19 @@ class SemanticScholarClient:
         year_from: int | None,
         database_url: str,
     ) -> dict[str, Any]:
-        # Run the (synchronous, retry-prone) S2 call and the pure rendering
-        # before opening a DB connection. Unlike hybrid ``search`` — which
-        # needs a ``conn.fetch`` to resolve the cutoff year — the brief has
-        # no data dependency on the DB, so holding a real Postgres
+        # Run the (retry-prone) S2 call and the pure rendering before
+        # opening a DB connection. Unlike hybrid ``search`` — which needs
+        # a ``conn.fetch`` to resolve the cutoff year — the brief has no
+        # data dependency on the DB, so holding a real Postgres
         # connection idle through httpx retries (up to ~15s) is pure cost.
-        # Postgres ``max_connections`` is finite; we open a fresh connection
-        # per call, so concurrent invocations would otherwise pin one
-        # connection each for the duration of the S2 round trip.
-        papers = self.search_papers(
+        # Postgres ``max_connections`` is finite; we open a fresh
+        # connection per call, so concurrent invocations would otherwise
+        # pin one connection each for the duration of the S2 round trip.
+        #
+        # Async-aware retry: ``search_papers_async`` → ``_request_async``
+        # awaits ``asyncio.sleep`` on backoff instead of blocking the
+        # event loop with ``time.sleep``. See review.md A5.
+        papers = await self.search_papers_async(
             query=query,
             limit=limit,
             year_from=year_from,

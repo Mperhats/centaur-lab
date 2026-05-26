@@ -89,10 +89,17 @@ def _install_search_papers(
     *,
     exc: BaseException | None = None,
 ) -> list[dict[str, Any]]:
-    """Patch ``SemanticScholarClient.search_papers`` and record its calls."""
+    """Patch ``SemanticScholarClient.search_papers_async`` and record its calls.
+
+    ``_search_async`` (the hybrid live top-up path) now calls the async
+    sibling ``search_papers_async`` so retry backoff awaits instead of
+    blocking the event loop. Patching the sync ``search_papers`` would
+    no-op here and let the production code reach the real
+    ``httpx.AsyncClient.get``.
+    """
     calls: list[dict[str, Any]] = []
 
-    def _search_papers(self, query, limit=10, year_from=None, fields=None):  # type: ignore[no-untyped-def]
+    async def _search_papers_async(self, query, limit=10, year_from=None, fields=None):  # type: ignore[no-untyped-def]
         calls.append({"query": query, "limit": limit, "year_from": year_from})
         if exc is not None:
             raise exc
@@ -100,8 +107,8 @@ def _install_search_papers(
 
     monkeypatch.setattr(
         SemanticScholarClient,
-        "search_papers",
-        _search_papers,
+        "search_papers_async",
+        _search_papers_async,
         raising=True,
     )
     return calls
