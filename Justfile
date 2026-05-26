@@ -272,3 +272,62 @@ status:
     echo "=== API health (in-cluster) ==="
     kubectl exec -n $CENTAUR_NAMESPACE deploy/${CENTAUR_RELEASE}-centaur-api -c api -- \
       curl -fsS http://localhost:8000/health 2>&1 || echo "health probe failed"
+
+# Phase 0 platform smoke: confirms the agent-sandbox controller + api SA RBAC
+# can create a Sandbox CRD with the BFTS shape (labels, inline volumeClaim,
+# workspace mount path) and that pods/exec works. No overlay workflow
+# involved; this is a pure-kubectl check against the bundled controller.
+# See docs/superpowers/plans/2026-05-25-bfts-on-centaur.md (Phase 0 Task 0.2).
+[group('bfts')]
+bfts-platform-smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ns=$CENTAUR_NAMESPACE
+    sandbox_id="bfts-platform-smoke-$(date +%s)"
+    cleanup() {
+      kubectl -n "$ns" delete sandbox.agents.x-k8s.io "$sandbox_id" \
+        --ignore-not-found --wait=true >/dev/null 2>&1 || true
+    }
+    trap cleanup EXIT
+    cat <<YAML | kubectl -n "$ns" apply -f -
+    apiVersion: agents.x-k8s.io/v1alpha1
+    kind: Sandbox
+    metadata:
+      name: ${sandbox_id}
+      labels:
+        centaur.ai/bfts-sandbox: "true"
+    spec:
+      replicas: 1
+      service: false
+      shutdownPolicy: Retain
+      volumeClaimTemplates:
+        - metadata:
+            name: workspace
+          spec:
+            accessModes: ["ReadWriteOnce"]
+            resources:
+              requests:
+                storage: 1Gi
+      podTemplate:
+        metadata:
+          labels:
+            centaur.ai/bfts-sandbox: "true"
+        spec:
+          containers:
+            - name: sandbox
+              image: busybox:1.36
+              command: ["sleep", "infinity"]
+              workingDir: /workspace
+              volumeMounts:
+                - name: workspace
+                  mountPath: /workspace
+    YAML
+    kubectl -n "$ns" wait --for=condition=Ready pod/"$sandbox_id" --timeout=120s
+    out=$(kubectl -n "$ns" exec "$sandbox_id" -- sh -c \
+      'mkdir -p /workspace/smoke && printf "%s" "PLATFORM_OK" > /workspace/smoke/marker && cat /workspace/smoke/marker')
+    if [ "$out" = "PLATFORM_OK" ]; then
+      echo "PLATFORM SMOKE OK (sandbox ${sandbox_id})"
+      exit 0
+    fi
+    echo "unexpected exec output: '${out}'" >&2
+    exit 1
