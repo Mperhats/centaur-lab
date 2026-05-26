@@ -2,22 +2,47 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
 import pytest
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
 import save_papers
-from _paper_document import _content_hash, build_paper_document
 
-from ._fakes import FakeContext, FakePool, MetricsRecorder
+from centaur_lab.paper_document import _content_hash, build_paper_document
+
+from ._mocks import MockContext, MockPool
 
 
-class FakeS2Client:
+class MetricsRecorder:
+    """Lightweight stand-in for the metrics shim used by tests.
+
+    Records ``observe_document_size`` and ``record_document_change``
+    invocations against the same recorder so tests can assert both the
+    pre-upsert observation and the post-upsert change record without
+    mocking the real Prometheus machinery (which isn't on sys.path
+    during local runs anyway). ``observe_calls`` captures pre-upsert
+    size observations; ``change_calls`` captures post-upsert
+    ``(document, action)`` pairs. ``calls`` is preserved as an alias for
+    ``change_calls`` to keep older assertions on
+    ``MetricsRecorder.calls`` working without renames.
+    """
+
+    def __init__(self) -> None:
+        self.observe_calls: list[dict[str, Any]] = []
+        self.change_calls: list[tuple[dict[str, Any], str]] = []
+
+    @property
+    def calls(self) -> list[tuple[dict[str, Any], str]]:
+        return self.change_calls
+
+    def observe(self, document: dict[str, Any]) -> None:
+        self.observe_calls.append(document)
+
+    def record(self, document: dict[str, Any], action: str) -> None:
+        self.change_calls.append((document, action))
+
+
+class MockS2Client:
     """Stand-in for ``SemanticScholarClient`` used inside the handler."""
 
     def __init__(
@@ -44,7 +69,7 @@ class FakeS2Client:
     def close(self) -> None:
         self.close_called = True
 
-    def __enter__(self) -> FakeS2Client:
+    def __enter__(self) -> MockS2Client:
         return self
 
     def __exit__(self, *args: object) -> None:
@@ -69,8 +94,8 @@ def _paper(paper_id: str, *, title: str = "Sample Paper") -> dict[str, Any]:
 
 @pytest.mark.asyncio
 async def test_handler_skips_when_paper_ids_empty() -> None:
-    pool = FakePool()
-    ctx = FakeContext(pool)
+    pool = MockPool()
+    ctx = MockContext(pool)
 
     with patch("save_papers.SemanticScholarClient") as mock_cls:
         result = await save_papers.handler(save_papers.Input(paper_ids=[]), ctx)
@@ -84,12 +109,12 @@ async def test_handler_skips_when_paper_ids_empty() -> None:
 
 @pytest.mark.asyncio
 async def test_handler_inserts_one_paper() -> None:
-    pool = FakePool(existing_hash=None, execute_status="INSERT 0 1")
-    ctx = FakeContext(pool)
-    fake = FakeS2Client({"abc123": _paper("abc123")})
+    pool = MockPool(existing_hash=None, execute_status="INSERT 0 1")
+    ctx = MockContext(pool)
+    mock = MockS2Client({"abc123": _paper("abc123")})
 
     with patch("save_papers.SemanticScholarClient") as mock_cls:
-        mock_cls.return_value = fake
+        mock_cls.return_value = mock
         result = await save_papers.handler(
             save_papers.Input(paper_ids=["abc123"]),
             ctx,
@@ -100,25 +125,27 @@ async def test_handler_inserts_one_paper() -> None:
     assert result["papers_updated"] == 0
     assert result["papers_noop"] == 0
     assert result["papers_failed"] == 0
+    assert result["brief_document_id"].startswith("semantic_scholar:research_brief:")
+    assert result["brief_action"] == "inserted"
     assert len(result["results"]) == 1
     entry = result["results"][0]
     assert entry["status"] == "inserted"
     assert entry["document_id"] == "semantic_scholar:paper:abc123"
     assert entry["paperId"] == "abc123"
-    assert fake.close_called is True
+    assert mock.close_called is True
 
 
 @pytest.mark.asyncio
 async def test_handler_handles_partial_failure() -> None:
-    pool = FakePool(existing_hash=None, execute_status="INSERT 0 1")
-    ctx = FakeContext(pool)
-    fake = FakeS2Client(
+    pool = MockPool(existing_hash=None, execute_status="INSERT 0 1")
+    ctx = MockContext(pool)
+    mock = MockS2Client(
         {"ok1": _paper("ok1"), "ok2": _paper("ok2")},
         fail_ids=("bad",),
     )
 
     with patch("save_papers.SemanticScholarClient") as mock_cls:
-        mock_cls.return_value = fake
+        mock_cls.return_value = mock
         result = await save_papers.handler(
             save_papers.Input(paper_ids=["ok1", "bad", "ok2"]),
             ctx,
@@ -131,28 +158,29 @@ async def test_handler_handles_partial_failure() -> None:
     assert len(failed) == 1
     assert failed[0]["paperId"] == "bad"
     assert "S2 API error for bad" in failed[0]["error"]
-    assert fake.close_called is True
+    assert mock.close_called is True
     assert any(event == "save_papers_paper_failed" for event, _ in ctx.logs)
 
 
 @pytest.mark.asyncio
 async def test_handler_passes_query_to_metadata() -> None:
-    pool = FakePool(existing_hash=None, execute_status="INSERT 0 1")
-    ctx = FakeContext(pool)
-    fake = FakeS2Client({"x": _paper("x")})
+    pool = MockPool(existing_hash=None, execute_status="INSERT 0 1")
+    ctx = MockContext(pool)
+    mock = MockS2Client({"x": _paper("x")})
 
     with patch("save_papers.SemanticScholarClient") as mock_cls:
-        mock_cls.return_value = fake
+        mock_cls.return_value = mock
         await save_papers.handler(
             save_papers.Input(paper_ids=["x"], query="active inference"),
             ctx,
         )
 
-    assert len(pool.execute_calls) == 1
+    assert len(pool.execute_calls) == 3
     _query, args = pool.execute_calls[0]
     metadata_json = args[15]
     assert isinstance(metadata_json, str)
     assert '"query":"active inference"' in metadata_json
+    assert any(event == "save_papers_brief_persisted" for event, _ in ctx.logs)
 
 
 @pytest.mark.asyncio
@@ -162,12 +190,12 @@ async def test_handler_returns_noop_for_unchanged_papers() -> None:
     # save_papers calls upsert_document without a parent_document_id kwarg, so
     # the persisted hash combines the intrinsic content_hash with None.
     persisted_hash = _content_hash(document["content_hash"], None)
-    pool = FakePool(existing_hash=persisted_hash)
-    ctx = FakeContext(pool)
-    fake = FakeS2Client({"noop-id": paper})
+    pool = MockPool(existing_hash=persisted_hash)
+    ctx = MockContext(pool)
+    mock = MockS2Client({"noop-id": paper})
 
     with patch("save_papers.SemanticScholarClient") as mock_cls:
-        mock_cls.return_value = fake
+        mock_cls.return_value = mock
         result = await save_papers.handler(
             save_papers.Input(paper_ids=["noop-id"]),
             ctx,
@@ -175,48 +203,60 @@ async def test_handler_returns_noop_for_unchanged_papers() -> None:
 
     assert result["papers_noop"] == 1
     assert result["papers_inserted"] == 0
-    assert pool.execute_calls == []
+    assert "brief_document_id" in result
+    assert result["brief_action"] in ("inserted", "updated", "noop")
+    assert len(pool.execute_calls) >= 1
 
 
 @pytest.mark.asyncio
 async def test_handler_closes_client_on_exception() -> None:
-    pool = FakePool()
-    ctx = FakeContext(pool)
-    fake = FakeS2Client(
+    pool = MockPool()
+    ctx = MockContext(pool)
+    mock = MockS2Client(
         {},
         raise_on={"boom": ValueError("unexpected client failure")},
     )
 
     with patch("save_papers.SemanticScholarClient") as mock_cls:
-        mock_cls.return_value = fake
+        mock_cls.return_value = mock
         with pytest.raises(ValueError, match="unexpected client failure"):
             await save_papers.handler(
                 save_papers.Input(paper_ids=["boom"]),
                 ctx,
             )
 
-    assert fake.close_called is True
+    assert mock.close_called is True
 
 
 @pytest.mark.asyncio
 async def test_handler_emits_vm_metrics_per_upsert(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    pool = FakePool(existing_hash=None, execute_status="INSERT 0 1")
-    ctx = FakeContext(pool)
-    fake = FakeS2Client({"A": _paper("A"), "B": _paper("B")})
+    pool = MockPool(existing_hash=None, execute_status="INSERT 0 1")
+    ctx = MockContext(pool)
+    mock = MockS2Client({"A": _paper("A"), "B": _paper("B")})
     recorder = MetricsRecorder()
-    monkeypatch.setattr(save_papers, "emit_document_metrics", recorder)
+    monkeypatch.setattr(save_papers, "observe_document_size", recorder.observe)
+    monkeypatch.setattr(save_papers, "record_document_change", recorder.record)
+    import centaur_lab.brief as brief_module
+
+    monkeypatch.setattr(brief_module, "observe_document_size", recorder.observe)
+    monkeypatch.setattr(brief_module, "record_document_change", recorder.record)
 
     with patch("save_papers.SemanticScholarClient") as mock_cls:
-        mock_cls.return_value = fake
+        mock_cls.return_value = mock
         await save_papers.handler(
             save_papers.Input(paper_ids=["A", "B"]),
             ctx,
         )
 
-    assert len(recorder.calls) == 2
-    for document, action in recorder.calls:
+    # observe: initial paper upserts + brief + re-parent upserts
+    assert len(recorder.observe_calls) == 5
+    assert len(recorder.change_calls) == 5
+    paper_observes = [d for d in recorder.observe_calls if d["source_type"] == "paper"]
+    brief_observes = [d for d in recorder.observe_calls if d["source_type"] == "research_brief"]
+    assert len(paper_observes) == 4
+    assert len(brief_observes) == 1
+    for document, action in recorder.change_calls:
         assert document["source"] == "semantic_scholar"
-        assert document["source_type"] == "paper"
         assert action == "inserted"

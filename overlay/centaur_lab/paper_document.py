@@ -1,9 +1,16 @@
 """Shared helpers for projecting Semantic Scholar papers into company_context_documents.
 
-This module is intentionally prefixed with an underscore so the API workflow
-loader skips it (see `.centaur/services/api/api/workflow_engine.py` around the
-`startswith("_")` check). Sibling workflow files (e.g. `save_papers.py`,
-`research_brief.py`) import from here.
+Lives under ``overlay/centaur_lab/`` (named to avoid colliding with
+upstream's reserved ``shared.tools_runtime`` namespace) so both
+``overlay/workflows/`` and ``overlay/tools/`` can import these helpers
+without sys.path gymnastics or cross-package back-references.
+
+``build_paper_document`` projects a Semantic Scholar paper dict into the
+column shape expected by ``company_context_documents``; ``upsert_document``
+applies that row idempotently via ``content_hash`` so reruns over
+unchanged input no-op, while re-parenting an otherwise-unchanged paper
+(e.g. one previously saved by ``save_papers`` and later surfaced by
+``research_brief``) still updates the row.
 """
 
 from __future__ import annotations
@@ -14,14 +21,17 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 
-# We intentionally do not import api.runtime_control.canonical_json here even
-# though this module runs inside the API pod. Keeping the canonicalization
-# local makes the module unit-testable outside the pod and the resulting
-# content_hash is still deterministic; nothing else compares these hashes
-# across services.
+# We intentionally do not import api.runtime_control.canonical_json here so
+# this module stays unit-testable outside the API pod. The argument list
+# below is kept byte-identical to upstream's ``canonical_json``
+# (``api.runtime_control.canonical_json``): same separators, ``sort_keys``,
+# ``ensure_ascii=False`` so non-ASCII titles/authors hash to literal Unicode
+# bytes rather than ``\\uXXXX`` escapes, and no ``default=`` so non-
+# serializable values raise ``TypeError`` instead of being silently coerced.
+# Cross-system content_hash identity depends on this byte equivalence.
 def _canonical_json(value: Any) -> str:
     """Stable JSON form used for hashing and JSONB metadata serialization."""
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+    return json.dumps(value, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
 
 
 def _content_hash(*parts: Any) -> str:
@@ -115,7 +125,14 @@ def build_paper_document(paper: dict, *, query: str | None = None) -> dict:
         for a in author_dicts
     ]
 
-    metadata_raw: dict[str, Any] = {
+    # OVERLAY: include all metadata keys with explicit nulls (instead of
+    # filtering ``None`` out) so JSONB key-presence checks behave the
+    # same way for ``semantic_scholar`` rows as for Slack rows upstream.
+    # Upstream's channel-day / thread projections list every key
+    # unconditionally; dropping ``None`` keys here meant downstream
+    # ``metadata ? 'doi'`` checks reported ``false`` rather than
+    # ``true`` for papers without a DOI.
+    metadata: dict[str, Any] = {
         "paperId": paper_id_str,
         "year": year_int,
         "venue": venue if venue else None,
@@ -126,8 +143,15 @@ def build_paper_document(paper: dict, *, query: str | None = None) -> dict:
         "openAccessPdf": open_access_pdf_url,
         "query": query,
     }
-    metadata: dict[str, Any] = {k: v for k, v in metadata_raw.items() if v is not None}
 
+    # OVERLAY: ``source_updated_at`` is *sync time* (when we last
+    # observed the row), not publication time. The Semantic Scholar
+    # Graph API does not expose a per-paper update timestamp, so the
+    # nearest analog is ``datetime.now(UTC)`` — taken at projection
+    # time. Setting this to ``occurred_at`` (paper-publication year)
+    # would report multi-year ETL lag to downstream freshness
+    # dashboards. ``occurred_at`` itself stays anchored to the
+    # publication year for chronological surfacing.
     return {
         "document_id": f"semantic_scholar:paper:{paper_id_str}",
         "source": "semantic_scholar",
@@ -142,7 +166,7 @@ def build_paper_document(paper: dict, *, query: str | None = None) -> dict:
         "author_name": author_name,
         "access_scope": "company",
         "occurred_at": occurred_at,
-        "source_updated_at": occurred_at,
+        "source_updated_at": datetime.now(UTC),
         "content_hash": _content_hash(title, body, url, metadata),
         "metadata": metadata,
     }
@@ -170,6 +194,9 @@ async def upsert_document(
     effective_parent = parent_document_id if parent_document_id is not None else document.get(
         "parent_document_id"
     )
+    # OVERLAY: compound hash (intrinsic + effective_parent) — diverges from
+    # upstream's raw intrinsic-hash convention to make re-parenting trigger
+    # UPDATE even when content is unchanged. See function docstring for why.
     effective_hash = _content_hash(document["content_hash"], effective_parent)
 
     existing_hash = await pool.fetchval(

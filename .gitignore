@@ -22,6 +22,12 @@ node_modules/
 cloudflared/*.json
 cloudflared/cert.pem
 
+# Git worktrees (subagent-driven-development isolation)
+.worktrees/
+
+# Local overlay tag written by `just overlay::build` (Phase 2 deploy input)
+overlay/.tag
+
 # Editor / OS
 .idea/
 .vscode/

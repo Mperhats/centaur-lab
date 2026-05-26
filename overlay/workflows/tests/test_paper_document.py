@@ -2,22 +2,37 @@
 
 from __future__ import annotations
 
-import sys
-from datetime import UTC, datetime
-from pathlib import Path
+import hashlib
+import json
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 
-# The workflows directory isn't a package (no __init__.py — it's a runtime
-# WORKFLOW_DIRS drop folder, not an importable Python package). Tests run
-# under it, so we stitch the parent on the path to import the module by file
-# name without changing the production layout.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from centaur_lab.paper_document import (
+    _canonical_json,
+    _content_hash,
+    build_paper_document,
+    upsert_document,
+)
 
-from _paper_document import _content_hash, build_paper_document, upsert_document
+from ._mocks import EXECUTE_ARG_INDEX, MockPool
 
-from ._fakes import EXECUTE_ARG_INDEX, FakePool
+# ``build_paper_document`` stamps ``source_updated_at`` with
+# ``datetime.now(UTC)`` at projection time. Tests treat that as
+# "recent UTC datetime" rather than pinning it to a literal value; the
+# fudge factor below absorbs CI clock skew without letting genuinely
+# stale projections slip through.
+_RECENCY_TOLERANCE = timedelta(seconds=30)
+
+
+def _assert_recent_utc(value: Any) -> None:
+    """Assert ``value`` is a UTC datetime taken within the last few seconds."""
+    assert isinstance(value, datetime)
+    assert value.tzinfo is not None
+    assert value.utcoffset() == timedelta(0)
+    now = datetime.now(UTC)
+    assert now - _RECENCY_TOLERANCE <= value <= now + _RECENCY_TOLERANCE
 
 
 def _sample_paper() -> dict[str, Any]:
@@ -55,7 +70,9 @@ def test_basic_paper_builds_full_document() -> None:
     assert doc["author_name"] == "Ashish Vaswani"
     assert doc["access_scope"] == "company"
     assert doc["occurred_at"] == datetime(2017, 1, 1, tzinfo=UTC)
-    assert doc["source_updated_at"] == datetime(2017, 1, 1, tzinfo=UTC)
+    # ``source_updated_at`` tracks sync time (datetime.now(UTC) at
+    # projection), not publication year — see S10 in docs/review.md.
+    _assert_recent_utc(doc["source_updated_at"])
 
     body = doc["body"]
     assert "# Attention Is All You Need" in body
@@ -110,10 +127,15 @@ def test_missing_year_yields_null_occurred_at() -> None:
     paper["year"] = None
     doc = build_paper_document(paper)
     assert doc["occurred_at"] is None
-    assert doc["source_updated_at"] is None
+    # ``source_updated_at`` is sync time, not publication time, so it
+    # stays populated even when the paper has no known year.
+    _assert_recent_utc(doc["source_updated_at"])
     assert "- Year: Unknown" in doc["body"]
-    # year=None must be dropped from metadata per the "drop None values" rule.
-    assert "year" not in doc["metadata"]
+    # ``year`` is preserved as an explicit ``None`` in metadata (S11)
+    # so JSONB key-presence checks behave the same way for papers
+    # missing optional fields as they do for Slack rows upstream.
+    assert "year" in doc["metadata"]
+    assert doc["metadata"]["year"] is None
 
 
 def test_no_authors_yields_empty_author_fields() -> None:
@@ -126,13 +148,37 @@ def test_no_authors_yields_empty_author_fields() -> None:
     assert doc["metadata"]["authors"] == []
 
 
-def test_metadata_includes_query_only_when_provided() -> None:
+def test_metadata_includes_query_with_explicit_null_when_absent() -> None:
     paper = _sample_paper()
     doc_without = build_paper_document(paper)
-    assert "query" not in doc_without["metadata"]
+    # S11: metadata keys are present with explicit nulls rather than
+    # being dropped, so downstream ``metadata ? 'query'`` checks see
+    # the key on every row regardless of whether a query was passed.
+    assert "query" in doc_without["metadata"]
+    assert doc_without["metadata"]["query"] is None
 
     doc_with = build_paper_document(paper, query="diffusion models")
     assert doc_with["metadata"]["query"] == "diffusion models"
+
+
+def test_metadata_preserves_explicit_nulls_for_missing_optional_fields() -> None:
+    """S11: a paper missing every optional metadata field still surfaces
+    each key with an explicit ``None`` value so JSONB key-presence checks
+    (e.g. ``metadata ? 'doi'``) match the behaviour of upstream Slack
+    rows that always list every key.
+    """
+    paper = _sample_paper()
+    paper["externalIds"] = {}  # no DOI, no ArXiv
+    paper["openAccessPdf"] = None
+    paper["venue"] = None
+    paper["year"] = None
+
+    doc = build_paper_document(paper)
+
+    meta = doc["metadata"]
+    for key in ("doi", "arxivId", "openAccessPdf", "venue", "year", "query"):
+        assert key in meta, f"{key!r} should be present even when value is None"
+        assert meta[key] is None, f"{key!r} should be explicit None, got {meta[key]!r}"
 
 
 def test_content_hash_stable_across_calls_with_same_input() -> None:
@@ -152,6 +198,53 @@ def test_content_hash_changes_when_title_changes() -> None:
     assert baseline["content_hash"] != mutated["content_hash"]
 
 
+def test_canonical_json_preserves_non_ascii_literally() -> None:
+    """Non-ASCII content must be serialized as literal Unicode bytes, not
+    \\uXXXX escapes, so content_hash bytes match what upstream
+    ``api.runtime_control.canonical_json`` would compute for the same input.
+    """
+    title_jp = "深層学習"
+    title_de = "Übergang"
+
+    assert _canonical_json(title_jp) == f'"{title_jp}"'
+    assert _canonical_json(title_de) == f'"{title_de}"'
+    assert "\\u" not in _canonical_json({"title": title_jp, "name": title_de})
+
+
+def test_content_hash_for_non_ascii_paper_matches_upstream_byte_form() -> None:
+    """Strongest form: the hash must equal what we'd get if we re-canonicalized
+    the same parts with upstream's exact ``json.dumps`` arguments.
+    """
+    paper = _sample_paper()
+    paper["title"] = "深層学習: 変換器の基礎"
+    paper["authors"] = [{"authorId": "1", "name": "山田太郎"}]
+    doc = build_paper_document(paper, query="変換器")
+
+    parts = (doc["title"], doc["body"], doc["url"], doc["metadata"])
+    upstream_canonical = json.dumps(
+        parts, separators=(",", ":"), sort_keys=True, ensure_ascii=False
+    )
+    expected_hash = hashlib.sha256(upstream_canonical.encode("utf-8")).hexdigest()
+
+    assert doc["content_hash"] == expected_hash
+    assert "深層学習" in upstream_canonical
+    assert "山田太郎" in upstream_canonical
+
+
+def test_canonical_json_raises_typeerror_on_non_serializable_value() -> None:
+    """Dropping ``default=str`` means real serialization bugs surface as
+    ``TypeError`` instead of being silently coerced to ``str(value)``.
+    """
+    with pytest.raises(TypeError):
+        _canonical_json({"tags": {"a", "b"}})
+
+    class _Opaque:
+        pass
+
+    with pytest.raises(TypeError):
+        _canonical_json(_Opaque())
+
+
 @pytest.mark.asyncio
 async def test_upsert_document_returns_noop_when_hash_matches() -> None:
     doc = build_paper_document(_sample_paper())
@@ -159,7 +252,7 @@ async def test_upsert_document_returns_noop_when_hash_matches() -> None:
     # effective parent (None here) so reparenting forces an update; see the
     # relink test below.
     persisted_hash = _content_hash(doc["content_hash"], None)
-    pool = FakePool(existing_hash=persisted_hash)
+    pool = MockPool(existing_hash=persisted_hash)
 
     result = await upsert_document(pool, doc)
 
@@ -171,7 +264,7 @@ async def test_upsert_document_returns_noop_when_hash_matches() -> None:
 @pytest.mark.asyncio
 async def test_upsert_document_returns_inserted_when_no_existing_row() -> None:
     doc = build_paper_document(_sample_paper())
-    pool = FakePool(existing_hash=None, execute_status="INSERT 0 1")
+    pool = MockPool(existing_hash=None, execute_status="INSERT 0 1")
 
     result = await upsert_document(pool, doc)
 
@@ -182,7 +275,7 @@ async def test_upsert_document_returns_inserted_when_no_existing_row() -> None:
 @pytest.mark.asyncio
 async def test_upsert_document_returns_updated_when_hash_differs() -> None:
     doc = build_paper_document(_sample_paper())
-    pool = FakePool(existing_hash="old_hash", execute_status="INSERT 0 1")
+    pool = MockPool(existing_hash="old_hash", execute_status="INSERT 0 1")
 
     result = await upsert_document(pool, doc)
 
@@ -196,7 +289,7 @@ async def test_upsert_document_returns_noop_when_execute_status_zero() -> None:
     # Defensive: even with a hash mismatch, the SQL's
     # `WHERE content_hash IS DISTINCT FROM EXCLUDED.content_hash` clause can
     # report "INSERT 0 0" — treat that as a no-op.
-    pool = FakePool(existing_hash="old_hash", execute_status="INSERT 0 0")
+    pool = MockPool(existing_hash="old_hash", execute_status="INSERT 0 0")
 
     result = await upsert_document(pool, doc)
 
@@ -207,7 +300,7 @@ async def test_upsert_document_returns_noop_when_execute_status_zero() -> None:
 async def test_upsert_document_parent_kwarg_overrides_document_field() -> None:
     doc = build_paper_document(_sample_paper())
     doc["parent_document_id"] = "doc:from-document"
-    pool = FakePool(existing_hash=None, execute_status="INSERT 0 1")
+    pool = MockPool(existing_hash=None, execute_status="INSERT 0 1")
 
     result = await upsert_document(pool, doc, parent_document_id="doc:from-kwarg")
 
@@ -220,7 +313,7 @@ async def test_upsert_document_parent_kwarg_overrides_document_field() -> None:
 async def test_upsert_document_uses_document_parent_when_kwarg_omitted() -> None:
     doc = build_paper_document(_sample_paper())
     doc["parent_document_id"] = "doc:from-document"
-    pool = FakePool(existing_hash=None, execute_status="INSERT 0 1")
+    pool = MockPool(existing_hash=None, execute_status="INSERT 0 1")
 
     result = await upsert_document(pool, doc)
 
@@ -239,7 +332,7 @@ async def test_upsert_document_relinks_parent_when_content_unchanged() -> None:
     doc = build_paper_document(_sample_paper())
     intrinsic_hash = doc["content_hash"]
     no_parent_persisted_hash = _content_hash(intrinsic_hash, None)
-    pool = FakePool(existing_hash=no_parent_persisted_hash, execute_status="INSERT 0 1")
+    pool = MockPool(existing_hash=no_parent_persisted_hash, execute_status="INSERT 0 1")
 
     result = await upsert_document(pool, doc, parent_document_id="brief:Q")
 

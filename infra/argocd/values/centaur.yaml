@@ -1,0 +1,53 @@
+# TEMPLATE — prod Helm values for Argo CD. Fill sha-PLACEHOLDER tags from CI.
+# Chart source targetRevision should match .centaur submodule, e.g.:
+#   6a96324cec90a63f20723945a8a82de0bf4ec97f
+
+ironProxy:
+  # Requires 1Password Connect subchart + centaur-onepassword-connect-credentials Secret.
+  secretSource: onepassword-connect
+  image:
+    repository: ghcr.io/paradigmxyz/centaur-iron-proxy
+    tag: sha-PLACEHOLDER
+
+api:
+  pluginWatcherEnabled: false
+  warmPoolEnabled: true
+  defaultHarness: claude-code
+  slackEtlEnabled: true
+  slackSyncBackfillLookbackDays: 700
+  image:
+    repository: ghcr.io/paradigmxyz/centaur-api
+    tag: sha-PLACEHOLDER
+  reposPath: /var/lib/centaur/repos
+
+sandbox:
+  image:
+    repository: ghcr.io/paradigmxyz/centaur-agent
+    tag: sha-PLACEHOLDER
+  reposPath: /var/lib/centaur/repos
+
+slackbot:
+  enabled: true
+  image:
+    repository: ghcr.io/paradigmxyz/centaur-slackbot
+    tag: sha-PLACEHOLDER
+
+overlay:
+  image:
+    repository: ghcr.io/Mperhats/centaur-lab/centaur-overlay
+    tag: sha-PLACEHOLDER
+    sourcePath: /overlay
+
+repoCache:
+  enabled: true
+  hostPath: /var/lib/centaur/repos
+  repositories:
+    - Mperhats/centaur-lab
+  syncIntervalSeconds: 300
+  githubToken:
+    existingSecretName: centaur-infra-env
+    secretKey: GITHUB_TOKEN
+
+onepasswordConnect:
+  connect:
+    create: true

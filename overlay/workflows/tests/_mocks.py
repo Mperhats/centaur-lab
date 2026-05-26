@@ -1,11 +1,17 @@
-"""Shared test fakes for the overlay workflow test suite.
+"""Shared test mocks for the overlay workflow test suite.
 
 Test-internal helpers — the leading underscore mirrors the workflow loader's
 ``startswith("_")`` skip convention and signals that this module is not a
 workflow handler. Imported by sibling test modules
-(``test_paper_document.py``, ``test_save_papers.py``, etc.) so the same
-asyncpg pool stub and UPSERT argument-position map have a single source of
-truth.
+(``test_paper_document.py``, ``test_save_papers.py``,
+``test_research_brief.py``, and the integration suite under ``integration/``)
+so the same asyncpg pool mock, workflow context mock, and UPSERT
+argument-position map have a single source of truth.
+
+Doubles for third-party clients (e.g. ``SemanticScholarClient``) live inline
+next to the test that uses them — see upstream
+``.centaur/services/api/tests/test_company_context_documents.py`` for the
+self-contained convention.
 """
 
 from __future__ import annotations
@@ -32,8 +38,8 @@ EXECUTE_ARG_INDEX: dict[str, int] = {
 }
 
 
-class FakePool:
-    """Async-pool stub recording fetchval/execute calls for assertions.
+class MockPool:
+    """Async-pool mock recording fetchval/execute calls for assertions.
 
     Matches the surface of the asyncpg pool that
     ``_paper_document.upsert_document`` actually consumes — a single
@@ -62,11 +68,11 @@ class FakePool:
         return self._execute_status
 
 
-class FakeContext:
+class MockContext:
     """Minimal workflow context exposing ``_pool`` and a recording ``log``.
 
-    ``pool`` is intentionally typed ``Any`` so the same fake can wrap either
-    the in-memory ``FakePool`` (unit tests) or a real ``asyncpg.Pool``
+    ``pool`` is intentionally typed ``Any`` so the same mock can wrap either
+    the in-memory ``MockPool`` (unit tests) or a real ``asyncpg.Pool``
     (integration tests under ``tests/integration/``).
     """
 
@@ -76,18 +82,3 @@ class FakeContext:
 
     def log(self, event: str, **kwargs: Any) -> None:
         self.logs.append((event, kwargs))
-
-
-class MetricsRecorder:
-    """Lightweight stand-in for ``emit_document_metrics`` used by tests.
-
-    Records each call as ``(document, action)`` so tests can assert call
-    counts and argument shape without mocking the real Prometheus
-    machinery (which isn't on sys.path during local runs anyway).
-    """
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[dict[str, Any], str]] = []
-
-    def __call__(self, document: dict[str, Any], action: str) -> None:
-        self.calls.append((document, action))

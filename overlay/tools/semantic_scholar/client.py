@@ -1,98 +1,43 @@
-"""Semantic Scholar Graph API client.
-
-Reference: https://api.semanticscholar.org/api-docs/graph
-
-The Graph API is callable anonymously (heavily rate-limited) or with an
-``x-api-key`` for higher quotas. We send the header only when the secret is
-set so anonymous calls don't accidentally hit a 401 on a stale placeholder.
-
-In addition to the live Graph API helpers (``search_papers``,
-``get_paper``, ``get_references``), this module exposes a hybrid
-``search`` method that consults already-indexed papers in
-``company_context_documents`` before topping up via the live API. The
-indexed-lane helpers below are ported from
-``.centaur/tools/productivity/company_context/client.py`` — see the
-"keep in sync" note above them.
-"""
+"""Semantic Scholar Graph API client with live search and research-brief generation."""
 
 from __future__ import annotations
 
 import asyncio
-import json
+import logging
 import os
-import re
 import time
-from datetime import datetime
 from typing import Any
 
 import asyncpg
 import httpx
 
+from centaur_lab.brief import persist_research_brief_from_papers
 from centaur_sdk import secret
+
+log = logging.getLogger(__name__)
 
 DEFAULT_PAPER_FIELDS = "title,authors,year,abstract,citationCount,url,openAccessPdf"
 DEFAULT_REFERENCE_FIELDS = "title,authors,year,citationCount,url"
 
-DEFAULT_HYBRID_SEARCH_LIMIT = 10
-MAX_HYBRID_SEARCH_LIMIT = 50
+DEFAULT_SEARCH_LIMIT = 10
+MAX_SEARCH_LIMIT = 50
 
+DEFAULT_RESEARCH_BRIEF_LIMIT = 5
+MAX_RESEARCH_BRIEF_LIMIT = 20
 
-# ---------------------------------------------------------------------------
-# The BM25 query helpers below are copied verbatim from
-# .centaur/tools/productivity/company_context/client.py. Keep in sync — they
-# implement the same paradedb scoring contract that the upstream Slack tool
-# relies on.
-# ---------------------------------------------------------------------------
+# Input-validation error strings emitted by ``research_brief``. Promoted to
+# module-level constants so the workflow wrapper at
+# ``overlay/workflows/research_brief.py`` can key its
+# ``error → skipped`` translation table on them by import — any future
+# reword surfaces as an ``ImportError`` rather than a silent contract drift
+# that strands external callers (Justfile smoke recipes, direct posters to
+# ``/workflows/runs``) on the wrong envelope shape.
+RESEARCH_BRIEF_EMPTY_QUERY_ERROR = "query cannot be empty"
+RESEARCH_BRIEF_INVALID_LIMIT_ERROR = "limit must be positive"
 
-EXACT_QUERY_TITLE_BOOST = 8
-EXACT_QUERY_BODY_BOOST = 2
-TITLE_MATCH_BOOST = 4
-DEFAULT_PREVIEW_CHARS = 280
-
-_SEARCH_TERM_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/-]*")
-_STOP_WORDS = {
-    "a",
-    "an",
-    "and",
-    "are",
-    "as",
-    "at",
-    "be",
-    "but",
-    "by",
-    "for",
-    "from",
-    "how",
-    "i",
-    "if",
-    "in",
-    "into",
-    "is",
-    "it",
-    "of",
-    "on",
-    "or",
-    "our",
-    "that",
-    "the",
-    "their",
-    "there",
-    "these",
-    "they",
-    "this",
-    "to",
-    "was",
-    "we",
-    "were",
-    "what",
-    "when",
-    "where",
-    "which",
-    "who",
-    "why",
-    "will",
-    "with",
-}
+# Brief markdown rendering lives in ``centaur_lab.brief`` (shared with
+# ``save_papers``). Input-validation error strings below are imported by
+# ``overlay/workflows/research_brief.py`` for its error → skipped table.
 
 
 def _clamp(value: int, *, minimum: int, maximum: int) -> int:
@@ -100,172 +45,15 @@ def _clamp(value: int, *, minimum: int, maximum: int) -> int:
     return max(minimum, min(int(value), maximum))
 
 
-def _as_dict(value: Any) -> dict[str, Any]:
-    """Decode asyncpg JSON/JSONB values into a dict."""
-    if isinstance(value, dict):
-        return value
-    if isinstance(value, str):
-        try:
-            parsed = json.loads(value)
-            if isinstance(parsed, dict):
-                return parsed
-        except Exception:
-            return {}
-    return {}
-
-
-def _isoformat(value: Any) -> str | None:
-    """Serialize datetimes while leaving absent values explicit."""
-    if isinstance(value, datetime):
-        return value.isoformat()
-    return None
-
-
-def _normalize_text(value: str) -> str:
-    """Collapse whitespace so previews stay compact and readable."""
-    return re.sub(r"\s+", " ", value).strip()
-
-
-def _search_terms(query: str) -> list[str]:
-    """Extract unique content terms, falling back when filtering removes everything."""
-    seen: set[str] = set()
-    all_terms: list[str] = []
-    filtered_terms: list[str] = []
-    for match in _SEARCH_TERM_RE.finditer(query):
-        term = match.group(0).strip()
-        if len(term) < 2:
-            continue
-        key = term.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        all_terms.append(term)
-        if key not in _STOP_WORDS:
-            filtered_terms.append(term)
-    return filtered_terms or all_terms or [query]
-
-
-def _search_where_clause(term_count: int) -> str:
-    """Build a ParadeDB query that boosts exact matches and falls back to OR term matching."""
-    clauses = [
-        "("
-        f"title ||| $1::text::pdb.boost({EXACT_QUERY_TITLE_BOOST}) "
-        f"OR body ||| $1::text::pdb.boost({EXACT_QUERY_BODY_BOOST})"
-        ")"
-    ]
-    for index in range(2, term_count + 2):
-        clauses.append(
-            f"(title ||| ${index}::text::pdb.boost({TITLE_MATCH_BOOST}) OR body ||| ${index})"
-        )
-    return " OR ".join(clauses)
-
-
-def _body_preview(body: str, *, query: str, max_chars: int = DEFAULT_PREVIEW_CHARS) -> str:
-    """Build a compact preview centered on the first query-term hit when possible."""
-    normalized = _normalize_text(body)
-    if not normalized:
-        return ""
-    if len(normalized) <= max_chars:
-        return normalized
-
-    terms = _search_terms(query)
-    start = 0
-    lowered = normalized.lower()
-    for term in terms:
-        index = lowered.find(term.lower())
-        if index >= 0:
-            start = max(0, index - max_chars // 3)
-            break
-
-    end = min(len(normalized), start + max_chars)
-    snippet = normalized[start:end].strip()
-    if start > 0:
-        snippet = f"...{snippet}"
-    if end < len(normalized):
-        snippet = f"{snippet}..."
-    return snippet
-
-
-def _row_value(row: Any, key: str, default: Any = None) -> Any:
-    """Read values from asyncpg rows while tolerating sparse test doubles."""
-    try:
-        value = row[key]
-    except (KeyError, IndexError, TypeError):
-        return default
-    return default if value is None else value
-
-
-def _document_summary(row: Any) -> dict[str, Any]:
-    """Return the common metadata we expose for document records."""
-    return {
-        "document_id": str(_row_value(row, "document_id", "")),
-        "source": str(_row_value(row, "source", "")),
-        "source_type": str(_row_value(row, "source_type", "")),
-        "source_document_id": str(_row_value(row, "source_document_id", "")),
-        "source_chunk_id": str(_row_value(row, "source_chunk_id", "")),
-        "parent_document_id": str(_row_value(row, "parent_document_id", "") or "") or None,
-        "title": str(_row_value(row, "title", "")),
-        "url": str(_row_value(row, "url", "")),
-        "author_name": str(_row_value(row, "author_name", "")),
-        "access_scope": str(_row_value(row, "access_scope", "")),
-        "occurred_at": _isoformat(_row_value(row, "occurred_at")),
-        "source_updated_at": _isoformat(_row_value(row, "source_updated_at")),
-        "metadata": _as_dict(_row_value(row, "metadata", {})),
-    }
-
-
-def _resolve_database_url() -> str:
-    """Resolve DATABASE_URL the same way the upstream company_context tool does."""
-    # DATABASE_URL is owned by the API process, not an agent-facing secret;
-    # this mirrors company_context_client._resolve_database_url.
-    env_database_url = os.getenv("DATABASE_URL")  # noqa: TID251
-    return (env_database_url or secret("DATABASE_URL", default="")).strip()
-
-
-def _extract_paper_id(summary: dict[str, Any]) -> str:
-    """Pick a paperId out of an indexed-document summary."""
-    metadata_paper_id = summary.get("metadata", {}).get("paperId")
-    if metadata_paper_id:
-        return str(metadata_paper_id)
-    return str(summary.get("source_document_id") or "")
-
-
-def _cutoff_year_from_rows(rows: list[Any]) -> int | None:
-    """Compute the most recent ``metadata.year`` across the indexed rows."""
-    best: int | None = None
-    for row in rows:
-        metadata = _as_dict(_row_value(row, "metadata", {}))
-        raw_year = metadata.get("year")
-        if raw_year is None:
-            continue
-        try:
-            year_int = int(raw_year)
-        except (TypeError, ValueError):
-            continue
-        if best is None or year_int > best:
-            best = year_int
-    return best
-
-
-def _live_paper_result(paper: dict[str, Any]) -> dict[str, Any]:
-    """Project a Semantic Scholar paper dict into the merged search result shape."""
-    return {
-        "paperId": str(paper.get("paperId") or ""),
-        "title": paper.get("title"),
-        "year": paper.get("year"),
-        "authors": paper.get("authors") or [],
-        "abstract": paper.get("abstract"),
-        "url": paper.get("url"),
-        "citationCount": paper.get("citationCount"),
-        "openAccessPdf": paper.get("openAccessPdf"),
-        "lane": "live",
-        "result_type": "paper",
-        "score": None,
-    }
-
-
 class SemanticScholarClient:
-    """Search papers, fetch metadata, and walk the citation graph."""
+    """Search papers, fetch metadata, walk the citation graph, and build research briefs.
+
+    Wraps the Semantic Scholar Graph API
+    (https://api.semanticscholar.org/api-docs/graph), which is callable
+    anonymously (heavily rate-limited) or with an ``x-api-key`` for
+    higher quotas — the header is sent only when the secret is set so
+    anonymous calls don't accidentally hit a 401 on a stale placeholder.
+    """
 
     BASE_URL = "https://api.semanticscholar.org/graph/v1"
 
@@ -273,17 +61,45 @@ class SemanticScholarClient:
     # smooths over the common case without masking real failures.
     MAX_RETRIES = 4
 
-    def __init__(self, api_key: str | None = None, timeout: float = 30.0):
-        self._api_key = api_key if api_key is not None else self._resolve_api_key()
+    def __init__(
+        self,
+        api_key: str | None = None,
+        timeout: float = 30.0,
+        database_url: str | None = None,
+    ) -> None:
+        # Store the constructor-injected key as-is; resolve any fallback
+        # lazily at request time. Eager resolution here runs during the
+        # ToolManager's _collect_methods() pass when ToolContext.secrets
+        # is still empty, so the per-call secret never lands in the header.
+        self._api_key = api_key
         self._timeout = timeout
         self._client: httpx.Client | None = None
+        # DATABASE_URL is owned by the API process, not an agent-facing
+        # secret; mirror the resolution chain upstream company_context uses
+        # so a constructor arg can override env or secret for tests.
+        env_database_url = os.getenv("DATABASE_URL")  # noqa: TID251
+        self._database_url = (
+            database_url or env_database_url or secret("DATABASE_URL", default="")
+        ).strip()
 
-    @staticmethod
-    def _resolve_api_key() -> str:
+    def _require_database_url(self) -> str:
+        if not self._database_url:
+            raise RuntimeError(
+                "DATABASE_URL is required for semantic_scholar database access"
+            )
+        return self._database_url
+
+    async def _connect(self) -> asyncpg.Connection:
+        return await asyncpg.connect(self._require_database_url(), command_timeout=30)
+
+    def _get_api_key(self) -> str | None:
+        """Get API key from instance or env var."""
         # The tool works anonymously; default to "" so callers don't have to
         # branch on None. Iron-proxy only injects the real value when the
         # header is actually present, so an empty string keeps requests
         # anonymous instead of breaking them.
+        if self._api_key:
+            return self._api_key
         return secret("SEMANTIC_SCHOLAR_API_KEY", "")
 
     @property
@@ -293,8 +109,9 @@ class SemanticScholarClient:
         return self._client
 
     def _headers(self) -> dict[str, str]:
-        if self._api_key:
-            return {"x-api-key": self._api_key}
+        api_key = self._get_api_key()
+        if api_key:
+            return {"x-api-key": api_key}
         return {}
 
     def _request(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -329,6 +146,64 @@ class SemanticScholarClient:
             f"Semantic Scholar request failed after {self.MAX_RETRIES} attempts: {last_exc}"
         )
 
+    async def _request_async(
+        self, path: str, params: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Async sibling of ``_request`` — ``await asyncio.sleep`` for backoff.
+
+        Mirrors the retry policy of the sync ``_request`` (transient 429/5xx
+        gets exponential backoff up to 8s; any other 4xx raises immediately)
+        but uses an ``httpx.AsyncClient`` and ``await asyncio.sleep`` so the
+        retry sleeps don't block the asyncio event loop the way ``time.sleep``
+        does. Mirrors ``_exa_search_async`` in
+        ``.centaur/tools/research/websearch/client.py``.
+
+        The ``AsyncClient`` is created per-call rather than cached on the
+        instance (Option A in the review): ``research_brief`` drives its own
+        ``asyncio.run`` loop, and ``httpx.AsyncClient`` binds its internal
+        anyio primitives to the event loop it's instantiated under — so a
+        cached client would crash on the second ``asyncio.run`` with "Future
+        attached to a different loop". Per-call ``async with`` keeps lifecycle
+        trivial (no ``aclose`` to wire through ``__exit__``) and matches
+        upstream websearch's pattern exactly.
+        """
+        url = f"{self.BASE_URL}{path}"
+        last_exc: Exception | None = None
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            for attempt in range(self.MAX_RETRIES):
+                try:
+                    response = await client.get(
+                        url, params=params, headers=self._headers()
+                    )
+                    if response.status_code in (429, 502, 503, 504):
+                        last_exc = httpx.HTTPStatusError(
+                            f"transient {response.status_code}",
+                            request=response.request,
+                            response=response,
+                        )
+                        if attempt < self.MAX_RETRIES - 1:
+                            await asyncio.sleep(min(8.0, 2**attempt))
+                            continue
+                    response.raise_for_status()
+                    return response.json()
+                except httpx.HTTPStatusError as exc:
+                    body = exc.response.text if exc.response is not None else ""
+                    status = exc.response.status_code if exc.response is not None else "?"
+                    raise RuntimeError(
+                        f"Semantic Scholar API error ({status}): {body}"
+                    ) from exc
+                except httpx.RequestError as exc:
+                    last_exc = exc
+                    if attempt < self.MAX_RETRIES - 1:
+                        await asyncio.sleep(min(8.0, 2**attempt))
+                        continue
+                    raise RuntimeError(
+                        f"Semantic Scholar request failed: {exc}"
+                    ) from exc
+        raise RuntimeError(
+            f"Semantic Scholar request failed after {self.MAX_RETRIES} attempts: {last_exc}"
+        )
+
     def search_papers(
         self,
         query: str,
@@ -357,6 +232,35 @@ class SemanticScholarClient:
         if year_from is not None:
             params["year"] = f"{year_from}-"
         payload = self._request("/paper/search", params=params)
+        results = payload.get("data", [])
+        return [item for item in results if isinstance(item, dict)]
+
+    async def search_papers_async(
+        self,
+        query: str,
+        limit: int = 10,
+        year_from: int | None = None,
+        fields: str = DEFAULT_PAPER_FIELDS,
+    ) -> list[dict]:
+        """Async variant of ``search_papers`` for use inside coroutines.
+
+        Identical input validation and query-parameter shaping as
+        ``search_papers``; delegates to ``_request_async`` so retry backoff
+        awaits instead of blocking the event loop. Use this whenever the
+        caller is already running inside a coroutine (e.g.
+        ``_research_brief_async``); call the sync ``search_papers`` from
+        sync code paths.
+        """
+        if not query or not query.strip():
+            raise ValueError("query cannot be empty.")
+        params: dict[str, Any] = {
+            "query": query.strip(),
+            "limit": max(1, min(limit, 100)),
+            "fields": fields,
+        }
+        if year_from is not None:
+            params["year"] = f"{year_from}-"
+        payload = await self._request_async("/paper/search", params=params)
         results = payload.get("data", [])
         return [item for item in results if isinstance(item, dict)]
 
@@ -401,151 +305,185 @@ class SemanticScholarClient:
     def search(
         self,
         query: str,
-        limit: int = DEFAULT_HYBRID_SEARCH_LIMIT,
+        limit: int = DEFAULT_SEARCH_LIMIT,
         year_from: int | None = None,
     ) -> dict:
-        """Hybrid indexed-first, live-after search across saved + live S2 papers.
+        """Search papers via the live Semantic Scholar Graph API.
 
-        BM25-queries ``company_context_documents`` for Semantic Scholar
-        papers already projected into the table, then tops up via the
-        live ``/paper/search`` endpoint with ``year_from`` advanced past
-        the most recent indexed year. Live results whose ``paperId``
-        already appears in the indexed slice are dropped.
+        Agent-facing wrapper around ``search_papers`` that never raises —
+        returns ``{"status": "error", "error": ...}`` on failure. Does not
+        query ``company_context_documents``; use ``save_papers`` or
+        ``research_brief`` to persist results for later retrieval.
 
-        Never raises — returns an ``{"status": "error", "error": ...}``
-        dict on any failure that prevents producing results.
+        Args:
+            query: Free-text search query.
+            limit: Max results, 1..``MAX_SEARCH_LIMIT``.
+            year_from: Optional inclusive lower bound on publication year.
+
+        Returns:
+            On success::
+
+                {
+                    "status": "ok",
+                    "query": "<normalized query>",
+                    "limit": <int>,
+                    "year_from": <int | null>,
+                    "count": <int>,
+                    "results": [<S2 paper dict>, ...],
+                }
+
+            On failure, ``{"status": "error", "error": "<message>"}``.
         """
         normalized_query = query.strip() if query else ""
         if not normalized_query:
             return {"status": "error", "error": "query cannot be empty"}
 
-        database_url = _resolve_database_url()
-        if not database_url:
+        clamped_limit = _clamp(
+            limit,
+            minimum=1,
+            maximum=MAX_SEARCH_LIMIT,
+        )
+
+        try:
+            papers = self.search_papers(
+                normalized_query,
+                limit=clamped_limit,
+                year_from=year_from,
+            )
+            return {
+                "status": "ok",
+                "query": normalized_query,
+                "limit": clamped_limit,
+                "year_from": year_from,
+                "count": len(papers),
+                "results": papers,
+            }
+        except Exception as exc:
+            log.warning("semantic_scholar search failed", exc_info=True)
+            return {"status": "error", "error": str(exc)}
+
+    def research_brief(
+        self,
+        query: str,
+        limit: int = DEFAULT_RESEARCH_BRIEF_LIMIT,
+        year_from: int | None = None,
+    ) -> dict[str, Any]:
+        """Build a persisted research brief on a topic — searches Semantic Scholar,
+        renders a Markdown lit review, and writes the brief plus its citing papers
+        to ``company_context_documents`` for future RAG retrieval.
+
+        Use this when a user asks for a literature review, a research summary,
+        or "what does the literature say about X" — typical Slack prompts
+        include "build a research brief on diffusion models", "lit review on
+        active inference", "summarize recent work on retrieval-augmented
+        generation". The rendered Markdown is returned as the ``markdown``
+        field so the caller (e.g. a Slack agent) can post it directly.
+
+        Idempotent: re-running with the same ``(query, year_from)`` updates
+        the existing brief row in place (matched on a stable hash of the
+        normalized query) instead of duplicating it. Each underlying paper
+        is upserted under ``source_type="paper"`` with ``parent_document_id``
+        stamped to the brief's document id, so downstream tools can pivot
+        from a paper back to the brief that surfaced it.
+
+        Never raises — returns an ``{"status": "error", "error": ...}`` dict
+        on any failure (empty query, non-positive limit, missing
+        ``DATABASE_URL``, S2 outage, DB failure). ``limit`` above the
+        per-call ceiling is clamped, not rejected.
+
+        Args:
+            query: Free-text topic to brief (e.g. "diffusion models
+                protein design").
+            limit: Max underlying papers, 1..``MAX_RESEARCH_BRIEF_LIMIT``.
+                Values above the ceiling are clamped.
+            year_from: Optional inclusive lower bound on publication year.
+
+        Returns:
+            On success, a dict shaped::
+
+                {
+                    "status": "completed",
+                    "brief_document_id": "semantic_scholar:research_brief:<hex>",
+                    "brief_action": "inserted" | "updated" | "noop",
+                    "results_count": <int>,
+                    "papers_inserted": <int>,
+                    "papers_updated": <int>,
+                    "papers_noop": <int>,
+                    "markdown": "<full rendered brief>",
+                }
+
+            On failure, ``{"status": "error", "error": "<message>"}``.
+        """
+        normalized_query = query.strip() if query else ""
+        if not normalized_query:
+            return {"status": "error", "error": RESEARCH_BRIEF_EMPTY_QUERY_ERROR}
+
+        if limit <= 0:
+            return {"status": "error", "error": RESEARCH_BRIEF_INVALID_LIMIT_ERROR}
+
+        if not self._database_url:
             return {
                 "status": "error",
-                "error": "DATABASE_URL is required for semantic_scholar.search",
+                "error": "DATABASE_URL is required for semantic_scholar.research_brief",
             }
 
         clamped_limit = _clamp(
             limit,
             minimum=1,
-            maximum=MAX_HYBRID_SEARCH_LIMIT,
+            maximum=MAX_RESEARCH_BRIEF_LIMIT,
         )
 
         try:
             return asyncio.run(
-                self._search_async(
-                    query=normalized_query,
+                self._research_brief_async(
+                    query=query,
                     limit=clamped_limit,
                     year_from=year_from,
-                    database_url=database_url,
                 )
             )
         except Exception as exc:
+            log.warning("semantic_scholar research_brief failed", exc_info=True)
             return {"status": "error", "error": str(exc)}
 
-    async def _search_async(
+    async def _research_brief_async(
         self,
         *,
         query: str,
         limit: int,
         year_from: int | None,
-        database_url: str,
     ) -> dict[str, Any]:
-        conn = await asyncpg.connect(database_url, command_timeout=30)
+        # Run the (retry-prone) S2 call and the pure rendering before
+        # opening a DB connection. The brief has no data dependency on
+        # the DB before S2 returns, so holding a real Postgres connection
+        # idle through httpx retries (up to ~15s) is pure cost.
+        # Postgres ``max_connections`` is finite; we open a fresh
+        # connection per call, so concurrent invocations would otherwise
+        # pin one connection each for the duration of the S2 round trip.
+        #
+        # Async-aware retry: ``search_papers_async`` → ``_request_async``
+        # awaits ``asyncio.sleep`` on backoff instead of blocking the
+        # event loop with ``time.sleep``. See review.md A5.
+        papers = await self.search_papers_async(
+            query=query,
+            limit=limit,
+            year_from=year_from,
+        )
+
+        conn = await self._connect()
         try:
-            terms = _search_terms(query)
-            search_terms = [query, *terms]
-            limit_param = len(search_terms) + 1
-            rows = await conn.fetch(
-                f"""
-                SELECT
-                    document_id,
-                    source,
-                    source_type,
-                    source_document_id,
-                    source_chunk_id,
-                    parent_document_id,
-                    title,
-                    url,
-                    author_name,
-                    access_scope,
-                    body,
-                    occurred_at,
-                    source_updated_at,
-                    metadata,
-                    paradedb.score(document_id) AS score
-                FROM company_context_documents
-                WHERE ({_search_where_clause(len(terms))})
-                  AND source = 'semantic_scholar'
-                  AND source_type = 'paper'
-                ORDER BY
-                    paradedb.score(document_id) DESC,
-                    source_updated_at DESC NULLS LAST
-                LIMIT ${limit_param}
-                """,
-                *search_terms,
-                limit,
+            result = await persist_research_brief_from_papers(
+                conn,
+                query=query,
+                papers=papers,
+                year_from=year_from,
+                limit=limit,
             )
-
-            indexed_results: list[dict[str, Any]] = []
-            indexed_paper_ids: set[str] = set()
-            for row in rows:
-                summary = _document_summary(row)
-                summary["score"] = float(_row_value(row, "score", 0.0) or 0.0)
-                summary["preview"] = _body_preview(
-                    str(_row_value(row, "body", "") or ""),
-                    query=query,
-                )
-                summary["lane"] = "indexed"
-                summary["result_type"] = "paper"
-                paper_id = _extract_paper_id(summary)
-                summary["paperId"] = paper_id
-                if paper_id:
-                    indexed_paper_ids.add(paper_id)
-                indexed_results.append(summary)
-
-            cutoff_year = _cutoff_year_from_rows(rows)
-            requested_floor = year_from or 0
-            indexed_floor = (cutoff_year + 1) if cutoff_year is not None else 0
-            effective_year_from_raw = max(requested_floor, indexed_floor)
-            effective_year_from = effective_year_from_raw or None
-
-            live_results: list[dict[str, Any]] = []
-            live_error: str | None = None
-            try:
-                raw_live = self.search_papers(
-                    query,
-                    limit=limit,
-                    year_from=effective_year_from,
-                )
-                for paper in raw_live:
-                    if not isinstance(paper, dict):
-                        continue
-                    paper_id = str(paper.get("paperId") or "")
-                    if paper_id and paper_id in indexed_paper_ids:
-                        continue
-                    live_results.append(_live_paper_result(paper))
-            except Exception as exc:
-                live_error = str(exc)
-
-            return {
-                "status": "ok",
-                "query": query,
-                "limit": limit,
-                "year_from": year_from,
-                "indexed_count": len(indexed_results),
-                "live_count": len(live_results),
-                "count": len(indexed_results) + len(live_results),
-                "indexed_cutoff_year": cutoff_year,
-                "live_year_from": effective_year_from,
-                "live_error": live_error,
-                "results": [*indexed_results, *live_results],
-            }
+            return {"status": "completed", **result}
         finally:
             await conn.close()
 
     def close(self) -> None:
+        """Close the HTTP client."""
         if self._client is not None:
             self._client.close()
             self._client = None
@@ -558,5 +496,5 @@ class SemanticScholarClient:
 
 
 def _client() -> SemanticScholarClient:
-    """Factory the Centaur tool loader calls to instantiate the tool."""
+    """Factory for tool loader."""
     return SemanticScholarClient()

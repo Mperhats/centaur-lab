@@ -4,10 +4,10 @@ date: 2026-05-25
 status: approved
 owner: perhats
 related_docs:
-  - docs/centaur/quickstart.md
-  - docs/centaur/architecture.md
-  - docs/centaur/deploying-in-production.md
-  - docs/centaur/secrets/environment.md
+  - https://centaur.run/quickstart
+  - https://centaur.run/architecture
+  - https://centaur.run/deploying-in-production
+  - https://centaur.run/secrets/environment
 ---
 
 # centaur-lab MVP — local smoke test only

@@ -1,16 +1,18 @@
-"""Integration tests for paper workflows — gated on CENTAUR_TEST_DATABASE_URL.
+"""Integration tests for the semantic_scholar tool — gated on
+``CENTAUR_TEST_DATABASE_URL``.
 
-These tests exercise save_papers and research_brief against a real Postgres
-database with the centaur schema and pg_search migrations applied. The
-Semantic Scholar HTTP client is still mocked because flaky external calls
-don't add coverage we don't already have in the unit suite.
+These tests exercise ``SemanticScholarClient.research_brief`` against a
+real Postgres database with the centaur schema and pg_search migrations
+applied. The Semantic Scholar HTTP client is still mocked because flaky
+external calls don't add coverage we don't already have in the unit
+suite.
 
-Mirrors ``.centaur/services/api/tests/conftest.py:107-125``: takes the
-user's DSN (typically pointing at the dev ``ai_v2`` database), re-bases it
-onto a dedicated ``centaur_test`` database, ensures that DB exists, and
-applies the upstream migrations against it. Test fixture rows live in
-``centaur_test`` and never touch ``ai_v2`` — the dev DB is safe even with
-full-table ``TRUNCATE`` cleanup between tests.
+Mirrors ``overlay/workflows/tests/integration/conftest.py``: takes the
+user's DSN (typically pointing at the dev ``ai_v2`` database), re-bases
+it onto a dedicated ``centaur_test`` database, ensures that DB exists,
+and applies the upstream migrations against it. Test fixture rows live
+in ``centaur_test`` and never touch ``ai_v2`` — the dev DB is safe even
+with full-table ``TRUNCATE`` cleanup between tests.
 
 Recommended local setup:
 
@@ -18,13 +20,13 @@ Recommended local setup:
     PGPASSWORD=$(kubectl get secret -n centaur-system centaur-infra-env \\
         -o jsonpath='{.data.POSTGRES_PASSWORD}' | base64 -d)
     export CENTAUR_TEST_DATABASE_URL="postgres://tempo:$PGPASSWORD@localhost:5432/ai_v2"
-    just overlay::test-workflows-integration
+    just overlay::test-tools-integration
 
 The DSN's database segment is overridden — point it at any centaur DB
 (usually ``ai_v2``); the conftest uses it solely to discover host
 credentials, then connects to ``/centaur_test`` for actual test work.
-When ``CENTAUR_TEST_DATABASE_URL`` is unset, every test in this directory
-is skipped with a clear reason.
+When ``CENTAUR_TEST_DATABASE_URL`` is unset, every test in this
+directory is skipped with a clear reason.
 """
 
 from __future__ import annotations
@@ -47,9 +49,10 @@ from centaur_lab.integration_db import (
 _TEST_DATABASE = "centaur_test"
 
 # Walk up from this conftest:
-#   integration → tests → workflows → overlay → repo_root → .centaur/...
+#   integration → tests → semantic_scholar → tools → overlay → repo_root
+#   → .centaur/...
 _MIGRATIONS_DIR = (
-    Path(__file__).resolve().parents[4]
+    Path(__file__).resolve().parents[5]
     / ".centaur"
     / "services"
     / "api"
