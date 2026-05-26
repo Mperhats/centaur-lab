@@ -339,3 +339,47 @@ bfts-platform-smoke:
 [group('bfts')]
 bfts-build-executor:
     docker build -f overlay/Dockerfile.bfts-executor -t bfts-executor:latest overlay
+
+# Phase 1 end-to-end: prove that BFTS sandbox PVC retention works
+# across pause/resume. Drives BFTSExecutor (already deployed in the
+# overlay image) from inside the api pod via `kubectl exec`. See
+# docs/superpowers/plans/2026-05-25-bfts-on-centaur.md (Phase 1 Task 1.8).
+[group('bfts')]
+bfts-retention-smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    api_deploy="deploy/${CENTAUR_RELEASE}-centaur-api"
+    sandbox_id="bfts-retention-smoke-$(date +%s)"
+    py="$(cat <<'PY'
+    import asyncio, os, sys
+    sys.path.insert(0, "/app/overlay/org/tools/bfts_executor")
+    from client import BFTSExecutor, _KubernetesSandboxAPI
+
+    async def main(sandbox_id: str) -> None:
+        api = _KubernetesSandboxAPI()
+        executor = BFTSExecutor(sandbox_api=api)
+        try:
+            await executor.create_sandbox(
+                sandbox_id, run_id="retention-smoke"
+            )
+            await api.write_file(
+                sandbox_id, "/workspace/sentinel.txt", "RETENTION_OK"
+            )
+            await executor.pause_sandbox(sandbox_id)
+            await executor.resume_sandbox(sandbox_id)
+            res = await api.run_command(
+                sandbox_id, "cat /workspace/sentinel.txt", timeout_s=10.0
+            )
+            if res.stdout.strip() != "RETENTION_OK":
+                raise SystemExit(
+                    f"sentinel mismatch: '{res.stdout!r}' exit={res.exit_code}"
+                )
+            print("RETENTION SMOKE OK")
+        finally:
+            await executor.stop_sandbox(sandbox_id)
+
+    asyncio.run(main(os.environ["SANDBOX_ID"]))
+    PY
+    )"
+    kubectl -n $CENTAUR_NAMESPACE exec "$api_deploy" -c api \
+        -- env SANDBOX_ID="$sandbox_id" python -c "$py"
