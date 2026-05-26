@@ -123,16 +123,15 @@ def _install_search_papers(
     *,
     exc: BaseException | None = None,
 ) -> list[dict[str, Any]]:
-    """Patch ``SemanticScholarClient.search_papers_async`` and record its calls.
+    """Patch ``SemanticScholarClient.search_papers`` and record its calls.
 
-    ``_research_brief_async`` now calls the async sibling
-    ``search_papers_async`` so retry backoff awaits instead of blocking
-    the event loop. Patching the sync ``search_papers`` would no-op here
-    and let the production code reach the real ``httpx.AsyncClient.get``.
+    ``_research_brief_async`` bounces the sync ``search_papers`` through
+    ``asyncio.to_thread`` (so retry backoff doesn't block the event loop)
+    rather than maintaining a parallel ``httpx.AsyncClient`` path.
     """
     calls: list[dict[str, Any]] = []
 
-    async def _search_papers_async(self, query, limit=10, year_from=None, fields=None):  # type: ignore[no-untyped-def]
+    def _search_papers(self, query, limit=10, year_from=None, fields=None):  # type: ignore[no-untyped-def]
         calls.append({"query": query, "limit": limit, "year_from": year_from})
         if exc is not None:
             raise exc
@@ -140,8 +139,8 @@ def _install_search_papers(
 
     monkeypatch.setattr(
         SemanticScholarClient,
-        "search_papers_async",
-        _search_papers_async,
+        "search_papers",
+        _search_papers,
         raising=True,
     )
     return calls

@@ -3,10 +3,10 @@
 Test-internal helpers — the leading underscore mirrors the workflow loader's
 ``startswith("_")`` skip convention and signals that this module is not a
 workflow handler. Imported by sibling test modules
-(``test_paper_document.py``, ``test_save_papers.py``,
-``test_research_brief.py``, and the integration suite under ``integration/``)
-so the same asyncpg pool mock, workflow context mock, and UPSERT
-argument-position map have a single source of truth.
+(``test_paper_document.py``, ``test_save_papers.py``, and the integration
+suite under ``integration/``) so the same asyncpg pool mock, workflow
+context mock, and UPSERT argument-position map have a single source of
+truth.
 
 Doubles for third-party clients (e.g. ``SemanticScholarClient``) live inline
 next to the test that uses them — see upstream

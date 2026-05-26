@@ -9,7 +9,7 @@ the brief, and idempotency on rerun via ``content_hash``.
 The Semantic Scholar HTTP call is replaced via ``monkeypatch.setattr``
 on the client class itself — same pattern the unit suite uses — so a
 flaky external dependency can't sink an otherwise-deterministic
-persistence assertion. Everything below the ``search_papers_async``
+persistence assertion. Everything below the ``search_papers``
 boundary runs against the real Postgres provided by the ``db_pool``
 fixture in ``conftest.py``.
 
@@ -52,14 +52,12 @@ def _paper(paper_id: str, *, title: str | None = None) -> dict[str, Any]:
 def _stub_search_papers(papers: list[dict[str, Any]]):
     """Build a closure suitable for ``monkeypatch.setattr`` on the class.
 
-    Patches ``search_papers_async`` (not the sync ``search_papers``)
-    because ``_research_brief_async`` calls the async sibling — see
-    review.md A5. Returns an ``async`` function so the production code's
-    ``await`` resolves to the configured stub list instead of a coroutine
-    that never runs.
+    Patches the sync ``search_papers``; ``_research_brief_async`` bounces
+    it through ``asyncio.to_thread`` rather than maintaining a parallel
+    async HTTP path.
     """
 
-    async def _search_papers_async(
+    def _search_papers(
         self: SemanticScholarClient,
         query: str,
         limit: int = 10,
@@ -68,7 +66,7 @@ def _stub_search_papers(papers: list[dict[str, Any]]):
     ) -> list[dict[str, Any]]:
         return list(papers)
 
-    return _search_papers_async
+    return _search_papers
 
 
 def _set_database_url(monkeypatch: pytest.MonkeyPatch, dsn: str) -> None:
@@ -96,7 +94,7 @@ async def test_research_brief_persists_brief_and_papers_with_parent_link(
     papers = [_paper("pA"), _paper("pB"), _paper("pC")]
     monkeypatch.setattr(
         SemanticScholarClient,
-        "search_papers_async",
+        "search_papers",
         _stub_search_papers(papers),
         raising=True,
     )
@@ -105,9 +103,7 @@ async def test_research_brief_persists_brief_and_papers_with_parent_link(
     # bounce off ``to_thread`` so it doesn't collide with the running
     # pytest-asyncio loop.
     client = SemanticScholarClient(api_key="")
-    result = await asyncio.to_thread(
-        client.research_brief, query="active inference", limit=3
-    )
+    result = await asyncio.to_thread(client.research_brief, query="active inference", limit=3)
 
     assert result["status"] == "completed"
     assert result["results_count"] == 3
@@ -150,15 +146,13 @@ async def test_research_brief_idempotent_rerun(
     papers = [_paper("pA"), _paper("pB")]
     monkeypatch.setattr(
         SemanticScholarClient,
-        "search_papers_async",
+        "search_papers",
         _stub_search_papers(papers),
         raising=True,
     )
 
     client = SemanticScholarClient(api_key="")
-    first = await asyncio.to_thread(
-        client.research_brief, query="active inference", year_from=2023
-    )
+    first = await asyncio.to_thread(client.research_brief, query="active inference", year_from=2023)
     assert first["status"] == "completed"
     assert first["brief_action"] == "inserted"
     assert first["papers_inserted"] == 2
@@ -191,15 +185,13 @@ async def test_research_brief_no_results_brief_only(
     _set_database_url(monkeypatch, _test_dsn)
     monkeypatch.setattr(
         SemanticScholarClient,
-        "search_papers_async",
+        "search_papers",
         _stub_search_papers([]),
         raising=True,
     )
 
     client = SemanticScholarClient(api_key="")
-    result = await asyncio.to_thread(
-        client.research_brief, query="quantum gravity nothing matches"
-    )
+    result = await asyncio.to_thread(client.research_brief, query="quantum gravity nothing matches")
     assert result["status"] == "completed"
     assert result["results_count"] == 0
     assert result["papers_inserted"] == 0
