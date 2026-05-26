@@ -23,6 +23,7 @@ otherwise signals they don't want the result remembered.
 - "Summarize this paper" / DOI / arXiv ID / S2 ID → `semantic_scholar.get_paper` + `save_papers` follow-up (brief + paper)
 - "What does this paper cite?" → `semantic_scholar.get_references`
 - "Build a brief / lit review / writeup on X" → `semantic_scholar.research_brief` (atomic search + render + persist)
+- "Read the actual paper / quote from the body / I need more than the abstract" → `semantic_scholar.archive_paper` (single) or `archive_papers` workflow (batch) — fetches the open-access PDF, parses to Markdown, and indexes the full text for BM25 search
 
 ## Paper Search (`semantic_scholar.search`)
 
@@ -124,3 +125,68 @@ The `brief_document_id` is stable for the same query + `year_from`
 (case-insensitive), so re-running updates the same row instead of accruing
 duplicates; surface it for traceability so a future turn (or a RAG retrieval
 over `company_context_documents`) can pivot back to the exact brief.
+
+## Archiving Full-Text PDFs
+
+`save_papers` and `research_brief` only ever index the abstract — useful
+for ranking and discovery, not for substantive quoting or methodology
+review. When the user wants more than the abstract ("read the paper",
+"quote from the methods section", "what does this paper actually
+report?"), reach for the archive surface.
+
+Two surfaces:
+
+- `semantic_scholar.archive_paper(paper_id)` — single paper, agent-facing
+  tool method. Returns inline; safe to call from a Slack turn.
+- `archive_papers` workflow — batch over a list of paper IDs. Best when
+  the user just produced a brief and wants the bodies of every cited
+  paper indexed for later retrieval.
+
+Pipeline (both surfaces):
+
+1. Resolves the PDF URL from `openAccessPdf.url`, falling back to
+   `https://arxiv.org/pdf/{externalIds.ArXiv}.pdf` when present.
+2. Streams the PDF with a 50 MiB hard cap. Paywalled / oversized papers
+   return `{"status": "skipped", "reason": "no_pdf_url" | "too_large"}` —
+   not an error, just unfetchable. Surface this to the user verbatim
+   instead of retrying.
+3. Parses through a `pymupdf4llm` → `pymupdf` → `pypdf` fallback chain
+   with a 100-char min-size guard between tiers. The first tier produces
+   real Markdown (preserves headings, tables, reading order); the
+   later tiers are plain-text fallbacks for image-only or restricted-env
+   PDFs.
+4. Persists three rows:
+   - raw bytes + parsed text in `paper_archives` (overlay-owned, keyed
+     by paperId — source of truth, lets us re-parse without re-fetching)
+   - the metadata row in `company_context_documents` with
+     `source_type="paper"` (same shape as `save_papers` writes)
+   - the parsed Markdown body in `company_context_documents` with
+     `source_type="paper_fulltext"`, `parent_document_id` pointing at
+     the metadata row
+
+Idempotent on `(paper_id, pdf_sha256)` — re-running on an unchanged PDF
+returns `{"status": "noop", "archive_action": "noop", ...}` without
+re-parsing or rewriting. Safe to call without checking whether the
+paper has been archived before.
+
+When ranking or filtering search results downstream, the
+`paper_fulltext` rows make the body searchable via BM25. The `paper`
+rows remain unchanged so abstract-level queries keep their existing
+recall and idempotency contracts.
+
+Examples:
+
+```bash
+# Single paper
+call discover semantic_scholar
+call run semantic_scholar archive_paper '{"paper_id":"173ba8ae4582b6f9f6919aa3f813579a5349f1f9"}'
+
+# Batch over a brief's paper IDs
+call workflow run '{"workflow_name":"archive_papers","input":{"paper_ids":["173ba8ae...","abcd1234..."]}}'
+```
+
+Don't archive a paper just to read its abstract — the abstract is
+already in the metadata row. Archive only when the user actually needs
+the body. Don't loop `archive_paper` over hundreds of IDs in one turn;
+post to the `archive_papers` workflow instead so the API pod handles
+the batch with a single connection lease.
