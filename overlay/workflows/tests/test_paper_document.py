@@ -17,7 +17,7 @@ import pytest
 # name without changing the production layout.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from shared.paper_document import (
+from centaur_lab.paper_document import (
     _canonical_json,
     _content_hash,
     build_paper_document,

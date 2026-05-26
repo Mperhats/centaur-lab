@@ -23,8 +23,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 if TYPE_CHECKING:
     from api.workflow_engine import WorkflowContext
 
-from shared.metrics import observe_document_size, record_document_change
-from shared.paper_document import build_paper_document, upsert_document
+from centaur_lab.metrics import observe_document_size, record_document_change
+from centaur_lab.paper_document import build_paper_document, upsert_document
 from tools.semantic_scholar.client import SemanticScholarClient
 
 WORKFLOW_NAME = "save_papers"

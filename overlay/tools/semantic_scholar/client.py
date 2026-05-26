@@ -15,14 +15,14 @@ from typing import Any
 import asyncpg
 import httpx
 
-from centaur_sdk import secret
-from shared.metrics import observe_document_size, record_document_change
-from shared.paper_document import (
+from centaur_lab.metrics import observe_document_size, record_document_change
+from centaur_lab.paper_document import (
     _canonical_json,
     _content_hash,
     build_paper_document,
     upsert_document,
 )
+from centaur_sdk import secret
 
 log = logging.getLogger(__name__)
 
@@ -287,9 +287,9 @@ def _brief_id_for(query: str, year_from: int | None) -> str:
 
     Date is intentionally excluded so re-running the same query updates
     the same row instead of accreting one brief per run. Reuses the
-    ``shared.paper_document`` canonical JSON helper so any future tweak
-    to canonicalization flows through here without silently drifting
-    brief IDs.
+    ``centaur_lab.paper_document`` canonical JSON helper so any future
+    tweak to canonicalization flows through here without silently
+    drifting brief IDs.
     """
     canonical = _canonical_json([query.strip().lower(), year_from])
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:_BRIEF_ID_HEX_LEN]

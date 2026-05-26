@@ -1,8 +1,9 @@
 """Shared helpers for projecting Semantic Scholar papers into company_context_documents.
 
-Lives under ``overlay/shared/`` so both ``overlay/workflows/`` and
-``overlay/tools/`` can import these helpers without sys.path gymnastics
-or cross-package back-references.
+Lives under ``overlay/centaur_lab/`` (named to avoid colliding with
+upstream's reserved ``shared.tools_runtime`` namespace) so both
+``overlay/workflows/`` and ``overlay/tools/`` can import these helpers
+without sys.path gymnastics or cross-package back-references.
 
 ``build_paper_document`` projects a Semantic Scholar paper dict into the
 column shape expected by ``company_context_documents``; ``upsert_document``

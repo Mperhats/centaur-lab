@@ -16,9 +16,9 @@ from typing import Any
 import asyncpg
 import pytest
 
+from centaur_lab.paper_document import _content_hash
 from semantic_scholar import client as s2_client
 from semantic_scholar.client import SemanticScholarClient
-from shared.paper_document import _content_hash
 
 # ---------------------------------------------------------------------------
 # Mocks
@@ -685,10 +685,10 @@ def test_research_brief_markdown_contains_query_and_papers(
 
 
 # ---------------------------------------------------------------------------
-# 17. Sanity: _content_hash import from shared resolves (regression guard)
+# 17. Sanity: _content_hash import from centaur_lab resolves (regression guard)
 # ---------------------------------------------------------------------------
 
 
-def test_shared_paper_document_import_resolves() -> None:
+def test_centaur_lab_paper_document_import_resolves() -> None:
     """If this fails, conftest didn't put overlay/ on sys.path."""
     assert callable(_content_hash)

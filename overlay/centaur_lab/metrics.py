@@ -1,8 +1,9 @@
 """Shim around ``api.vm_metrics`` for ``company_context_documents`` upserts.
 
-Lives under ``overlay/shared/`` so both ``overlay/workflows/`` and
-``overlay/tools/`` callers can emit ``vm_metrics`` events with a single
-import at every upsert call site.
+Lives under ``overlay/centaur_lab/`` (named to avoid colliding with
+upstream's reserved ``shared.tools_runtime`` namespace) so both
+``overlay/workflows/`` and ``overlay/tools/`` callers can emit
+``vm_metrics`` events with a single import at every upsert call site.
 
 Inside the API pod ``api.vm_metrics`` resolves cleanly and calls land in
 the real Prometheus counters. Outside the pod (every local pytest run,
