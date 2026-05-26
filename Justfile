@@ -383,3 +383,44 @@ bfts-retention-smoke:
     )"
     kubectl -n $CENTAUR_NAMESPACE exec "$api_deploy" -c api \
         -- env SANDBOX_ID="$sandbox_id" /app/.venv/bin/python -c "$py"
+
+# Phase 2 smoke: kick off a tiny BFTS run (1 draft, 2 iters) and stream
+# status. See docs/superpowers/plans/2026-05-25-bfts-on-centaur.md (Phase 2).
+[group('bfts')]
+bfts-toy-run:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    api_deploy="deploy/${CENTAUR_RELEASE}-centaur-api"
+    exec_curl() {
+      kubectl exec -n $CENTAUR_NAMESPACE "$api_deploy" -- sh -c \
+        'curl -sS "$@" -H "X-Api-Key: $SLACKBOT_API_KEY"' -- "$@"
+    }
+    run=$(exec_curl -X POST http://localhost:8000/workflows/runs \
+        -H "Content-Type: application/json" \
+        -d '{
+              "workflow_name":"bfts_root",
+              "input":{
+                "idea":{
+                  "Name":"toy-linreg",
+                  "Title":"Linear regression baseline on 200 synthetic samples",
+                  "Short Hypothesis":"A least-squares fit on a 1-feature dataset should achieve MSE below the variance of y.",
+                  "Experiments":["sklearn.linear_model.LinearRegression on a single synthetic dataset of 200 samples."]
+                },
+                "num_drafts":1,
+                "num_workers":1,
+                "max_iters":2,
+                "debug_prob":0.5
+              }
+            }')
+    run_id=$(printf '%s' "$run" | jq -r '.run_id')
+    echo "started bfts_root run ${run_id}"
+    for _ in $(seq 1 240); do
+      state=$(exec_curl "http://localhost:8000/workflows/runs/${run_id}")
+      status=$(printf '%s' "$state" | jq -r '.status // empty')
+      [ "$status" = "completed" ] && { printf '%s\n' "$state" | jq; exit 0; }
+      [ "$status" = "failed" ] || [ "$status" = "failed_permanent" ] && { printf '%s\n' "$state" | jq >&2; exit 1; }
+      sleep 5
+    done
+    echo "bfts_root run ${run_id} did not reach terminal in time" >&2
+    exec_curl "http://localhost:8000/workflows/runs/${run_id}" | jq >&2
+    exit 1
