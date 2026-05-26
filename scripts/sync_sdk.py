@@ -1,23 +1,14 @@
-"""Populate .centaur/ and sync the dev venv.
+"""Advance the .centaur submodule pin to upstream HEAD and verify.
 
 Run from the repo root:
 
-    uv run python scripts/sync_sdk.py            # default: init at pinned SHA + uv sync
-    uv run python scripts/sync_sdk.py bump       # advance pin to upstream HEAD + pytest
+    uv run scripts/sync_sdk.py
 
-Default
-    Init the .centaur submodule at the pinned SHA, then ``uv sync`` so
-    .venv/ matches pyproject.toml. Run after a fresh clone or after
-    pulling a teammate's pin bump.
-
-bump
-    Advance .centaur/ to upstream HEAD, run the test suite, and stage
-    the new pin for commit. Use when you want to pull in the latest
-    centaur_sdk + chart changes.
-
-The repo-root ``centaur_sdk`` symlink resolves through whatever
-.centaur/ holds at any moment, so this is the only entrypoint needed
-to keep the SDK in sync.
+Pulls the latest ``.centaur`` (which is what the repo-root ``centaur_sdk``
+symlink resolves through), runs the test suite against the new SDK, and
+stages the pin bump for commit. Use when you want to upgrade the SDK to
+the upstream HEAD; teammates will pick up the new pin via
+``git submodule update --init --recursive`` once you commit + push.
 """
 
 from __future__ import annotations
@@ -37,23 +28,14 @@ def capture(*args: str) -> str:
 
 def main() -> int:
     os.chdir(capture("git", "rev-parse", "--show-toplevel"))
-    cmd = sys.argv[1] if len(sys.argv) > 1 else "init"
 
-    if cmd == "init":
-        run("git", "submodule", "update", "--init", "--recursive")
-        run("uv", "sync")
-        return 0
+    run("git", "submodule", "update", "--remote", ".centaur")
+    sha = capture("git", "-C", ".centaur", "rev-parse", "--short", "HEAD")
+    run("uv", "run", "pytest", "tests/")
+    run("git", "add", ".centaur")
 
-    if cmd in {"bump", "--bump"}:
-        run("git", "submodule", "update", "--remote", ".centaur")
-        sha = capture("git", "-C", ".centaur", "rev-parse", "--short", "HEAD")
-        run("uv", "run", "pytest", "tests/")
-        run("git", "add", ".centaur")
-        print(f'\nPin advanced to {sha}. Commit with:\n  git commit -m "bump .centaur to {sha}"')
-        return 0
-
-    print(f"Usage: uv run python {sys.argv[0]} [init|bump]", file=sys.stderr)
-    return 2
+    print(f'\nPin advanced to {sha}. Commit with:\n  git commit -m "bump .centaur to {sha}"')
+    return 0
 
 
 if __name__ == "__main__":

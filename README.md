@@ -10,8 +10,8 @@
 ## Quickstart
 
 ```bash
-uv run python scripts/sync_sdk.py        # init .centaur submodule + uv sync
-uv run pytest tests/
+git submodule update --init --recursive
+uv sync && uv run pytest tests/
 docker build -t centaur-overlay:dev .    # smoke test; CI publishes to GHCR on merge to main
 ```
 
@@ -42,7 +42,7 @@ so syncing the SDK == bumping the submodule pin. To advance the pin to
 upstream's latest, run the tests against it, and stage the bump:
 
 ```bash
-uv run python scripts/sync_sdk.py bump
+uv run scripts/sync_sdk.py
 git commit -m "bump .centaur to <sha>"
 ```
 
