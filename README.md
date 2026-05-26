@@ -152,6 +152,27 @@ To exercise the Codex harness instead, mention the bot in Slack with the
 selector: `@centaur --codex reply with exactly PONG`. Requires `OPENAI_API_KEY`
 in `.env` so `bootstrap-secrets` can patch it into the Secret.
 
+## BFTS platform smoke
+
+After `just up` completes, verify the agent-sandbox controller + api SA
+RBAC + inline `volumeClaimTemplates` mount path used by BFTS with:
+
+```bash
+just bfts-platform-smoke
+```
+
+Expected output: `PLATFORM SMOKE OK (sandbox bfts-platform-smoke-<epoch>)`.
+The recipe creates a one-off `agents.x-k8s.io/v1alpha1 Sandbox` CRD with
+the same labels and `/workspace` PVC layout the BFTS executor will use,
+execs into the pod, writes/reads a marker file, and tears the CRD down
+(with `--cascade=foreground` so the PVC is reaped before the recipe
+returns). If it fails, see
+[`docs/superpowers/plans/2026-05-25-bfts-on-centaur.md`](docs/superpowers/plans/2026-05-25-bfts-on-centaur.md)
+(Phase 0, Task 0.3 Step 4 troubleshooting). This recipe is the
+platform-health contract every later BFTS phase depends on. The full
+`bfts_executor.create_sandbox → pause → resume → stop` round trip is
+exercised separately at the end of Phase 1 (`just bfts-retention-smoke`).
+
 ## Tear down
 
 ```bash
