@@ -13,16 +13,17 @@ build-backend = "hatchling.build"
 # in the root pyproject.toml (single venv); this file exists for two
 # things only:
 #   1. Tool discovery (tool_manager scans tools/<name>/pyproject.toml)
-#   2. iron-proxy header injection (the [tool.centaur].optional_secrets
-#      block tells the firewall to substitute the real key for outbound
+#   2. iron-proxy header injection (the [tool.centaur].secrets block
+#      tells the firewall to substitute the real key for outbound
 #      requests to api.semanticscholar.org).
 #
-# ``optional_secrets`` (not ``secrets``): anonymous Semantic Scholar
-# calls work at a lower rate limit, so the tool stays usable when the
-# key is unset. ``secrets`` would hide the tool from the agent until
-# the cluster Secret had the key set.
+# ``secrets`` (required, not ``optional_secrets``): the agent only sees
+# this tool when the cluster Secret resolves SEMANTIC_SCHOLAR_API_KEY.
+# Anonymous calls would degrade silently to S2's tight 1 req/sec
+# unauthenticated rate limit — better to hide the tool than have the
+# agent burn turns on rate-limit errors.
 [tool.centaur]
 module = "client.py"
-optional_secrets = [
+secrets = [
     {type = "http", name = "SEMANTIC_SCHOLAR_API_KEY", match_headers = ["x-api-key"], hosts = ["api.semanticscholar.org"]},
 ]
