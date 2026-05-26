@@ -13,7 +13,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from random import Random
-from typing import Optional
+from typing import Optional, Union
 
 
 @dataclass(frozen=True)
@@ -24,7 +24,11 @@ class NodeRef:
     is_buggy: Optional[bool]            # None == not yet executed
     is_buggy_plots: Optional[bool]      # None == VLM not yet run
     debug_depth: int
-    metric_score: float                 # _bfts_metric.score; lower is better
+    # _bfts_metric.score result; lower is better. Scalar for the
+    # ``mean`` / ``min`` / ``weighted_mean`` reducers; tuple for
+    # ``lexicographic`` (Python tuple ordering is element-wise so
+    # sorted(..., key=...) still picks the multi-objective best).
+    metric_score: Union[float, tuple[float, ...]]
     stage_name: str
     is_leaf: bool
 

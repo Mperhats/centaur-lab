@@ -18,15 +18,19 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from _bfts_metric import DEFAULT_REDUCER, REDUCERS
+
 DEFAULT_LLM_API_KEY_SECRET = "ANTHROPIC_API_KEY"
 DEFAULT_DRAFT_MODEL = "claude-sonnet-4-20250514"
 DEFAULT_FEEDBACK_MODEL = "claude-sonnet-4-20250514"
 DEFAULT_VLM_MODEL = "claude-sonnet-4-20250514"
+DEFAULT_METRIC_REDUCER = DEFAULT_REDUCER
 
 ENV_LLM_API_KEY_SECRET = "BFTS_LLM_API_KEY_SECRET"
 ENV_DRAFT_MODEL = "BFTS_DRAFT_MODEL"
 ENV_FEEDBACK_MODEL = "BFTS_FEEDBACK_MODEL"
 ENV_VLM_MODEL = "BFTS_VLM_MODEL"
+ENV_METRIC_REDUCER = "BFTS_METRIC_REDUCER"
 
 
 @dataclass(frozen=True)
@@ -67,6 +71,43 @@ def resolve_llm_settings(
             vlm_model or os.getenv(ENV_VLM_MODEL) or DEFAULT_VLM_MODEL
         ),
     )
+
+
+@dataclass(frozen=True)
+class SearchSettings:
+    """Resolved BFTS search-policy configuration for one tree run.
+
+    Sibling of ``LLMSettings`` (not merged into it: search and LLM are
+    independently tunable knobs and future Phase 4c work — ``debug_prob``,
+    ``max_debug_depth``, ``num_workers`` — lands here alongside
+    ``metric_reducer`` without churning the LLM dataclass).
+    """
+
+    metric_reducer: str
+
+
+def resolve_search_settings(
+    *,
+    metric_reducer: str | None = None,
+) -> SearchSettings:
+    """Merge per-run Input overrides, deployment env, and code defaults.
+
+    Resolution order matches ``resolve_llm_settings``: explicit Input
+    value → ``BFTS_METRIC_REDUCER`` env (from Helm ``api.extraEnv``) →
+    module default ``"mean"``. Unknown reducer strings raise
+    ``ValueError`` here (fail-fast at run start) instead of deep inside
+    the selector loop.
+    """
+    resolved = (
+        metric_reducer
+        or os.getenv(ENV_METRIC_REDUCER)
+        or DEFAULT_METRIC_REDUCER
+    )
+    if resolved not in REDUCERS:
+        raise ValueError(
+            f"unknown metric_reducer: {resolved!r} (valid: {', '.join(REDUCERS)})"
+        )
+    return SearchSettings(metric_reducer=resolved)
 
 
 def resolve_llm_api_key(secret_name: str) -> str:

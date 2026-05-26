@@ -246,7 +246,7 @@ def _patch_handler_deps(monkeypatch: pytest.MonkeyPatch, *, expand_result: dict[
     mark_stub = AsyncMock(return_value=None)
     monkeypatch.setattr(bfts_tree, "mark_buggy_plots", mark_stub)
 
-    monkeypatch.setattr(_bfts_export, "select_best", lambda _nodes: None)
+    monkeypatch.setattr(_bfts_export, "select_best", lambda _nodes, **_kw: None)
     monkeypatch.setattr(_bfts_export, "write_best_artifact", AsyncMock(return_value="art"))
 
     monkeypatch.setattr(bfts_tree, "expand_node", AsyncMock(return_value=expand_result))

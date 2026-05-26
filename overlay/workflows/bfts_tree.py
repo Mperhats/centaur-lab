@@ -36,7 +36,12 @@ from _bfts_state import (
     update_node_metric,
 )
 
-from _bfts_config import resolve_llm_api_key, resolve_llm_settings
+from _bfts_config import (
+    DEFAULT_METRIC_REDUCER,
+    resolve_llm_api_key,
+    resolve_llm_settings,
+    resolve_search_settings,
+)
 
 WORKFLOW_NAME = "bfts_tree"
 
@@ -59,6 +64,11 @@ class Input:
     draft_model: str | None = None
     feedback_model: str | None = None
     vlm_model: str | None = None
+    # Reducer for _bfts_metric.score (Phase 4g.2). bfts_root passes the
+    # resolved value here so each child tree scores nodes identically;
+    # left as None when bfts_tree starts standalone, deployment env
+    # then applies via resolve_search_settings.
+    metric_reducer: str | None = None
 
 
 def _parse_metric_json(raw: Any) -> dict[str, Any]:
@@ -88,11 +98,16 @@ def _should_terminate(nodes: list[dict[str, Any]], iters_used: int, max_iters: i
     return has_good or iters_used >= max_iters
 
 
-def _to_noderef(row: dict[str, Any]) -> NodeRef:
+def _to_noderef(
+    row: dict[str, Any], *, reducer: str = DEFAULT_METRIC_REDUCER
+) -> NodeRef:
     # ``child_count`` comes from the correlated subquery in
     # ``_bfts_state.list_nodes_for_run``. Missing key (older callers /
     # test fixtures) defaults to 0 → ``is_leaf=True``, matching the
     # pre-fix behavior for rows the DAO didn't populate.
+    #
+    # ``reducer`` defaults to "mean" so unit tests and any pre-Phase-4g
+    # caller that doesn't pass it preserve the original score signature.
     return NodeRef(
         node_id=row["node_id"],
         parent_id=row.get("parent_node_id"),
@@ -100,7 +115,9 @@ def _to_noderef(row: dict[str, Any]) -> NodeRef:
         is_buggy=row.get("is_buggy"),
         is_buggy_plots=row.get("is_buggy_plots"),
         debug_depth=int(row.get("debug_depth") or 0),
-        metric_score=score(_parse_metric_json(row.get("metric_json"))),
+        metric_score=score(
+            _parse_metric_json(row.get("metric_json")), reducer=reducer
+        ),
         stage_name=row.get("stage_name", "draft"),
         is_leaf=(int(row.get("child_count") or 0) == 0),
     )
@@ -117,6 +134,7 @@ async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
         vlm_model=inp.vlm_model,
         llm_api_key_secret=inp.llm_api_key_secret,
     )
+    search = resolve_search_settings(metric_reducer=inp.metric_reducer)
     llm_api_key = resolve_llm_api_key(llm.llm_api_key_secret)
 
     rng = random.Random(inp.seed)
@@ -140,6 +158,9 @@ async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
                 "draft_model": llm.draft_model,
                 "feedback_model": llm.feedback_model,
                 "vlm_model": llm.vlm_model,
+                # Persist the resolved reducer so replay is deterministic
+                # regardless of env / Input changes between runs.
+                "metric_reducer": search.metric_reducer,
             },
             seed=inp.seed,
         ),
@@ -158,7 +179,7 @@ async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
         if _should_terminate(nodes, iters_used, inp.max_iters):
             break
 
-        noderefs = [_to_noderef(n) for n in nodes]
+        noderefs = [_to_noderef(n, reducer=search.metric_reducer) for n in nodes]
         selections = select_next(nodes=noderefs, cfg=cfg, rng=rng)
 
         # Insert one bfts_nodes row per selection up-front (so node_id is
@@ -258,7 +279,7 @@ async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
         write_best_node_id_artifact,
     )
 
-    best = select_best(final_nodes)
+    best = select_best(final_nodes, reducer=search.metric_reducer)
     if best is not None:
         await ctx.step(
             "write_best_artifact",

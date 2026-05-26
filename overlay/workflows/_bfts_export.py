@@ -12,16 +12,24 @@ from typing import Any
 
 import asyncpg
 
-from _bfts_metric import score
+from _bfts_metric import DEFAULT_REDUCER, ScoreResult, score
 
 
-def select_best(nodes: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Pick best of good nodes by lowest score(). Returns None if none good."""
+def select_best(
+    nodes: list[dict[str, Any]], *, reducer: str = DEFAULT_REDUCER
+) -> dict[str, Any] | None:
+    """Pick best of good nodes by lowest ``score()``. Returns None if none good.
+
+    ``reducer`` is keyword-only and defaults to ``"mean"`` so existing
+    unit-test callers preserve their behavior. Phase 4g.2: the
+    ``lexicographic`` reducer returns a tuple, which ``min(..., key=...)``
+    still compares correctly under Python's element-wise tuple ordering.
+    """
     good = [n for n in nodes if n.get("is_buggy") is False and n.get("is_buggy_plots") is not True]
     if not good:
         return None
 
-    def _score_for(n: dict[str, Any]) -> float:
+    def _score_for(n: dict[str, Any]) -> ScoreResult:
         m = n.get("metric_json")
         if isinstance(m, str):
             try:
@@ -30,7 +38,7 @@ def select_best(nodes: list[dict[str, Any]]) -> dict[str, Any] | None:
                 m = None
         if not isinstance(m, dict):
             m = {"_worst": True}
-        return score(m)
+        return score(m, reducer=reducer)
 
     return min(good, key=_score_for)
 

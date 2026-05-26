@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 if TYPE_CHECKING:
     from api.workflow_engine import WorkflowContext
 
-from _bfts_config import resolve_llm_settings
+from _bfts_config import resolve_llm_settings, resolve_search_settings
 
 WORKFLOW_NAME = "bfts_root"
 
@@ -42,6 +42,11 @@ class Input:
     draft_model: str | None = None
     feedback_model: str | None = None
     vlm_model: str | None = None
+    # Optional per-run search-policy override. Resolves through
+    # _bfts_config.resolve_search_settings (Input → BFTS_METRIC_REDUCER
+    # env → "mean"). The resolved value is persisted into
+    # bfts_runs.config_json by bfts_tree so replay is deterministic.
+    metric_reducer: str | None = None
 
 
 def _sandbox_id(*, run_id: str, tree_idx: int) -> str:
@@ -62,6 +67,7 @@ async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
         vlm_model=inp.vlm_model,
         llm_api_key_secret=inp.llm_api_key_secret,
     )
+    search = resolve_search_settings(metric_reducer=inp.metric_reducer)
 
     # Every Sandbox we successfully create lands here BEFORE start_workflow
     # is attempted, so a start_workflow failure (which leaves the CR behind)
@@ -103,6 +109,7 @@ async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
                     "draft_model": llm.draft_model,
                     "feedback_model": llm.feedback_model,
                     "vlm_model": llm.vlm_model,
+                    "metric_reducer": search.metric_reducer,
                 },
                 trigger_key=child_run_id,
                 eager_start=True,
