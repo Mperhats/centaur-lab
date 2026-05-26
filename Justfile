@@ -430,13 +430,19 @@ bfts-toy-run:
 bfts-verify-best:
     #!/usr/bin/env bash
     set -euo pipefail
-    just bfts-toy-run
     api_deploy="deploy/${CENTAUR_RELEASE}-centaur-api"
-    count=$(kubectl exec -n $CENTAUR_NAMESPACE $api_deploy -- psql "$DATABASE_URL" -tAc \
-      "SELECT count(*) FROM bfts_artifacts WHERE relative_path = 'best_solution.py';")
-    if [ "$count" -ge "1" ]; then
-      echo "BFTS-VERIFY-BEST OK ($count artifacts)"
+    psql_count() {
+      kubectl exec -n $CENTAUR_NAMESPACE $api_deploy -- psql "$DATABASE_URL" -tAc \
+        "SELECT count(*) FROM bfts_artifacts WHERE relative_path = 'best_solution.py';" \
+        | tr -d '[:space:]'
+    }
+    before=$(psql_count)
+    just bfts-toy-run
+    after=$(psql_count)
+    delta=$((after - before))
+    if [ "$delta" -ge "1" ]; then
+      echo "BFTS-VERIFY-BEST OK (+${delta} new artifact(s); total=${after})"
       exit 0
     fi
-    echo "no best_solution.py written" >&2
+    echo "no new best_solution.py written (before=${before}, after=${after})" >&2
     exit 1

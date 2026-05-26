@@ -32,10 +32,19 @@ just bfts-toy-run | tee /tmp/bfts-toy-run.json
 run_id=$(jq -r '.run_id' /tmp/bfts-toy-run.json)
 kubectl exec -n "$CENTAUR_NAMESPACE" "$CENTAUR_RELEASE"-centaur-postgres-0 -c postgres -- \
   psql -U centaur -d centaur -c "
-    SELECT run_id, iters_used := (SELECT COUNT(*) FROM bfts_nodes WHERE run_id LIKE '$run_id%'),
-           best_node_id, status
-    FROM bfts_runs WHERE run_id LIKE '$run_id%';"
+    SELECT
+      r.run_id,
+      (SELECT COUNT(*) FROM bfts_nodes n WHERE n.run_id LIKE r.run_id || '%') AS node_count,
+      r.best_node_id,
+      r.status
+    FROM bfts_runs r WHERE r.run_id LIKE '$run_id%';"
 ```
+
+> **Known gap (acknowledged in plan, MVP-acceptable):** if the workflow fails
+> mid-run between `bfts_executor.create_sandbox` and the `stop_sandbox`
+> teardown loop in `bfts_root`, the per-tree Sandbox CR can orphan. After a
+> failed smoke, sweep with `just clean delete` (or filter by the
+> `bfts-<run_id>-tree-<i>` prefix) before retrying.
 
 ## Fields to fill in after running the smoke
 

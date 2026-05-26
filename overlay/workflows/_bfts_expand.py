@@ -11,10 +11,14 @@ from research 02 §Agent turn shape:
   metric_extract                                    (LLM call #4)
   plot_propose                                      (LLM call #5, skipped if buggy)
   plot_exec                                         (sandbox exec #3, skipped if buggy)
+  collect_artifacts                                 (sandbox call #4, skipped if buggy)
+  vlm_analyze                                       (LLM call #6, skipped if no plot artifacts)
 
 Each call is its own ctx.step so workflow restart resumes mid-pipeline.
 
-VLM analysis (LLM call #6) lives in Phase 3 (_bfts_export wires it).
+VLM gate (LLM call #6) lives in this module — it runs after plot_exec
+on the good path. Persistence of the gate (mark_buggy_plots) and
+best-node artifact export happen in bfts_tree + _bfts_export.
 
 Underscore-prefixed: workflow loader skips it.
 """
