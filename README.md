@@ -62,6 +62,20 @@ uv run scripts/sync_sdk.py
 git commit -m "bump .centaur to <sha>"
 ```
 
+## Adding or updating a tool
+
+`tools/<name>/pyproject.toml` is the single source of truth for that
+tool's runtime deps — both the API pod's `entrypoint.sh` (at startup)
+and the local uv workspace (at `uv sync`) read it.
+
+**New tool.** `mkdir tools/<name>/`, drop a `pyproject.toml` with
+`[project].dependencies` and `[tool.uv].package = false`, add `<name>`
+to the root `pyproject.toml`'s `[project].dependencies` and
+`[tool.uv.sources]`. `uv sync` picks it up.
+
+**Bumping a tool's dep version.** Edit `tools/<name>/pyproject.toml`
+only. Then `uv lock --upgrade-package <pkg>` if you want a fresh resolve.
+
 ## License
 
 [Apache-2.0 OR MIT](LICENSE).
