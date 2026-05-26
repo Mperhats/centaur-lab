@@ -348,6 +348,11 @@ class _KubernetesSandboxAPI:
             bfts-executor image and a `sleep infinity` CMD — no harness.
         """
         await self._ensure_clients()
+        from network_policy import ensure_sandbox_egress_policy
+
+        await ensure_sandbox_egress_policy(
+            self.networking_api, namespace=self.namespace
+        )
         labels = {
             "centaur.ai/bfts-sandbox": "true",
             "centaur.ai/bfts-run": run_id,
