@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import research_brief
 
-from ._fakes import EXECUTE_ARG_INDEX, FakeContext, FakePool
+from ._fakes import EXECUTE_ARG_INDEX, FakeContext, FakePool, MetricsRecorder
 
 
 class FakeS2Client:
@@ -279,3 +279,26 @@ async def test_handler_closes_client_when_search_raises() -> None:
             )
 
     assert fake.close_called is True
+
+
+@pytest.mark.asyncio
+async def test_handler_emits_vm_metrics_for_brief_and_papers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pool = FakePool()
+    ctx = FakeContext(pool)
+    fake = FakeS2Client(results=[_paper("p1"), _paper("p2")])
+    recorder = MetricsRecorder()
+    monkeypatch.setattr(research_brief, "emit_document_metrics", recorder)
+
+    with patch("research_brief.SemanticScholarClient") as mock_cls:
+        mock_cls.return_value = fake
+        await research_brief.handler(
+            research_brief.Input(query="active inference"),
+            ctx,
+        )
+
+    assert len(recorder.calls) == 3
+    source_types = [doc["source_type"] for doc, _ in recorder.calls]
+    assert source_types.count("research_brief") == 1
+    assert source_types.count("paper") == 2

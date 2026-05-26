@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import save_papers
 from _paper_document import _content_hash, build_paper_document
 
-from ._fakes import FakeContext, FakePool
+from ._fakes import FakeContext, FakePool, MetricsRecorder
 
 
 class FakeS2Client:
@@ -196,3 +196,27 @@ async def test_handler_closes_client_on_exception() -> None:
             )
 
     assert fake.close_called is True
+
+
+@pytest.mark.asyncio
+async def test_handler_emits_vm_metrics_per_upsert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pool = FakePool(existing_hash=None, execute_status="INSERT 0 1")
+    ctx = FakeContext(pool)
+    fake = FakeS2Client({"A": _paper("A"), "B": _paper("B")})
+    recorder = MetricsRecorder()
+    monkeypatch.setattr(save_papers, "emit_document_metrics", recorder)
+
+    with patch("save_papers.SemanticScholarClient") as mock_cls:
+        mock_cls.return_value = fake
+        await save_papers.handler(
+            save_papers.Input(paper_ids=["A", "B"]),
+            ctx,
+        )
+
+    assert len(recorder.calls) == 2
+    for document, action in recorder.calls:
+        assert document["source"] == "semantic_scholar"
+        assert document["source_type"] == "paper"
+        assert action == "inserted"

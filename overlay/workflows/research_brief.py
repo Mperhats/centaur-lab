@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 if TYPE_CHECKING:
     from api.workflow_engine import WorkflowContext
 
+from _metrics import emit_document_metrics
 from _paper_document import (
     _canonical_json,
     _content_hash,
@@ -236,6 +237,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             }
 
         brief_action = await upsert_document(ctx._pool, brief_doc)
+        emit_document_metrics(brief_doc, brief_action)
 
         papers_inserted = 0
         papers_updated = 0
@@ -255,6 +257,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                 paper_doc,
                 parent_document_id=brief_doc["document_id"],
             )
+            emit_document_metrics(paper_doc, action)
             if action == "inserted":
                 papers_inserted += 1
             elif action == "updated":

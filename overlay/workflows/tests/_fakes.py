@@ -71,3 +71,18 @@ class FakeContext:
 
     def log(self, event: str, **kwargs: Any) -> None:
         self.logs.append((event, kwargs))
+
+
+class MetricsRecorder:
+    """Lightweight stand-in for ``emit_document_metrics`` used by tests.
+
+    Records each call as ``(document, action)`` so tests can assert call
+    counts and argument shape without mocking the real Prometheus
+    machinery (which isn't on sys.path during local runs anyway).
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[dict[str, Any], str]] = []
+
+    def __call__(self, document: dict[str, Any], action: str) -> None:
+        self.calls.append((document, action))
