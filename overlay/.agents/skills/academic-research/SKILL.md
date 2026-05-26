@@ -27,6 +27,7 @@ remembered.
 - "Summarize this paper" / DOI / arXiv ID / S2 ID → `semantic_scholar.get_paper` (tool) + `save_papers` workflow follow-up (brief + paper)
 - "What does this paper cite?" → `semantic_scholar.get_references` (tool, no persistence needed)
 - "Build a brief / lit review / writeup on X" → `research_brief` workflow (atomic search + render + persist). Do NOT use the `semantic_scholar.research_brief` tool method for this — it returns a bundle and writes nothing.
+- "Deep dive on X / index the bodies / I want everything" → `research_brief` workflow with `"archive": true` — runs the brief, then chains `archive_papers` as a child workflow so every matched paper's full text is also indexed. One agent call, one parent `run_id`, observable as a child run via `GET /workflows/runs/<brief>/children`.
 - "Read the actual paper / quote from the body / I need more than the abstract" → `archive_papers` workflow — fetches the open-access PDF, parses to Markdown, and indexes the full text for BM25 search. (The `semantic_scholar.archive_paper` tool method is read-only: it returns a preview of what the workflow would persist, not a persisted row.)
 
 ## Paper Search (`semantic_scholar.search`)
@@ -128,6 +129,25 @@ call workflow run '{"workflow_name":"research_brief","input":{"query":"active in
 `year_from` is optional (no lower bound when omitted). Returns
 `{status, brief_document_id, brief_action, results_count,
 papers_inserted, papers_updated, papers_noop}`.
+
+**`archive: true` — same workflow, full-text indexing too.** Setting
+the `archive` flag chains the `archive_papers` workflow as a child
+after the brief is persisted, so every matched paper's PDF is
+downloaded, parsed to Markdown, and indexed for BM25 alongside the
+brief — all under one parent `run_id`. Use this when the user wants
+substantive coverage of the literature, not just an abstract-level
+overview:
+
+```bash
+call workflow run '{"workflow_name":"research_brief","input":{"query":"active inference world models","limit":5,"archive":true}}'
+```
+
+With `archive=true`, the return shape gains `archive_run_id` and
+`archive` (the child run's `output_json`: `{status, papers_archived,
+papers_skipped, papers_failed, ...}`). The child run is independently
+visible in `/workflows/runs/<brief_run_id>/children`. Off by default
+because PDF fetch + parse is bandwidth- and CPU-heavy — opt in only
+when the user has asked for depth (not just discovery).
 
 To get the rendered Markdown for the Slack reply, either:
 

@@ -154,16 +154,44 @@ class MockPool:
 
 
 class MockContext:
-    """Minimal workflow context exposing ``_pool`` and a recording ``log``.
+    """Minimal workflow context exposing ``_pool``, ``log``, and ``run_workflow``.
 
     ``pool`` is intentionally typed ``Any`` so the same mock can wrap
     either the in-memory :class:`MockPool` (unit tests) or a real
     ``asyncpg.Pool`` (integration tests under ``tests/integration/``).
+
+    ``run_workflow`` records every child-workflow dispatch so tests can
+    assert on workflow name and input shape without needing the real
+    workflow engine. Returns ``run_workflow_response`` (a canned dict
+    mirroring ``WorkflowContext.wait_for_workflow``'s shape) — set it
+    per-test when the parent reads from the child's response.
     """
 
-    def __init__(self, pool: Any) -> None:
+    def __init__(
+        self,
+        pool: Any,
+        *,
+        run_workflow_response: dict[str, Any] | None = None,
+    ) -> None:
         self._pool = pool
         self.logs: list[tuple[str, dict[str, Any]]] = []
+        self.run_workflow_calls: list[tuple[str, str, dict[str, Any]]] = []
+        self._run_workflow_response = run_workflow_response or {
+            "run_id": "child-run-id",
+            "status": "completed",
+            "output_json": {"status": "completed"},
+        }
 
     def log(self, event: str, **kwargs: Any) -> None:
         self.logs.append((event, kwargs))
+
+    async def run_workflow(
+        self,
+        name: str,
+        *,
+        workflow_name: str,
+        run_input: dict[str, Any],
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        self.run_workflow_calls.append((name, workflow_name, run_input))
+        return self._run_workflow_response

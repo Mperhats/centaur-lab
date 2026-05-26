@@ -6,6 +6,14 @@ bundle (``brief_doc`` plus ``paper_docs`` each already parented under
 the brief's ``document_id``). This handler owns every DB write: it
 upserts the brief row, then upserts each paper row.
 
+When ``Input.archive`` is true, the handler also chains the existing
+``archive_papers`` workflow as a **child** via ``ctx.run_workflow``
+after the brief is persisted, so deep-research turns can get the full
+text of every matched paper indexed under one parent ``run_id``. The
+two are intentionally kept as separate workflows — both remain
+independently invocable, and the parent-child lineage is observable
+via ``GET /workflows/runs/<brief>/children``.
+
 The upsert SQL — ``_upsert_document`` with the overlay's compound-hash
 idempotency contract — plus the ``vm_metrics`` shim are inlined as
 private helpers below. The same helpers exist verbatim in
@@ -13,9 +21,11 @@ private helpers below. The same helpers exist verbatim in
 upstream pattern (see
 ``.centaur/workflows/company_context_documents.py``).
 
-Idempotent on ``(query, year_from)``: re-running with the same inputs
-produces the same ``brief_doc["document_id"]`` and matching content
-hashes, so every upsert noops.
+Idempotent on ``(query, year_from, archive)``: re-running with the
+same inputs produces the same ``brief_doc["document_id"]`` and
+matching content hashes, so every brief/paper upsert noops, and the
+child ``archive_papers`` run is itself idempotent on
+``(paper_id, pdf_sha256)``.
 """
 
 from __future__ import annotations
@@ -56,6 +66,12 @@ class Input:
     query: str
     limit: int = 5
     year_from: int | None = None
+    archive: bool = False
+    """When true, run ``archive_papers`` as a child workflow after the
+    brief is persisted, indexing the full text of every matched paper
+    into ``paper_archives`` and ``company_context_documents``. Off by
+    default because PDF fetch+parse is bandwidth- and CPU-heavy — opt
+    in only when the user has asked for substantive coverage."""
 
 
 def _observe_doc_size(document: dict[str, Any]) -> None:
@@ -221,7 +237,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         papers_noop=papers_noop,
     )
 
-    return {
+    result: dict[str, Any] = {
         "status": "completed",
         "brief_document_id": brief_doc["document_id"],
         "brief_action": brief_action,
@@ -230,3 +246,37 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         "papers_updated": papers_updated,
         "papers_noop": papers_noop,
     }
+
+    if inp.archive:
+        # Skip the child dispatch when the brief surfaced no papers —
+        # ``archive_papers`` would short-circuit on the empty list
+        # anyway, but avoiding the spawn keeps the parent-child view
+        # uncluttered (no zero-work archive run per empty query).
+        paper_ids = [
+            doc["source_document_id"]
+            for doc in bundle["paper_docs"]
+            if doc.get("source_document_id")
+        ]
+        if paper_ids:
+            ctx.log("research_brief_archive_starting", paper_count=len(paper_ids))
+            archive_run = await ctx.run_workflow(
+                "archive",
+                workflow_name="archive_papers",
+                run_input={"paper_ids": paper_ids},
+            )
+            archive_output = archive_run.get("output_json") if isinstance(archive_run, dict) else None
+            result["archive_run_id"] = (
+                archive_run.get("run_id") if isinstance(archive_run, dict) else None
+            )
+            result["archive"] = archive_output
+            ctx.log(
+                "research_brief_archive_completed",
+                archive_run_id=result["archive_run_id"],
+                archive_status=(archive_output or {}).get("status"),
+            )
+        else:
+            ctx.log("research_brief_archive_skipped", reason="no_paper_ids")
+            result["archive_run_id"] = None
+            result["archive"] = {"status": "skipped", "reason": "no_paper_ids"}
+
+    return result

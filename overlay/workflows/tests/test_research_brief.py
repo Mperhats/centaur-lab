@@ -192,6 +192,99 @@ async def test_handler_brief_and_paper_noop_when_hashes_match() -> None:
 
 
 @pytest.mark.asyncio
+async def test_handler_archive_defaults_off_no_child_workflow_dispatched() -> None:
+    """``archive=False`` (the default) must not spawn ``archive_papers``."""
+    pool = MockPool(existing_hash=None, execute_status="INSERT 0 1")
+    ctx = MockContext(pool)
+    bundle = _ok_bundle(paper_count=2)
+
+    with patch("research_brief.SemanticScholarClient") as mock_cls:
+        mock_cls.return_value.research_brief = AsyncMock(return_value=bundle)
+        result = await research_brief.handler(
+            research_brief.Input(query="x", limit=2),
+            ctx,
+        )
+
+    assert ctx.run_workflow_calls == []
+    assert "archive_run_id" not in result
+    assert "archive" not in result
+
+
+@pytest.mark.asyncio
+async def test_handler_archive_true_dispatches_archive_papers_with_paper_ids() -> None:
+    """``archive=True`` chains ``archive_papers`` with the brief's paperIds."""
+    pool = MockPool(existing_hash=None, execute_status="INSERT 0 1")
+    ctx = MockContext(
+        pool,
+        run_workflow_response={
+            "run_id": "archive-run-7",
+            "status": "completed",
+            "output_json": {
+                "status": "completed",
+                "papers_archived": 3,
+                "papers_skipped": 0,
+                "papers_failed": 0,
+            },
+        },
+    )
+    bundle = _ok_bundle(paper_count=3)
+
+    with patch("research_brief.SemanticScholarClient") as mock_cls:
+        mock_cls.return_value.research_brief = AsyncMock(return_value=bundle)
+        result = await research_brief.handler(
+            research_brief.Input(query="x", limit=3, archive=True),
+            ctx,
+        )
+
+    assert len(ctx.run_workflow_calls) == 1
+    step_name, workflow_name, run_input = ctx.run_workflow_calls[0]
+    assert workflow_name == "archive_papers"
+    assert step_name == "archive"
+    assert run_input == {"paper_ids": ["p1", "p2", "p3"]}
+    assert result["archive_run_id"] == "archive-run-7"
+    assert result["archive"]["status"] == "completed"
+    assert result["archive"]["papers_archived"] == 3
+
+
+@pytest.mark.asyncio
+async def test_handler_archive_true_with_zero_papers_skips_child_dispatch() -> None:
+    """No papers → no archive run (avoid cluttering parent-child view)."""
+    pool = MockPool(existing_hash=None, execute_status="INSERT 0 1")
+    ctx = MockContext(pool)
+    bundle = _ok_bundle(paper_count=0)
+
+    with patch("research_brief.SemanticScholarClient") as mock_cls:
+        mock_cls.return_value.research_brief = AsyncMock(return_value=bundle)
+        result = await research_brief.handler(
+            research_brief.Input(query="x", limit=5, archive=True),
+            ctx,
+        )
+
+    assert ctx.run_workflow_calls == []
+    assert result["archive_run_id"] is None
+    assert result["archive"] == {"status": "skipped", "reason": "no_paper_ids"}
+
+
+@pytest.mark.asyncio
+async def test_handler_archive_true_does_not_dispatch_on_client_error() -> None:
+    """If the S2 client returns an error bundle, no archive run is spawned."""
+    pool = MockPool()
+    ctx = MockContext(pool)
+    bundle = {"status": "error", "query": "x", "error": "S2 down"}
+
+    with patch("research_brief.SemanticScholarClient") as mock_cls:
+        mock_cls.return_value.research_brief = AsyncMock(return_value=bundle)
+        result = await research_brief.handler(
+            research_brief.Input(query="x", archive=True),
+            ctx,
+        )
+
+    assert result == bundle
+    assert ctx.run_workflow_calls == []
+    assert pool.execute_calls == []
+
+
+@pytest.mark.asyncio
 async def test_handler_passes_query_limit_year_from_to_client() -> None:
     pool = MockPool(existing_hash=None, execute_status="INSERT 0 1")
     ctx = MockContext(pool)
