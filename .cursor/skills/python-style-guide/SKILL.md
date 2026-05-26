@@ -1,13 +1,13 @@
 ---
 name: python-style-guide
-description: Use when writing, editing, or reviewing any Python in this repo. Covers ruff/pyright/pytest discipline, modern type syntax, frozen dataclasses, module-as-namespace + verb-only function names, imports, errors, secrets, HTTP, and tests. These are invariants — when existing code disagrees, the existing code is wrong and should be fixed as you touch it.
+description: Use when writing, editing, or reviewing any Python in this repo (overlay tools, workflows, centaur_lab helpers, anything calling into centaur_sdk). Aligned with upstream centaur conventions. Covers ruff/pytest discipline, modern type syntax, frozen dataclasses, classes vs. plain functions, imports, errors, secrets, HTTP, and tests.
 ---
 
 # Python style guide
 
 Elegance is low lines of code, high reliability, and low maintenance burden. Simple beats clever. Most complexity is added without being earned, and the cost lands later on whoever maintains it. The job of this skill is to refuse that complexity and produce code that is strongly typed, immutable by default, and obvious to read.
 
-These are invariants, not preferences. When you encounter code that breaks them, fix it as you touch the file. Don't pattern-match on the surrounding mistakes — the surrounding code is what we're trying to improve.
+These rules describe how good Python is written in this codebase — they match upstream centaur. When existing overlay code disagrees, the overlay code is what we're trying to improve; fix it as you touch it.
 
 ## Simplicity first
 
@@ -18,7 +18,6 @@ These are invariants, not preferences. When you encounter code that breaks them,
 Specific Python patterns to refuse unless something concrete forces them:
 
 - A class that wraps a single function (`Manager`, `Service`, `Handler`, `Processor`). Use the function.
-- A `@classmethod` factory when a module-level `create(config)` / `from_<source>(...)` would do.
 - A `Protocol` or `abc.ABC` for an interface with one implementer. Use the concrete type.
 - A custom exception class for a failure no caller will ever catch. Use `ValueError` / `RuntimeError`.
 - A plugin / registry / strategy pattern for two known cases. Use a `match` on a `Literal` tag.
@@ -34,25 +33,30 @@ When in doubt, write the simpler version. The migration when a second case force
 | Concern | Tool |
 | --- | --- |
 | Format + lint | `ruff` (config: `overlay/ruff.toml`) |
-| Type check | `pyright` in `strict` mode |
 | Test runner | `pytest` |
-| Async test driver | `pytest-asyncio` (`asyncio_mode = "strict"`) |
+| Async test driver | `pytest-asyncio` |
 | HTTP client | `httpx` |
 | Postgres | `asyncpg` (async) / `psycopg` (sync, only where forced) |
+| HTTP/parse models | `pydantic` v2 |
 
 Minimum Python: **3.11**. Line length: **100**. Quote style: double.
 
-## `from __future__ import annotations` — forbidden
+## `from __future__ import annotations` — use it
 
-Do not add it. Remove it when you touch a file that has it. It defers annotation evaluation, which breaks runtime introspection used by `dataclasses_json`, `pydantic`, `dataclasses` with forward references, and any decorator that reads `__annotations__`. PEP 649/749 supersedes the original PEP 563 motivation. PyTorch removed every occurrence for this reason.
-
-Quote forward references when you need them:
+Add it as the first import of every `.py` file. It defers annotation evaluation, which keeps imports cheap, lets you reference types declared lower in the file without quoting, and matches the rest of the codebase.
 
 ```python
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+@dataclass
 class Tree:
-    parent: "Tree | None"
-    children: list["Tree"]
+    parent: Tree | None
+    children: list[Tree]
 ```
+
+One trap: libraries that read `__annotations__` at runtime (`dataclasses_json`, `beartype`, some pydantic v1 patterns) can choke on deferred annotations. Pydantic v2 resolves forward refs itself and is fine. If a specific module mixes with a library that breaks, drop the import *in that module only* and quote forward references.
 
 ## Type syntax
 
@@ -62,15 +66,17 @@ Use PEP 585 / 604 everywhere. Never import `List`, `Dict`, `Tuple`, `Optional`, 
 def head(xs: list[int], m: dict[str, float]) -> tuple[int, str] | None: ...
 ```
 
-PEP 695 generics (`def f[T](xs: list[T]) -> T`, `type Vector = ...`) for new code on 3.12+. `TypeVar` is forbidden in new code.
+PEP 695 generics (`def f[T](xs: list[T]) -> T`, `type Vector = ...`) for new code on 3.12+. `TypeVar` is fine in modules pinned to 3.11.
 
-Annotate exactly three things: function parameters, public return types, and module- or class-level constants. Let pyright infer locals — redundant local annotations drift; inferred types stay correct under refactoring.
+Annotate function parameters, public return types, and module-level constants. Skip local-variable annotations when inference is unambiguous. Annotate locals when inference can't figure out an empty container (`seen: set[str] = set()`, `out: list[str] = []`).
 
 ## Data containers
 
-**Invariant.** Every dataclass is `frozen=True`. It makes input-mutation bugs a runtime error and costs nothing.
+**Invariant.** Every dataclass that holds value-typed data is `frozen=True`. It makes input-mutation bugs a runtime error and costs nothing.
 
 ```python
+from dataclasses import dataclass
+
 @dataclass(frozen=True)
 class Config:
     timeout_s: float = 30.0
@@ -80,11 +86,13 @@ cfg = Config(timeout_s=10.0)
 new_cfg = replace(cfg, retries=5)
 ```
 
-Add `slots=True` when you've seen attribute typos cause bugs or have measured memory pressure. Watch out for interactions with multi-inheritance, `cached_property`, and `Exception` — `slots` is not universally free.
+Plain `@dataclass` (mutable) is acceptable when the object is genuinely mutable shared state (e.g., a `ToolContext` populated at request time, a `*Info` record returned from a DB query and then enriched). Don't reach for `frozen=True` reflexively if the surrounding code doesn't.
+
+Add `slots=True` when you've seen attribute typos cause bugs or have measured memory pressure. Watch out for interactions with multi-inheritance, `cached_property`, and `Exception`.
 
 Add `kw_only=True` when the field count crosses ~4 and positional construction becomes unreadable. For two- or three-field value types, positional construction is cleaner.
 
-`pydantic.BaseModel` is for parsing untrusted input (HTTP, YAML, CLI) only — never for internal state. When used, set `model_config = ConfigDict(frozen=True, extra="forbid")`.
+`pydantic.BaseModel` is for parsing untrusted input (HTTP request/response, YAML, CLI args) — never for internal state.
 
 ## No input mutation
 
@@ -100,26 +108,42 @@ def normalise(xs: np.ndarray) -> None:
     xs /= xs.sum()
 ```
 
-## Module-as-namespace + verb-only names
+## Classes vs. plain functions
 
-Design every module so consumers import the *module* and call its verbs through it. The module carries the noun; the function carries the verb. A function named `create_cache` inside a module named `cache` says "cache" twice at every call site.
+Default to **module-level functions** operating on frozen dataclasses. A class earns its keep only when there's *genuine instance state* the same object holds across multiple calls:
+
+- A client that owns connection/auth state (API keys, base URL, retry config, an `httpx.AsyncClient`).
+- A long-lived resource manager.
+- A discriminated union of subclasses (rare; usually `Literal` tags are better).
 
 ```python
-# CORRECT
-from centaur_lab import cache
+# CORRECT — class for a stateful client
+class WebSearchClient:
+    def __init__(self, *, api_key: str, base_url: str, max_retries: int = 3) -> None:
+        self._api_key = api_key
+        self._base_url = base_url.rstrip("/")
+        self._max_retries = max_retries
 
-c = cache.create(size=1024)
-c = cache.put(c, key="x", value=42)
+    async def search(self, query: str) -> SearchResponse: ...
+    async def deep_research(self, query: str) -> DeepResearchResponse: ...
 
-# INCORRECT
-from centaur_lab.cache import create_cache, put_in_cache
+# CORRECT — plain functions for stateless ops
+def generate_key() -> tuple[str, str, str]: ...
+def hash_key(key: str) -> str: ...
 ```
 
-Booleans keep their auxiliary verb: `is_terminal`, `has_credential`, `should_resample`. No type-decoration suffixes (`_fn`, `_func`, `_handler`).
+When you do define a class:
 
-## Factory functions
+- Give it a **noun** name (`Client`, `Context`, `Spec`), not `Manager`/`Service`/`Handler`.
+- Give methods **verb** names (`client.search(...)`, not `client.do_search(...)` or `client.search_handler(...)`).
+- Don't repeat the class noun in method names: `cache.put(...)`, not `cache.put_in_cache(...)`.
+- Put validation and side effects in module-level factory functions or in `__init__`, not in classmethods you have to remember to call.
 
-Public construction goes through a module-level function, not heavy work in `__init__`.
+For pure-data classes (config, results, value types), use a `@dataclass(frozen=True)` and skip the class body entirely.
+
+## Construction
+
+Plain `__init__` is the default — `WebSearchClient(api_key=...)` is fine. Reach for a module-level factory function only when construction has real logic the caller shouldn't see (loading + validation, multi-source defaults, async initialisation that `__init__` can't express). When you do write one, name it for its source:
 
 | Source | Name |
 | --- | --- |
@@ -127,32 +151,30 @@ Public construction goes through a module-level function, not heavy work in `__i
 | Serialized blob | `from_bytes`, `from_dict`, `from_json`, `from_path` |
 | Loose positional fields | `make(...)` |
 
-`build`, `construct`, `init`, `new` are forbidden — the names above cover every case.
+Avoid `build` / `construct` / `init` / `new` — the names above are clearer.
 
 ## Discriminated unions
 
-Variants with different shapes get tagged with a `Literal` and matched on the tag. Never pile `| None` fields onto one wide dataclass.
+Variants with different shapes get tagged with a `Literal` and matched on the tag. Don't pile `| None` fields onto one wide dataclass or BaseModel.
 
 ```python
-@dataclass(frozen=True)
-class HashPayload:
-    type: Literal["hash"] = "hash"
-    hash: bytes
+class TextBlock(BaseModel):
+    type: Literal["text"] = "text"
+    text: str
 
-@dataclass(frozen=True)
-class TxPayload:
-    type: Literal["transaction"] = "transaction"
-    signature: bytes
+class ImageBlock(BaseModel):
+    type: Literal["image"] = "image"
+    source: Base64Source
 
-Payload = HashPayload | TxPayload
+ContentBlock = TextBlock | ImageBlock
 
-def settle(p: Payload) -> Receipt:
-    match p:
-        case HashPayload(hash=h): ...
-        case TxPayload(signature=s): ...
+def render(b: ContentBlock) -> str:
+    match b:
+        case TextBlock(text=t): ...
+        case ImageBlock(source=s): ...
 ```
 
-The `Literal` tag is what makes `match` exhaustive and lets pyright narrow each branch. `enum.Enum` is forbidden; `Literal` unions and maps cover every case.
+Prefer `Literal` unions over `enum.Enum` for closed sets that mostly exist to label data. `enum.Enum` is fine when the values need methods, a stable wire format with named members (`SecretMode(str, Enum)`), or hierarchical typing.
 
 ## Parameters
 
@@ -169,10 +191,15 @@ The `Literal` tag is what makes `match` exhaustive and lets pyright narrow each 
 
 ## Secrets and HTTP
 
-Two hard bans enforced by `overlay/ruff.toml`:
+These bans are enforced by `overlay/ruff.toml` and `.centaur/tools/ruff.toml`, scoped to **tool packages** (`overlay/tools/<tool>/`, `.centaur/tools/...`). Service code (`overlay/centaur_lab/`, `.centaur/services/api/`) reads its config from environment variables.
 
-- **No `os.getenv` / `os.environ.get`** in tool code. Use `from centaur_sdk import secret; secret("KEY")`.
+In tool code:
+
+- **No `os.getenv` / `os.environ.get`.** Use `from centaur_sdk import secret; secret("KEY")`. Secrets come from the sidecar, not the process environment.
 - **No `requests`.** Use `httpx`. `httpx` respects `HTTPS_PROXY` for firewall credential injection; `requests` does not.
+- **No `dotenv.load_dotenv`.** Tools receive secrets through the secret manager, not `.env` files.
+
+`*/cli.py` is exempt from the `print()` and `load_dotenv` bans — CLIs are standalone entrypoints.
 
 ## Strings
 
@@ -185,32 +212,34 @@ log.info("loss=%.4f step=%d", loss, step)
 
 ## Errors
 
-1. Every package with a public surface defines one base exception (`<Pkg>Error(Exception)`); every custom error inherits from it. Subclass stdlib types where semantically useful: `ConfigError(<Pkg>Error, ValueError)`.
-2. Always chain across boundaries: `raise X from Y`. Use `from None` only to intentionally hide the cause.
-3. Never use bare `except:` or `except Exception:`. Catch the narrowest type.
-4. Build the message in a local variable (Ruff `EM`).
-5. Exceptions raised across a module boundary carry typed fields, not just a message string. The message is for humans; the fields are for callers.
-6. `assert` is for internal invariants only — never for validating user input.
+1. Plain `raise RuntimeError(...)` / `raise ValueError(...)` is the default. The custom hierarchy below is only worth it when callers will programmatically distinguish errors.
+2. When a package's public surface has **multiple related error types** that callers will catch separately, define one package base (`<Pkg>Error(Exception)`) and have the others inherit from it. Multi-inherit a stdlib type when semantically useful: `ConfigError(<Pkg>Error, ValueError)`.
+3. Always chain across boundaries: `raise X from Y`. Use `from None` only to intentionally hide the cause.
+4. Never use bare `except:` or `except Exception:`. Catch the narrowest type.
+5. Build the message in a local variable (Ruff `EM`).
+6. When an exception is raised across a boundary and callers may want structured access, carry typed fields — not just a message string.
+7. `assert` is for internal invariants only — never for validating user input.
 
 ```python
-class ShapeError(ToolError, ValueError):
-    def __init__(
-        self,
-        msg: str,
-        *,
-        expected: tuple[int, ...],
-        actual: tuple[int, ...],
-    ) -> None:
-        super().__init__(msg)
-        self.expected = expected
-        self.actual = actual
+# Most cases — plain stdlib exception
+if not api_key:
+    raise RuntimeError("EXA_API_KEY not set.")
 
-if grads.shape != params.shape:
-    msg = f"gradient shape {grads.shape} != parameter shape {params.shape}"
-    raise ShapeError(msg, expected=params.shape, actual=grads.shape)
+# Single one-off domain error — inherit from stdlib
+class SlackAuthError(RuntimeError):
+    """Raised when Slack rejects the bot token."""
+
+# Multi-error public surface — package base + structured fields
+class TwitterSDKError(Exception):
+    """Base for all Twitter SDK errors."""
+
+class RateLimitError(TwitterSDKError):
+    def __init__(self, msg: str, *, retry_after_s: float) -> None:
+        super().__init__(msg)
+        self.retry_after_s = retry_after_s
 ```
 
-Inside one package, plain `raise ValueError(...)` / `raise RuntimeError(...)` is fine for purely-internal failures that no caller will ever catch. The custom hierarchy is required at the package's *public* surface.
+Don't define a `<Pkg>Error` base for one subclass — use `RuntimeError` directly.
 
 ## Paths and I/O
 
@@ -220,11 +249,10 @@ Inside one package, plain `raise ValueError(...)` / `raise RuntimeError(...)` is
 
 - Tests live in `tests/` next to the package. No `tests/__init__.py`.
 - File names `test_*.py`; functions `test_*`.
-- Async tests use `pytest-asyncio` in `strict` mode — every async test is decorated explicitly.
+- Async tests use `pytest-asyncio`. Some packages configure `asyncio_mode = "strict"` (every async test decorated); some use the default auto mode. Match the package you're in.
 - Prefer `@pytest.mark.parametrize` over loops when only inputs vary.
 - Fixtures only for setup/teardown of real resources; narrowest scope that works.
 - Fixed seeds for randomized tests.
-- `filterwarnings = ["error"]` in `pyproject.toml` so deprecation warnings fail the suite.
 
 ```python
 @pytest.mark.asyncio
