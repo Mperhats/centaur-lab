@@ -77,8 +77,11 @@ async def test_exec_python_writes_runfile_and_invokes_python() -> None:
     assert len(fake.commands) == 1
     cmd_sandbox, cmd_str, cmd_timeout = fake.commands[0]
     assert cmd_sandbox == "sbx-1"
-    assert "python -u /workspace/working/runfile.py" in cmd_str
-    assert "cd /workspace/working" in cmd_str
+    # Paths are single-quoted in the shell command (matches the style of
+    # write_file / list_dir / read_file_bytes, and is defense in depth on
+    # top of the working_dir allowlist).
+    assert "python -u '/workspace/working/runfile.py'" in cmd_str
+    assert "cd '/workspace/working'" in cmd_str
     assert cmd_timeout == 10.0
 
 
@@ -143,13 +146,14 @@ async def test_exec_python_per_node_working_dir_isolation() -> None:
     _, cmd_a, _ = fake.commands[0]
     _, cmd_b, _ = fake.commands[1]
     # Each command mkdirs + chdirs into its own per-node workspace and
-    # runs *that* node's runfile.py.
-    assert "mkdir -p /workspace/node_a" in cmd_a
-    assert "cd /workspace/node_a" in cmd_a
-    assert "python -u /workspace/node_a/runfile.py" in cmd_a
-    assert "mkdir -p /workspace/node_b" in cmd_b
-    assert "cd /workspace/node_b" in cmd_b
-    assert "python -u /workspace/node_b/runfile.py" in cmd_b
+    # runs *that* node's runfile.py. Paths are single-quoted in the
+    # shell command (defense in depth on top of allowlist validation).
+    assert "mkdir -p '/workspace/node_a'" in cmd_a
+    assert "cd '/workspace/node_a'" in cmd_a
+    assert "python -u '/workspace/node_a/runfile.py'" in cmd_a
+    assert "mkdir -p '/workspace/node_b'" in cmd_b
+    assert "cd '/workspace/node_b'" in cmd_b
+    assert "python -u '/workspace/node_b/runfile.py'" in cmd_b
     # And neither command references the other node's directory.
     assert "node_b" not in cmd_a
     assert "node_a" not in cmd_b
@@ -172,9 +176,9 @@ async def test_exec_python_default_working_dir_is_back_compat() -> None:
     assert path == "/workspace/working/runfile.py"
     assert len(fake.commands) == 1
     _, cmd, _ = fake.commands[0]
-    assert "mkdir -p /workspace/working" in cmd
-    assert "cd /workspace/working" in cmd
-    assert "python -u /workspace/working/runfile.py" in cmd
+    assert "mkdir -p '/workspace/working'" in cmd
+    assert "cd '/workspace/working'" in cmd
+    assert "python -u '/workspace/working/runfile.py'" in cmd
 
 
 @pytest.mark.asyncio
@@ -187,6 +191,9 @@ async def test_exec_python_default_working_dir_is_back_compat() -> None:
         "/abs/path",       # leading slash => absolute, escapes /workspace
         ".hidden",         # leading dot => dotfile, also too close to ..
         "..",              # the classic
+        "foo bar",         # whitespace => shell would split it
+        "foo;ls",          # semicolon => command injection
+        "foo$x",           # dollar => parameter expansion
     ],
 )
 async def test_exec_python_rejects_unsafe_working_dir(bad: str) -> None:

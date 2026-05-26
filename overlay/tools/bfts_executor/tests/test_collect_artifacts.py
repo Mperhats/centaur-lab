@@ -118,6 +118,9 @@ async def test_collect_artifacts_per_node_working_dir(tmp_path: Path) -> None:
         "/abs/path",
         ".hidden",
         "..",
+        "foo bar",         # whitespace
+        "foo;ls",          # semicolon => command injection
+        "foo$x",           # dollar => parameter expansion
     ],
 )
 async def test_collect_artifacts_rejects_unsafe_working_dir(

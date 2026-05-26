@@ -17,12 +17,30 @@ Construction:
 from __future__ import annotations
 
 import os
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
 from .models import ExecutionResult
+
+_WORKING_DIR_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+"""Allowlist for the per-call ``working_dir`` kwarg on exec/collect.
+
+Restricts to alphanumerics + ``_`` + ``-`` — exactly what
+``bfts_tree.handler`` constructs for per-node directories
+(``f"node_{uuid[:8]}"``). Rejects:
+
+* empty strings (``""``)
+* path traversal (``"/"``, ``".."``, leading ``"."``)
+* shell metacharacters (``;``, ``$``, ``&``, ``|``, backticks, …)
+* whitespace
+
+So an unquoted interpolation into a bash command is still safe even
+if a buggy controller forgets to sanitize. We also single-quote the
+path in the exec command for defense in depth.
+"""
 
 _DEFAULT_WORKING_DIR = "working"
 """Default per-expansion subdirectory name under the workspace PVC.
@@ -173,14 +191,10 @@ class BFTSExecutor:
         working_dir: str = _DEFAULT_WORKING_DIR,
     ) -> ExecutionResult:
         # Defensive: ``working_dir`` is caller-supplied (Phase 4h controllers
-        # pass per-node names like ``node_abc12345``). Reject anything that
-        # could escape ``/workspace/`` or surprise the shell.
-        if (
-            not working_dir
-            or "/" in working_dir
-            or ".." in working_dir
-            or working_dir.startswith(".")
-        ):
+        # pass per-node names like ``node_abc12345``). Allowlist regex
+        # rejects empty strings, path traversal, and shell metacharacters
+        # in one place.
+        if not _WORKING_DIR_RE.match(working_dir):
             msg = f"invalid working_dir: {working_dir!r}"
             raise ValueError(msg)
 
@@ -197,10 +211,13 @@ class BFTSExecutor:
         #    ``-k 60`` SIGKILL at T+60 (research 02 §Code execution
         #    contract). ``mkdir -p`` is idempotent: the inline PVC's
         #    ``/workspace`` exists, but the per-node subdirectory may not.
+        #    Paths are single-quoted to match the style of ``write_file`` /
+        #    ``list_dir`` / ``read_file_bytes`` and as defense in depth on
+        #    top of the allowlist validation above.
         command = (
-            f"mkdir -p {work_root} && cd {work_root} && "
+            f"mkdir -p '{work_root}' && cd '{work_root}' && "
             f"timeout --signal=INT --kill-after=60 {int(timeout_s)} "
-            f"python -u {runfile_path}"
+            f"python -u '{runfile_path}'"
         )
         exec_result = await api.run_command(
             sandbox_id, command, timeout_s=timeout_s
@@ -284,12 +301,7 @@ class BFTSExecutor:
         collect from the same directory without bleeding into a sibling
         node's artifacts.
         """
-        if (
-            not working_dir
-            or "/" in working_dir
-            or ".." in working_dir
-            or working_dir.startswith(".")
-        ):
+        if not _WORKING_DIR_RE.match(working_dir):
             msg = f"invalid working_dir: {working_dir!r}"
             raise ValueError(msg)
 
