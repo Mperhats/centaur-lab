@@ -40,6 +40,10 @@ from _bfts_prompts import METRIC_PARSE_SPEC, REVIEW_FUNC_SPEC, render_prompts
 
 _DRAFT_TEMP = 1.0
 _FEEDBACK_TEMP = 0.5
+# VLM batch cap matches ``bfts_vlm.client._MAX_PLOTS`` (Sakana's hardcoded 10).
+# Above this we ask the feedback model to pick the most informative subset
+# before running the VLM review.
+_VLM_MAX_PLOTS = 10
 
 
 @dataclass
@@ -231,9 +235,29 @@ async def expand_node(*, ctx: Any, expand_ctx: ExpandContext) -> dict[str, Any]:
 
     if plot_paths:
         vlm_model = expand_ctx.vlm_model
+        task_desc = str(expand_ctx.idea.get("Title", ""))
+        # Sakana picks the 10 most informative plots via a feedback-model
+        # call before the VLM batch when >10 plots were produced
+        # (`.scientist/ai_scientist/treesearch/parallel_agent.py:910-980`).
+        # Phase 4g.3 ports that as its own ctx.step so a mid-pipeline
+        # restart resumes after the (cached) picker call.
+        if len(plot_paths) > _VLM_MAX_PLOTS:
+            picked = await ctx.step(
+                "select_best_plots",
+                lambda paths=plot_paths, desc=task_desc, m=vlm_model: (
+                    ctx.tools.bfts_vlm.select_best_n_plots(
+                        plot_paths=paths,
+                        n=_VLM_MAX_PLOTS,
+                        task_desc=desc,
+                        model=m,
+                    )
+                ),
+            )
+        else:
+            picked = plot_paths
         vlm = await ctx.step(
             "vlm_analyze",
-            lambda paths=plot_paths, desc=str(expand_ctx.idea.get("Title", "")), m=vlm_model: (
+            lambda paths=picked, desc=task_desc, m=vlm_model: (
                 ctx.tools.bfts_vlm.analyze_plots(
                     plot_paths=paths,
                     task_desc=desc,
