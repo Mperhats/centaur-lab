@@ -6,9 +6,15 @@ requires-python = ">=3.11"
 dependencies = []
 
 [dependency-groups]
+# Test deps for both unit tests and the integration suite under
+# tests/integration/. asyncpg is only used by the integration suite (the
+# `db_pool` fixture); declared here for documentation — the Justfile
+# `test-workflows-integration` recipe still passes it via `--with asyncpg`
+# so the recipe is self-contained.
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
+    "asyncpg>=0.29.0",
 ]
 
 # Workflows are not built as a wheel; the API pod discovers *.py files at

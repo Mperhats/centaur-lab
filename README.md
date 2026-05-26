@@ -236,6 +236,17 @@ Both workflows write to `company_context_documents`, which is BM25-indexed
 via paradedb and has a GIN index on `metadata` — so persisted papers and
 briefs are immediately future-RAG-ready for retrieval across turns.
 
+### Testing workflows locally
+
+Unit tests for `save_papers` and `research_brief` mock the database and
+S2 client and run via `just overlay::test-workflows`. A separate
+`just overlay::test-workflows-integration` recipe exercises the same
+handlers against a real Postgres (with the centaur schema and `pg_search`
+migrations applied), gated on `CENTAUR_TEST_DATABASE_URL`. Point that env
+var at a port-forwarded cluster Postgres (recipe in
+[`db/README.md`](db/README.md)) and the integration tests run; leave it
+unset and they skip cleanly.
+
 ## What this repo intentionally does NOT contain (yet)
 
 | Future milestone | What it adds |

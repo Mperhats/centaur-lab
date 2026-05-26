@@ -63,9 +63,14 @@ class FakePool:
 
 
 class FakeContext:
-    """Minimal workflow context exposing ``_pool`` and a recording ``log``."""
+    """Minimal workflow context exposing ``_pool`` and a recording ``log``.
 
-    def __init__(self, pool: FakePool) -> None:
+    ``pool`` is intentionally typed ``Any`` so the same fake can wrap either
+    the in-memory ``FakePool`` (unit tests) or a real ``asyncpg.Pool``
+    (integration tests under ``tests/integration/``).
+    """
+
+    def __init__(self, pool: Any) -> None:
         self._pool = pool
         self.logs: list[tuple[str, dict[str, Any]]] = []
 
