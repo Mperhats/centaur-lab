@@ -76,6 +76,19 @@ def _is_not_found(exc: BaseException) -> bool:
     return getattr(exc, "status", None) == 404
 
 
+def _disable_proxy_env(api_client: Any) -> None:
+    """Disable ``HTTPS_PROXY`` env honoring for an in-cluster K8s client.
+
+    The API pod sets ``HTTPS_PROXY=http://centaur-api-proxy:8080`` so
+    outbound HTTPS goes through iron-proxy. The in-cluster Kubernetes
+    apiserver is reachable via the pod's service-account token directly,
+    not through the proxy — sending K8s API calls through iron-proxy
+    fails with a TLS alert. Mirrors
+    .centaur/services/api/api/sandbox/kubernetes.py:399-402.
+    """
+    api_client.rest_client.pool_manager._trust_env = False
+
+
 class _PodExecResult(Protocol):
     stdout: str
     stderr: str
@@ -306,6 +319,12 @@ class _KubernetesSandboxAPI:
         core_api_client = client.ApiClient(
             configuration=client.Configuration.get_default_copy()
         )
+        # The API process routes outbound HTTPS through iron-proxy via
+        # HTTPS_PROXY, but the in-cluster Kubernetes client must talk
+        # directly to the apiserver — otherwise aiohttp tries to CONNECT
+        # 10.96.0.1:443 through iron-proxy and dies on a TLS alert.
+        # Mirrors .centaur/services/api/api/sandbox/kubernetes.py:399-402.
+        _disable_proxy_env(core_api_client)
         if self.core_api is None:
             self.core_api = client.CoreV1Api(api_client=core_api_client)
         if self.custom_api is None:
@@ -317,6 +336,7 @@ class _KubernetesSandboxAPI:
                 configuration=client.Configuration.get_default_copy(),
                 heartbeat=30,
             )
+            _disable_proxy_env(self.ws_api_client)
         if self.ws_core_api is None:
             self.ws_core_api = client.CoreV1Api(api_client=self.ws_api_client)
 

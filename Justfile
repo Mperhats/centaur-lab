@@ -352,8 +352,8 @@ bfts-retention-smoke:
     sandbox_id="bfts-retention-smoke-$(date +%s)"
     py="$(cat <<'PY'
     import asyncio, os, sys
-    sys.path.insert(0, "/app/overlay/org/tools/bfts_executor")
-    from client import BFTSExecutor, _KubernetesSandboxAPI
+    sys.path.insert(0, "/app/overlay/org/tools")
+    from bfts_executor.client import BFTSExecutor, _KubernetesSandboxAPI
 
     async def main(sandbox_id: str) -> None:
         api = _KubernetesSandboxAPI()
@@ -382,4 +382,4 @@ bfts-retention-smoke:
     PY
     )"
     kubectl -n $CENTAUR_NAMESPACE exec "$api_deploy" -c api \
-        -- env SANDBOX_ID="$sandbox_id" python -c "$py"
+        -- env SANDBOX_ID="$sandbox_id" /app/.venv/bin/python -c "$py"

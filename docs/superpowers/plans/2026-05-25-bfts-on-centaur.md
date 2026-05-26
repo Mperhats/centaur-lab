@@ -2368,8 +2368,8 @@ bfts-retention-smoke:
     sandbox_id="bfts-retention-smoke-$(date +%s)"
     py="$(cat <<'PY'
     import asyncio, os, sys
-    sys.path.insert(0, "/app/overlay/org/tools/bfts_executor")
-    from client import BFTSExecutor, _KubernetesSandboxAPI
+    sys.path.insert(0, "/app/overlay/org/tools")
+    from bfts_executor.client import BFTSExecutor, _KubernetesSandboxAPI
 
     async def main(sandbox_id: str) -> None:
         api = _KubernetesSandboxAPI()
