@@ -12,6 +12,7 @@ import asyncpg
 import httpx
 
 from centaur_lab.brief import persist_research_brief_from_papers
+from centaur_lab.metrics import observe_document_size, record_document_change
 from centaur_lab.paper_document import build_paper_document, upsert_document
 from centaur_lab.paper_fulltext import (
     build_fulltext_document,
@@ -396,6 +397,7 @@ class SemanticScholarClient:
     def archive_paper(
         self,
         paper_id: str,
+        *,
         source_url: str | None = None,
     ) -> dict[str, Any]:
         """Download, parse, and persist a paper's PDF (agent-facing tool method).
@@ -546,7 +548,9 @@ class SemanticScholarClient:
                 }
 
             paper_doc = build_paper_document(paper)
+            observe_document_size(paper_doc)
             paper_action = await upsert_document(pool, paper_doc)
+            record_document_change(paper_doc, paper_action)
 
             fulltext_doc = build_fulltext_document(
                 paper,
@@ -557,8 +561,14 @@ class SemanticScholarClient:
                 pdf_sha256=pdf_sha256,
                 source_url=url,
             )
+            observe_document_size(fulltext_doc)
             fulltext_action = await upsert_document(pool, fulltext_doc)
+            record_document_change(fulltext_doc, fulltext_action)
 
+            # ``parsed_text`` here is the FULL parser output. Only the BM25
+            # body in ``fulltext_doc`` is subject to the 1 MiB cap, so the
+            # archive row's ``truncated`` flag stays False — re-rendering
+            # from this row produces the same parser output we got today.
             archive_action = await upsert_paper_archive(
                 pool,
                 {
@@ -570,7 +580,7 @@ class SemanticScholarClient:
                     "pdf_bytes": data,
                     "parsed_text": parsed_text,
                     "parser_used": parser_used,
-                    "truncated": fulltext_doc["metadata"]["truncated"],
+                    "truncated": False,
                     "metadata": {
                         "paperId": normalized_id,
                         "url": paper_doc["url"],
