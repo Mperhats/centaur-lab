@@ -18,6 +18,7 @@ indexed-lane helpers below are ported from
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -29,12 +30,31 @@ import asyncpg
 import httpx
 
 from centaur_sdk import secret
+from shared.metrics import emit_document_metrics
+from shared.paper_document import (
+    _canonical_json,
+    _content_hash,
+    build_paper_document,
+    upsert_document,
+)
 
 DEFAULT_PAPER_FIELDS = "title,authors,year,abstract,citationCount,url,openAccessPdf"
 DEFAULT_REFERENCE_FIELDS = "title,authors,year,citationCount,url"
 
 DEFAULT_HYBRID_SEARCH_LIMIT = 10
 MAX_HYBRID_SEARCH_LIMIT = 50
+
+DEFAULT_RESEARCH_BRIEF_LIMIT = 5
+MAX_RESEARCH_BRIEF_LIMIT = 20
+
+# Brief markdown rendering knobs. Mirror the workflow constants from
+# ``overlay/workflows/research_brief.py`` so the rendered output is
+# byte-identical to the legacy path until Task 3 collapses the workflow
+# into a wrapper around this method.
+_BRIEF_ABSTRACT_TRUNCATE = 500
+_BRIEF_TITLE_QUERY_TRUNCATE = 80
+_BRIEF_ID_HEX_LEN = 16
+_BRIEF_MAX_AUTHORS_INLINE = 3
 
 
 # ---------------------------------------------------------------------------
@@ -261,6 +281,149 @@ def _live_paper_result(paper: dict[str, Any]) -> dict[str, Any]:
         "lane": "live",
         "result_type": "paper",
         "score": None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Research-brief rendering helpers (ported from
+# overlay/workflows/research_brief.py). Pure functions, no I/O — kept
+# at module scope so they're trivially testable and so Task 3 can have
+# the workflow delegate here without circular imports.
+# ---------------------------------------------------------------------------
+
+
+def _brief_id_for(query: str, year_from: int | None) -> str:
+    """Stable, case-insensitive id suffix for the brief document.
+
+    Date is intentionally excluded so re-running the same query updates
+    the same row instead of accreting one brief per run. Reuses the
+    ``shared.paper_document`` canonical JSON helper so any future tweak
+    to canonicalization flows through here without silently drifting
+    brief IDs.
+    """
+    canonical = _canonical_json([query.strip().lower(), year_from])
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:_BRIEF_ID_HEX_LEN]
+
+
+def _normalize_oneline(text: str) -> str:
+    """Collapse all whitespace to single spaces; safe for Markdown headings."""
+    return " ".join(text.split())
+
+
+def _format_authors(authors: list[Any]) -> str:
+    names: list[str] = []
+    for entry in authors or []:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if name:
+            names.append(str(name))
+    if not names:
+        return "Unknown"
+    if len(names) <= _BRIEF_MAX_AUTHORS_INLINE:
+        return ", ".join(names)
+    head = ", ".join(names[:_BRIEF_MAX_AUTHORS_INLINE])
+    return f"{head} +{len(names) - _BRIEF_MAX_AUTHORS_INLINE} more"
+
+
+def _paper_url(paper: dict[str, Any]) -> str:
+    url = paper.get("url")
+    if url:
+        return str(url)
+    paper_id = paper.get("paperId")
+    if paper_id:
+        return f"https://www.semanticscholar.org/paper/{paper_id}"
+    return ""
+
+
+def _format_abstract(paper: dict[str, Any]) -> str:
+    abstract = paper.get("abstract")
+    if not abstract:
+        return "No abstract available."
+    text = str(abstract)
+    if len(text) > _BRIEF_ABSTRACT_TRUNCATE:
+        return text[:_BRIEF_ABSTRACT_TRUNCATE] + "..."
+    return text
+
+
+def _render_brief(query: str, year_from: int | None, papers: list[dict[str, Any]]) -> str:
+    """Render the brief Markdown. Pure; no I/O."""
+    display_query = _normalize_oneline(query)
+    year_label = str(year_from) if year_from is not None else "any"
+    header = [
+        f"# Research Brief: {display_query}",
+        "",
+        f"- Query: {display_query}",
+        f"- Year filter: {year_label}",
+        f"- Results: {len(papers)} papers",
+        "",
+        "---",
+        "",
+    ]
+
+    if not papers:
+        return "\n".join([*header, "No papers found for this query.", ""])
+
+    lines: list[str] = [*header, "## Papers", ""]
+    for index, paper in enumerate(papers, start=1):
+        display_title = _normalize_oneline(str(paper.get("title") or "Untitled"))
+        year = paper.get("year")
+        year_text = str(year) if isinstance(year, int) else "Unknown"
+        citations = int(paper.get("citationCount") or 0)
+        authors_value = paper.get("authors")
+        authors_list = authors_value if isinstance(authors_value, list) else []
+        lines.extend(
+            [
+                f"### {index}. {display_title}",
+                "",
+                f"- Authors: {_format_authors(authors_list)}",
+                f"- Year: {year_text}",
+                f"- Citations: {citations}",
+                f"- URL: {_paper_url(paper)}",
+                "",
+                _format_abstract(paper),
+                "",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def _build_brief_document(
+    query: str,
+    year_from: int | None,
+    limit: int,
+    papers: list[dict[str, Any]],
+    markdown: str,
+) -> dict[str, Any]:
+    """Project the rendered brief into a ``company_context_documents`` row."""
+    suffix = _brief_id_for(query, year_from)
+    truncated_query = query[:_BRIEF_TITLE_QUERY_TRUNCATE]
+    title = f"Research Brief: {truncated_query}"
+    paper_ids = [str(p["paperId"]) for p in papers if p.get("paperId")]
+    metadata: dict[str, Any] = {
+        "query": query,
+        "year_from": year_from,
+        "limit": limit,
+        "results_count": len(papers),
+        "paper_ids": paper_ids,
+    }
+    return {
+        "document_id": f"semantic_scholar:research_brief:{suffix}",
+        "source": "semantic_scholar",
+        "source_type": "research_brief",
+        "source_document_id": suffix,
+        "source_chunk_id": "",
+        "parent_document_id": None,
+        "title": title,
+        "body": markdown,
+        "url": "",
+        "author_id": "",
+        "author_name": "",
+        "access_scope": "company",
+        "occurred_at": None,
+        "source_updated_at": None,
+        "content_hash": _content_hash(title, markdown, "", metadata),
+        "metadata": metadata,
     }
 
 
@@ -541,6 +704,151 @@ class SemanticScholarClient:
                 "live_year_from": effective_year_from,
                 "live_error": live_error,
                 "results": [*indexed_results, *live_results],
+            }
+        finally:
+            await conn.close()
+
+    def research_brief(
+        self,
+        query: str,
+        limit: int = DEFAULT_RESEARCH_BRIEF_LIMIT,
+        year_from: int | None = None,
+    ) -> dict[str, Any]:
+        """Build a persisted research brief on a topic — searches Semantic Scholar,
+        renders a Markdown lit-review, and writes the brief plus its citing papers
+        to ``company_context_documents`` for future RAG retrieval.
+
+        Use this when a user asks for a literature review, a research summary,
+        or "what does the literature say about X" — typical Slack prompts
+        include "build a research brief on diffusion models", "lit review on
+        active inference", "summarize recent work on retrieval-augmented
+        generation". The rendered Markdown is returned as the ``markdown``
+        field so the caller (e.g. a Slack agent) can post it directly.
+
+        Idempotent: re-running with the same ``(query, year_from)`` updates
+        the existing brief row in place (matched on a stable hash of the
+        normalized query) instead of duplicating it. Each underlying paper
+        is upserted under ``source_type="paper"`` with ``parent_document_id``
+        stamped to the brief's document id, so downstream tools can pivot
+        from a paper back to the brief that surfaced it.
+
+        Never raises — returns an ``{"status": "error", "error": ...}`` dict
+        on any failure (empty query, non-positive limit, missing
+        ``DATABASE_URL``, S2 outage, DB failure). ``limit`` above the
+        per-call ceiling is clamped, not rejected.
+
+        Args:
+            query: Free-text topic to brief (e.g. "diffusion models
+                protein design").
+            limit: Max underlying papers, 1..``MAX_RESEARCH_BRIEF_LIMIT``.
+                Values above the ceiling are clamped.
+            year_from: Optional inclusive lower bound on publication year.
+
+        Returns:
+            On success, a dict shaped::
+
+                {
+                    "status": "completed",
+                    "brief_document_id": "semantic_scholar:research_brief:<hex>",
+                    "brief_action": "inserted" | "updated" | "noop",
+                    "results_count": <int>,
+                    "papers_inserted": <int>,
+                    "papers_updated": <int>,
+                    "papers_noop": <int>,
+                    "markdown": "<full rendered brief>",
+                }
+
+            On failure, ``{"status": "error", "error": "<message>"}``.
+        """
+        normalized_query = query.strip() if query else ""
+        if not normalized_query:
+            return {"status": "error", "error": "query cannot be empty"}
+
+        if limit <= 0:
+            return {"status": "error", "error": "limit must be positive"}
+
+        database_url = _resolve_database_url()
+        if not database_url:
+            return {
+                "status": "error",
+                "error": "DATABASE_URL is required for semantic_scholar.research_brief",
+            }
+
+        clamped_limit = _clamp(
+            limit,
+            minimum=1,
+            maximum=MAX_RESEARCH_BRIEF_LIMIT,
+        )
+
+        try:
+            return asyncio.run(
+                self._research_brief_async(
+                    query=query,
+                    limit=clamped_limit,
+                    year_from=year_from,
+                    database_url=database_url,
+                )
+            )
+        except Exception as exc:
+            return {"status": "error", "error": str(exc)}
+
+    async def _research_brief_async(
+        self,
+        *,
+        query: str,
+        limit: int,
+        year_from: int | None,
+        database_url: str,
+    ) -> dict[str, Any]:
+        conn = await asyncpg.connect(database_url, command_timeout=30)
+        try:
+            papers = self.search_papers(
+                query=query,
+                limit=limit,
+                year_from=year_from,
+            )
+
+            markdown = _render_brief(query, year_from, papers)
+            brief_doc = _build_brief_document(query, year_from, limit, papers, markdown)
+
+            brief_action = await upsert_document(conn, brief_doc)
+            emit_document_metrics(brief_doc, brief_action)
+
+            papers_inserted = 0
+            papers_updated = 0
+            papers_noop = 0
+            for paper in papers:
+                try:
+                    paper_doc = build_paper_document(paper, query=query)
+                except ValueError:
+                    # No paperId → cannot synthesize a stable primary key.
+                    # The workflow logs this through ctx.log; here we
+                    # silently drop the row and let the counters reflect
+                    # only the upsertable subset. The outer error
+                    # envelope handles unrecoverable failures.
+                    continue
+                action = await upsert_document(
+                    conn,
+                    paper_doc,
+                    parent_document_id=brief_doc["document_id"],
+                )
+                emit_document_metrics(paper_doc, action)
+                if action == "inserted":
+                    papers_inserted += 1
+                elif action == "updated":
+                    papers_updated += 1
+                else:
+                    papers_noop += 1
+
+            return {
+                "status": "completed",
+                "brief_document_id": brief_doc["document_id"],
+                "brief_action": brief_action,
+                "results_count": len(papers),
+                "papers_inserted": papers_inserted,
+                "papers_updated": papers_updated,
+                "papers_noop": papers_noop,
+                "markdown": markdown,
             }
         finally:
             await conn.close()

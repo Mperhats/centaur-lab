@@ -29,3 +29,10 @@ if _SDK_PARENT.is_dir() and str(_SDK_PARENT) not in sys.path:
 _TOOLS_DIR = _THIS_DIR.parent.parent
 if str(_TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(_TOOLS_DIR))
+# Put ``overlay/`` on sys.path so ``from shared.paper_document import ...``
+# and ``from shared.metrics import ...`` resolve under tests. The API pod
+# already has ``overlay/`` on sys.path via the tool loader; this mirrors
+# that for local pytest runs.
+_OVERLAY_DIR = _THIS_DIR.parents[2]
+if str(_OVERLAY_DIR) not in sys.path:
+    sys.path.insert(0, str(_OVERLAY_DIR))

@@ -31,6 +31,12 @@ if _SDK_PARENT.is_dir() and str(_SDK_PARENT) not in sys.path:
 # Allow both `python cli.py ...` and `python -m semantic_scholar.cli`.
 if str(_THIS_DIR.parent) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR.parent))
+# Put `overlay/` on sys.path so `from shared.X import Y` (used by
+# client.py for paper_document + metrics helpers) resolves under the
+# CLI. The API pod gets this for free via the tool loader's bootstrap.
+_OVERLAY_DIR = _THIS_DIR.parents[1]
+if str(_OVERLAY_DIR) not in sys.path:
+    sys.path.insert(0, str(_OVERLAY_DIR))
 
 # Walk up from CWD to find a `.env`. The repo convention is one root .env
 # (fed into the k8s Secret by `just bootstrap-secrets`); per-tool `.env`
