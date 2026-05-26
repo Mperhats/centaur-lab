@@ -41,13 +41,23 @@ def _content_hash(*parts: Any) -> str:
     return hashlib.sha256(_canonical_json(parts).encode("utf-8")).hexdigest()
 
 
-def build_paper_document(paper: Paper, *, query: str | None = None) -> dict:
+def build_paper_document(
+    paper: Paper,
+    *,
+    query: str | None = None,
+    parent_document_id: str | None = None,
+) -> dict:
     """Project a Semantic Scholar :class:`Paper` into a company_context_documents row.
 
     Args:
         paper: A typed :class:`Paper` parsed from the Graph API response.
         query: Optional free-text query that produced this paper; persisted
             in `metadata.query` for downstream attribution.
+        parent_document_id: Optional parent row id (e.g. the research-brief
+            ``document_id`` for papers surfaced by ``research_brief``).
+            Persisted directly into the returned dict's
+            ``parent_document_id`` field; ``upsert_document`` reads it from
+            there.
 
     Returns:
         A dict shaped for `upsert_document` / the canonical `_upsert_document`
@@ -148,7 +158,7 @@ def build_paper_document(paper: Paper, *, query: str | None = None) -> dict:
         "source_type": "paper",
         "source_document_id": paper_id_str,
         "source_chunk_id": "",
-        "parent_document_id": None,
+        "parent_document_id": parent_document_id,
         "title": title,
         "body": body,
         "url": url,
@@ -165,26 +175,21 @@ def build_paper_document(paper: Paper, *, query: str | None = None) -> dict:
 async def upsert_document(
     pool: Any,
     document: dict,
-    *,
-    parent_document_id: str | None = None,
 ) -> Literal["inserted", "updated", "noop"]:
     """Upsert a projected paper document and return inserted/updated/noop.
 
     Mirrors `_upsert_document` from the upstream `company_context_documents`
-    workflow. Callers may pass `parent_document_id` as a kwarg to link a
-    child to a parent; when omitted, falls back to ``document["parent_document_id"]``
-    so callers like ``_archive_paper_async`` that bake the parent into the
-    returned dict don't need to re-pass it.
+    workflow. Parent linkage is read from ``document["parent_document_id"]``;
+    callers that want to link a child to a parent set that field at build
+    time (e.g. ``build_paper_document(paper, parent_document_id=...)``).
 
     The persisted `content_hash` combines the document's intrinsic hash with
-    the effective parent. Without this, re-parenting an otherwise-unchanged
-    paper (e.g. previously saved by `save_papers`, then surfaced by
+    its parent. Without this, re-parenting an otherwise-unchanged paper
+    (e.g. previously saved by `save_papers`, then surfaced by
     `research_brief`) would silently no-op because the intrinsic hash hadn't
     changed — leaving the paper's `parent_document_id` stale.
     """
-    effective_parent = (
-        parent_document_id if parent_document_id is not None else document.get("parent_document_id")
-    )
+    effective_parent = document["parent_document_id"]
     # OVERLAY: compound hash (intrinsic + effective_parent) — diverges from
     # upstream's raw intrinsic-hash convention to make re-parenting trigger
     # UPDATE even when content is unchanged. See function docstring for why.

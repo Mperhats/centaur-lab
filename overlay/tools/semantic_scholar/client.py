@@ -566,7 +566,6 @@ class SemanticScholarClient:
             fulltext_doc = build_fulltext_document(
                 paper,
                 parsed_text=parsed_text,
-                parent_document_id=paper_doc["document_id"],
                 parser_used=parser_used,
                 truncated=False,
                 pdf_sha256=pdf_sha256,

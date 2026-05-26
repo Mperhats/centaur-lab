@@ -51,7 +51,6 @@ def build_fulltext_document(
     paper: Paper,
     *,
     parsed_text: str,
-    parent_document_id: str,
     parser_used: str,
     truncated: bool,
     pdf_sha256: str,
@@ -62,7 +61,9 @@ def build_fulltext_document(
     Mirrors :func:`centaur_lab.paper_document.build_paper_document` but emits
     the full-text companion row keyed off the same Semantic Scholar paper.
     The body is the parsed Markdown, capped at :data:`FULLTEXT_BODY_MAX_BYTES`
-    UTF-8 bytes for BM25 index efficiency.
+    UTF-8 bytes for BM25 index efficiency. The parent metadata row's
+    ``document_id`` is derived from ``paper.paperId`` (the two share the same
+    paper key by construction).
 
     Args:
         paper: A typed :class:`Paper` parsed from the Graph API response;
@@ -70,9 +71,6 @@ def build_fulltext_document(
             are read here.
         parsed_text: The Markdown produced by the PDF parser. Will be
             truncated in-place if it exceeds the byte cap.
-        parent_document_id: The metadata row's ``document_id``
-            (typically ``semantic_scholar:paper:{paperId}``); links the
-            full-text row back to its metadata sibling.
         parser_used: Identifier for the parser that produced ``parsed_text``
             (e.g. ``"pymupdf4llm"``); persisted in metadata for debugging
             and for re-parse decisions.
@@ -96,6 +94,7 @@ def build_fulltext_document(
     if not paper.paperId:
         raise ValueError("paper.paperId is required to build fulltext document")
     paper_id_str = str(paper.paperId)
+    parent_document_id = f"semantic_scholar:paper:{paper_id_str}"
 
     title = paper.title or "Untitled"
 

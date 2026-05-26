@@ -151,19 +151,15 @@ async def test_upsert_document_branches_across_insert_update_noop() -> None:
 
 
 @pytest.mark.asyncio
-async def test_upsert_document_respects_document_parent_when_kwarg_omitted() -> None:
-    """Locks the contract that ``upsert_document`` reads
-    ``document["parent_document_id"]`` when the kwarg is omitted.
+async def test_upsert_document_uses_document_parent() -> None:
+    """Locks the contract that ``upsert_document`` reads parent linkage
+    straight out of ``document["parent_document_id"]``.
 
-    ``build_fulltext_document`` (paper_fulltext.py) requires
-    ``parent_document_id: str`` and bakes it into the returned dict, then
-    ``_archive_paper_async`` calls ``upsert_document(pool, fulltext_doc)``
-    without re-passing the value. Without this fallback the paper_fulltext
-    row's parent linkage is silently NULLed and the compound content_hash
-    diverges from what was first persisted. A previous P1 audit mistakenly
-    flagged the fallback branch as dead — the audit had stale mental
-    state from before the archive flow landed (commit 5ae216c). This test
-    prevents the same misread next time.
+    Callers like ``build_fulltext_document`` and the research-brief paper
+    loop set this field at build time; ``upsert_document`` has no kwarg
+    override. Without this contract the persisted ``parent_document_id``
+    and compound ``content_hash`` would diverge from what was first
+    written and re-parenting would silently NULL the link.
     """
     doc = build_paper_document(_sample_paper())
     doc["parent_document_id"] = "semantic_scholar:paper:parent"
@@ -186,12 +182,14 @@ async def test_upsert_document_relinks_parent_when_content_unchanged() -> None:
     change, but the parent did. Earlier upsert tests only seeded
     existing_hash=None (fresh-insert path) so this regression was invisible.
     """
-    doc = build_paper_document(_sample_paper())
-    intrinsic_hash = doc["content_hash"]
+    paper = _sample_paper()
+    no_parent_doc = build_paper_document(paper)
+    intrinsic_hash = no_parent_doc["content_hash"]
     no_parent_persisted_hash = _content_hash(intrinsic_hash, None)
     pool = MockPool(existing_hash=no_parent_persisted_hash, execute_status="INSERT 0 1")
 
-    result = await upsert_document(pool, doc, parent_document_id="brief:Q")
+    doc = build_paper_document(paper, parent_document_id="brief:Q")
+    result = await upsert_document(pool, doc)
 
     assert result == "updated"
     assert len(pool.execute_calls) == 1

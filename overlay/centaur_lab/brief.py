@@ -157,15 +157,15 @@ async def persist_research_brief_from_papers(
     papers_noop = 0
     for paper in papers:
         try:
-            paper_doc = build_paper_document(paper, query=query)
+            paper_doc = build_paper_document(
+                paper,
+                query=query,
+                parent_document_id=brief_doc["document_id"],
+            )
         except ValueError:
             continue
         observe_document_size(paper_doc)
-        action = await upsert_document(
-            pool,
-            paper_doc,
-            parent_document_id=brief_doc["document_id"],
-        )
+        action = await upsert_document(pool, paper_doc)
         record_document_change(paper_doc, action)
         if action == "inserted":
             papers_inserted += 1
