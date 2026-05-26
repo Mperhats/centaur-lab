@@ -1,13 +1,12 @@
 line-length = 100
 target-version = "py311"
 
-# Exclude vendored submodules (centaur platform + AI-Scientist) and the
-# local scratch dir from lint — they have their own toolchains. uv's
-# managed venv and tmp/ are also skipped explicitly because ruff does
-# not always honor .gitignore for tracked-but-ignored siblings.
+# Exclude the vendored centaur submodule and the local scratch dir
+# from lint — upstream has its own toolchain. uv's managed venv and
+# tmp/ are also skipped explicitly because ruff does not always honor
+# .gitignore for tracked-but-ignored siblings.
 extend-exclude = [
     ".centaur",
-    ".scientist",
     ".venv",
     "tmp",
 ]

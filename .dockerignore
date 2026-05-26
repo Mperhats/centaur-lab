@@ -14,9 +14,9 @@
 .gitmodules
 .github
 
-# Submodules — vendored upstream source trees, never shipped in the image
+# Submodule — vendored upstream Centaur source tree, never shipped
+# in the image
 .centaur
-.scientist
 
 # Dev/ops directories at the repo root that aren't part of the overlay.
 # ``db``, ``clusters``, and ``infra`` were deleted post-reorg but are

@@ -21,7 +21,6 @@ directly into the overlay image (or used to verify it locally).
 | `Dockerfile` + `.dockerignore` | Single-`COPY .` overlay image. The `.dockerignore` is the source of truth for what does **not** ship. |
 | `pyproject.toml` + `uv.lock` | Single-root uv project: aggregated dev/test deps + `centaur-sdk` (path-installed from `.centaur/centaur_sdk`) and a single `.venv` at the repo root. Per-tool `pyproject.toml` files are still authoritative for runtime dep resolution inside the API pod. |
 | `.centaur/` | Git submodule pinned at a specific `paradigmxyz/centaur` SHA. Source of truth for the base platform **and** the `centaur-sdk` package. |
-| `.scientist/` | Git submodule pinning [Sakana AI-Scientist-v2](https://github.com/SakanaAI/AI-Scientist-v2) for research-flow experiments. |
 | `cloudflared/` | Cloudflare Tunnel routing, launchd agent template, and per-machine setup README. Has its own standalone `Justfile` (`cd cloudflared && just install-service`). |
 | `docs/TODO.md` | Actionable backlog. |
 | `docs/overlay-db-migrations.md` | Decision tree + dbmate workflow for overlay-owned migrations. |
