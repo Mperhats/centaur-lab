@@ -34,9 +34,7 @@ up: bootstrap-secrets
 #                              `just refresh-overlay` is the one-command
 #                              "pull latest main + roll API" version of this.
 #
-# GHCR is private — the chart's pods reference `ghcr-pull` via global.imagePullSecrets
-# in values.org.yaml. Run `just bootstrap-ghcr-pull-secret` once (or just
-# `just bootstrap-secrets`, which calls it) before mode 3 will work.
+# The centaur-overlay GHCR package is public — no imagePullSecret needed.
 #
 # Deploy the chart; resolves overlay image tag from $OVERLAY_TAG > overlay/.tag > origin/main sha.
 [group('lifecycle')]
@@ -95,42 +93,7 @@ refresh-overlay:
     echo "Verify in-cluster:"
     echo "  kubectl describe deployment/${deploy} -n $CENTAUR_NAMESPACE | grep -A1 'overlay-bootstrap'"
 
-# Materialise (or refresh) the docker-registry secret the chart references
-# as `ghcr-pull` (see global.imagePullSecrets in values.org.yaml). Required
-# because the centaur-overlay GHCR package is private.
-#
-# Reads from env:
-#   GHCR_USERNAME — GitHub username (defaults to Mperhats)
-#   GHCR_TOKEN    — PAT with read:packages scope
-#
-# Both come from .env (see .env.example). Idempotent — re-run after rotating
-# the PAT and the imagePullSecret on every overlay-using pod refreshes
-# automatically on the next rollout.
-#
-# Materialise (or refresh) the ghcr-pull docker-registry secret from GHCR_USERNAME / GHCR_TOKEN.
-[group('lifecycle')]
-bootstrap-ghcr-pull-secret:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    user="${GHCR_USERNAME:-Mperhats}"
-    token="${GHCR_TOKEN:-}"
-    if [[ -z "$token" ]]; then
-      echo "skip ghcr-pull (GHCR_TOKEN unset — overlay image pulls from GHCR will 401)"
-      exit 0
-    fi
-    kubectl get namespace "$CENTAUR_NAMESPACE" >/dev/null 2>&1 \
-      || kubectl create namespace "$CENTAUR_NAMESPACE" >/dev/null
-    kubectl create secret docker-registry ghcr-pull \
-        --namespace "$CENTAUR_NAMESPACE" \
-        --docker-server=ghcr.io \
-        --docker-username="$user" \
-        --docker-password="$token" \
-        --dry-run=client -o yaml \
-      | kubectl apply -f - >/dev/null
-    echo "applied ghcr-pull (user=${user}) in namespace ${CENTAUR_NAMESPACE}"
-
-# Run upstream bootstrap, patch in keys it does not handle, then ensure the
-# GHCR pull secret exists so the overlay initContainer can pull from GHCR.
+# Run upstream bootstrap, then patch in keys it does not handle.
 [group('lifecycle')]
 bootstrap-secrets:
     #!/usr/bin/env bash
@@ -157,7 +120,6 @@ bootstrap-secrets:
     patch_key GITHUB_TOKEN
     patch_key SEMANTIC_SCHOLAR_API_KEY
     patch_key LOCAL_DEV_API_KEY
-    just bootstrap-ghcr-pull-secret
 
 [group('lifecycle')]
 [confirm("Uninstall " + CENTAUR_RELEASE + " from " + CENTAUR_NAMESPACE + "? Pass --yes to skip this prompt. ")]

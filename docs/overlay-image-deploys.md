@@ -2,14 +2,16 @@
 
 The centaur-overlay image carries every org-specific tool, workflow and skill
 (see `overlay/`). On every push to `main` the
-[`Overlay` workflow](../.github/workflows/overlay.yml) builds and pushes:
+[`Overlay` workflow](../.github/workflows/overlay.yml) builds and pushes a
+multi-arch manifest (`linux/amd64,linux/arm64`) under two tags:
 
 - `ghcr.io/mperhats/centaur-lab/centaur-overlay:sha-<7char>` — immutable
 - `ghcr.io/mperhats/centaur-lab/centaur-overlay:latest`     — tracks `main`
 
-The chart references the image through `overlay.image.{repository,tag}` and
-the API pod's `overlay-bootstrap` initContainer copies it into a shared
-`overlay-root` volume the API + sandboxes mount as `/app/overlay/org`.
+The package is public — no imagePullSecret needed. The chart references the
+image through `overlay.image.{repository,tag}` and the API pod's
+`overlay-bootstrap` initContainer copies it into a shared `overlay-root`
+volume the API + sandboxes mount as `/app/overlay/org`.
 
 ## The three deploy modes
 
@@ -52,35 +54,28 @@ OVERLAY_TAG=sha-1b6cb08 just deploy
 kubectl rollout restart deployment/centaur-centaur-api -n centaur-system
 ```
 
-## First-time setup: GHCR pull secret
+## Troubleshooting
 
-The `mperhats/centaur-lab/centaur-overlay` package is private, so the chart's
-`global.imagePullSecrets: [{name: ghcr-pull}]` references a
-docker-registry Secret the kubelet uses on every overlay-image pull.
-
-Set `GHCR_USERNAME` and `GHCR_TOKEN` (see `.env.example`), then run:
-
-```bash
-just bootstrap-ghcr-pull-secret
-```
-
-This is also wired into `just bootstrap-secrets` (which `just up` calls), so
-fresh clones get the secret on their first `just up`.
-
-If `GHCR_TOKEN` is unset, the recipe prints a `skip` line and exits 0.
-You can still run in mode 2 (local Docker build) without it.
-
-If pods get stuck on `ImagePullBackOff` after a `refresh-overlay`, check:
+If pods get stuck on `ImagePullBackOff` after a `refresh-overlay`:
 
 ```bash
 kubectl get events -n centaur-system --field-selector reason=Failed --sort-by=.lastTimestamp | tail -10
-kubectl get secret ghcr-pull -n centaur-system -o yaml
+kubectl describe pod -n centaur-system -l app.kubernetes.io/component=api | grep -A3 overlay-bootstrap
 ```
 
-A `401 Unauthorized` or `denied: denied` means `GHCR_TOKEN` is missing
-`read:packages` or has expired. Rotate the PAT, re-export it, re-run
-`just bootstrap-ghcr-pull-secret`, then `kubectl rollout restart` the
-affected deployment.
+Most common cause is the resolved sha not matching what CI actually
+published — e.g. if `git fetch origin main` failed silently (offline) and
+`origin/main` is stale. Re-run with the right sha explicitly:
+
+```bash
+git fetch origin main
+OVERLAY_TAG=sha-$(git rev-parse --short=7 origin/main) just deploy
+kubectl rollout restart deployment/centaur-centaur-api -n centaur-system
+```
+
+A `no matching manifest for linux/<arch>` error means the multi-arch
+build in `.github/workflows/overlay.yml` regressed — verify the latest
+`publish` job ran `buildx` with `platforms: linux/amd64,linux/arm64`.
 
 ## Local-build (mode 2): fast inner loop
 

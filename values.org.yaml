@@ -1,14 +1,6 @@
 ironProxy:
   secretSource: env
 
-# GHCR is private, so every pod that pulls a centaur-lab image needs a
-# docker-registry secret. `just bootstrap-ghcr-pull-secret` materialises
-# `ghcr-pull` from GHCR_USERNAME / GHCR_TOKEN in .env; `just bootstrap-secrets`
-# calls it on every `just up` so first-time setup is one command.
-global:
-  imagePullSecrets:
-    - name: ghcr-pull
-
 api:
   defaultHarness: claude-code
   slackEtlEnabled: true
