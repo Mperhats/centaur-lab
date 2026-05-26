@@ -8,7 +8,65 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from _bfts_expand import ExpandContext, expand_node
+from _bfts_expand import (
+    ExpandContext,
+    _metric_parse_prompt,
+    _plot_prompt,
+    _propose_prompt,
+    expand_node,
+)
+
+
+def test_metric_parse_prompt_does_not_reference_nested_working_subdir() -> None:
+    """Phase 4h gave every expansion its own per-node ``working_dir`` (the
+    runner ``cd``'s into ``/workspace/<node_id>/`` before running each
+    step). A prompt that reads ``working/experiment_data.npy`` would
+    resolve to ``/workspace/<node_id>/working/experiment_data.npy`` —
+    a nested path that does not exist because the draft saved
+    ``experiment_data.npy`` directly to cwd. Regression test for the
+    2026-05-26 live failure (FileNotFoundError on plot_exec).
+    """
+    rendered = _metric_parse_prompt(code="print(1)", term_out=["ok\n"])
+    assert "working/experiment_data.npy" not in rendered, (
+        "metric_parse must read experiment_data.npy from cwd (per-node "
+        "working_dir), not from a nested working/ subdir"
+    )
+    assert "experiment_data.npy" in rendered
+
+
+def test_plot_prompt_does_not_reference_nested_working_subdir() -> None:
+    """Same as the metric_parse prompt: plot code runs in
+    ``/workspace/<node_id>/`` so files referenced as ``working/foo.npy``
+    or ``working/*.png`` resolve to a nonexistent nested subdir.
+    """
+    rendered = _plot_prompt(code="print(1)", metric={"metric_names": []})
+    assert "working/experiment_data.npy" not in rendered, (
+        "plot prompt must read experiment_data.npy from cwd"
+    )
+    assert "working/" not in rendered, (
+        "plot prompt must not reference a nested working/ subdir; "
+        "the agent's cwd is already the per-node working_dir"
+    )
+
+
+def test_draft_propose_prompt_instructs_saving_experiment_data() -> None:
+    """Without an explicit save instruction the agent's draft writes
+    ``plt.show()`` and never persists data, so downstream metric_parse
+    + plot steps have nothing to read. The draft prompt MUST tell the
+    agent to save ``experiment_data.npy`` to cwd.
+    """
+    expand_ctx = ExpandContext(
+        sandbox_id="sbx-1",
+        parent_node=None,
+        idea={"Title": "demo"},
+        llm_api_key="sk-test",
+        node_id="n-1",
+    )
+    rendered = _propose_prompt(expand_ctx)
+    assert "experiment_data.npy" in rendered, (
+        "draft prompt must instruct the agent to save experiment_data.npy "
+        "so downstream metric_parse + plot steps have data to read"
+    )
 
 
 class _RecordingCtx:

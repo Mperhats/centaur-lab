@@ -143,16 +143,26 @@ PLOT_SELECTION_SPEC: dict[str, Any] = {
 
 PROMPT_IMPL_GUIDELINE: str = """## Implementation guideline
 
-Save intermediate results to ``working/`` under your current working
-directory (the runner has already chdir'd you there). Specifically:
+Save intermediate results to your current working directory (the
+runner has already chdir'd you into a per-node workspace). Specifically:
 
-- ``np.save(os.path.join('working', 'experiment_data.npy'), <data>)`` —
-  every metric and per-dataset value you want graded.
-- ``working/*.png`` — every plot you want reviewed.
+- ``np.save('experiment_data.npy', <data>)`` — every metric and
+  per-dataset value you want graded. Use a Python dict mapping names
+  to scalars / arrays, and rely on ``allow_pickle=True`` when loading.
+- ``*.png`` — every plot you want reviewed. Use ``plt.savefig('foo.png')``
+  rather than ``plt.show()``; the runner is headless.
 
 Use ``device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')``;
 fall back to CPU silently. Don't print large blobs to stdout — the
 workflow caps captured output at ~5KB.
+
+Path note: Phase 4h placed each expansion in its own per-node working
+directory (``/workspace/<node_id>/``) and the runner ``cd``'s into
+that directory before invoking your script. So a bare filename like
+``experiment_data.npy`` resolves correctly without any subdirectory
+prefix — do NOT prefix with ``working/`` because that would resolve
+to a nested ``/workspace/<node_id>/working/`` path which the
+downstream metric_parse + collect_artifacts steps don't read.
 
 Mirrored from .scientist/ai_scientist/treesearch/parallel_agent.py:
 296-394 (research 02 §Agent turn shape)."""

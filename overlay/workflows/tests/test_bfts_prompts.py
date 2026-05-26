@@ -64,7 +64,34 @@ def test_plot_selection_spec_present() -> None:
 
 def test_impl_guideline_mentions_experiment_data_npy() -> None:
     assert "experiment_data.npy" in PROMPT_IMPL_GUIDELINE
-    assert "working" in PROMPT_IMPL_GUIDELINE
+
+
+def test_impl_guideline_does_not_instruct_saving_to_working_subdir() -> None:
+    """Phase 4h gave every expansion its own per-node ``working_dir``
+    (e.g. ``/workspace/node_<uuid>/``) and ``cd``'s into it before
+    running. Nesting an additional ``working/`` subdir inside that
+    per-node dir is redundant and was the cause of the 2026-05-26
+    live failure where the agent saved metadata into the per-node
+    dir but downstream metric_parse / plot prompts read from
+    ``working/experiment_data.npy`` (resolving to
+    ``/workspace/node_<uuid>/working/experiment_data.npy`` — a path
+    that doesn't exist). The guideline must NOT instruct
+    ``np.save('working/...', ...)`` or similar.
+    """
+    forbidden_patterns = (
+        "np.save('working/",
+        "np.save(\"working/",
+        "'working/experiment_data.npy'",
+        "\"working/experiment_data.npy\"",
+        "to ``working/``",
+        "savefig('working/",
+        "savefig(\"working/",
+    )
+    for pat in forbidden_patterns:
+        assert pat not in PROMPT_IMPL_GUIDELINE, (
+            f"guideline must not instruct {pat!r}; cwd is already the "
+            "per-node working_dir, so paths should be cwd-relative"
+        )
 
 
 def test_resp_fmt_mentions_single_codeblock() -> None:

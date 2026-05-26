@@ -35,7 +35,13 @@ from _bfts_config import (
     DEFAULT_VLM_MODEL,
 )
 from _bfts_llm import LLMCall, call_for_text, call_with_function, extract_code
-from _bfts_prompts import METRIC_PARSE_SPEC, REVIEW_FUNC_SPEC, render_prompts
+from _bfts_prompts import (
+    METRIC_PARSE_SPEC,
+    PROMPT_IMPL_GUIDELINE,
+    PROMPT_RESP_FMT,
+    REVIEW_FUNC_SPEC,
+    render_prompts,
+)
 
 
 _DRAFT_TEMP = 1.0
@@ -117,12 +123,20 @@ def _propose_prompt(expand_ctx: ExpandContext) -> str:
     if branch == "draft":
         return render_prompts(
             {"Idea": expand_ctx.idea},
-            {"Task": "Write Python code that runs the experiment described above."},
+            PROMPT_IMPL_GUIDELINE,
+            PROMPT_RESP_FMT,
+            {"Task": (
+                "Write Python code that runs the experiment described "
+                "above and saves results to ``experiment_data.npy`` in "
+                "the current working directory."
+            )},
         )
     if branch == "debug":
         parent = expand_ctx.parent_node or {}
         return render_prompts(
             {"Idea": expand_ctx.idea},
+            PROMPT_IMPL_GUIDELINE,
+            PROMPT_RESP_FMT,
             {"Failed code": f"```python\n{parent.get('code','')}\n```"},
             {"stderr": (parent.get("term_out_json") or "")[-2000:] if isinstance(parent.get("term_out_json"), str) else ""},
             {"Task": "Fix the bug in the failed code above and re-run."},
@@ -130,6 +144,8 @@ def _propose_prompt(expand_ctx: ExpandContext) -> str:
     parent = expand_ctx.parent_node or {}
     return render_prompts(
         {"Idea": expand_ctx.idea},
+        PROMPT_IMPL_GUIDELINE,
+        PROMPT_RESP_FMT,
         {"Previous good code": f"```python\n{parent.get('code','')}\n```"},
         {"Task": "Improve on the previous code above."},
     )
@@ -139,7 +155,11 @@ def _metric_parse_prompt(code: str, term_out: list[str]) -> str:
     return render_prompts(
         {"Original experiment code": f"```python\n{code}\n```"},
         {"Experiment stdout": "\n".join(term_out)[-3000:]},
-        {"Task": "Write a Python script that reads working/experiment_data.npy and PRINTS the metric values."},
+        {"Task": (
+            "Write a Python script that reads ``experiment_data.npy`` "
+            "from the current working directory (cwd is already the "
+            "per-node working_dir) and PRINTS the metric values."
+        )},
     )
 
 
@@ -147,7 +167,13 @@ def _plot_prompt(code: str, metric: dict[str, Any]) -> str:
     return render_prompts(
         {"Experiment code": f"```python\n{code}\n```"},
         {"Metrics": metric},
-        {"Task": "Write matplotlib code that loads working/experiment_data.npy and saves *.png plots to working/."},
+        {"Task": (
+            "Write matplotlib code that loads ``experiment_data.npy`` "
+            "from the current working directory and saves ``*.png`` "
+            "plots to that same cwd (no nested subdir). Use "
+            "``plt.savefig(...)`` instead of ``plt.show()`` — the "
+            "runner is headless."
+        )},
     )
 
 
