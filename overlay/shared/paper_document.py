@@ -1,9 +1,15 @@
 """Shared helpers for projecting Semantic Scholar papers into company_context_documents.
 
-This module is intentionally prefixed with an underscore so the API workflow
-loader skips it (see `.centaur/services/api/api/workflow_engine.py` around the
-`startswith("_")` check). Sibling workflow files (e.g. `save_papers.py`,
-`research_brief.py`) import from here.
+Lives under ``overlay/shared/`` so both ``overlay/workflows/`` and
+``overlay/tools/`` can import these helpers without sys.path gymnastics
+or cross-package back-references.
+
+``build_paper_document`` projects a Semantic Scholar paper dict into the
+column shape expected by ``company_context_documents``; ``upsert_document``
+applies that row idempotently via ``content_hash`` so reruns over
+unchanged input no-op, while re-parenting an otherwise-unchanged paper
+(e.g. one previously saved by ``save_papers`` and later surfaced by
+``research_brief``) still updates the row.
 """
 
 from __future__ import annotations

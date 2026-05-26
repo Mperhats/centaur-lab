@@ -1,15 +1,15 @@
-"""Wrapper around api.vm_metrics that degrades to no-ops outside the API pod.
+"""Shim around ``api.vm_metrics`` for ``company_context_documents`` upserts.
 
-The leading underscore mirrors the workflow loader's ``startswith("_")``
-skip convention and signals that this module is not a workflow handler.
-Imported by sibling workflow modules (``save_papers.py``,
-``research_brief.py``) at every ``upsert_document`` call site.
+Lives under ``overlay/shared/`` so both ``overlay/workflows/`` and
+``overlay/tools/`` callers can emit ``vm_metrics`` events with a single
+import (``emit_document_metrics``) at every upsert call site.
 
-The workflow loader runs inside the API pod where ``api.vm_metrics`` resolves
-cleanly, so production calls land in the real Prometheus counters. Our local
-unit tests run without the ``api`` package on sys.path, so the fallback stubs
-keep the call sites simple — workflow code can call ``emit_document_metrics``
-unconditionally without scattering guards.
+Inside the API pod ``api.vm_metrics`` resolves cleanly and calls land in
+the real Prometheus counters. Outside the pod (every local pytest run,
+where the ``api`` package isn't on sys.path) the import fails and the
+fallback no-op stubs take over, so callers can invoke
+``emit_document_metrics`` unconditionally without scattering import
+guards. The fallback path is exercised by every local test run.
 
 Mirrors the call shape in
 ``.centaur/workflows/company_context_documents.py`` so dashboards can
