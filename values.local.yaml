@@ -83,9 +83,17 @@ sandbox:
 # Install the upstream agent-sandbox controller + CRDs into this release.
 # Off in the chart default because most deployments bring their own
 # controller; for the lab we want the chart to manage it so a single
-# `just up` is enough. Pins the vendored subchart at v0.4.6.
+# `just up` is enough. Pinned to v0.4.6 — the upstream chart default is
+# also v0.4.6 today, but we pin defensively so a submodule bump can't
+# silently change the controller version that powers BFTS. When v1alpha1
+# graduates to v1beta1 upstream (research 01 §Top open questions #6),
+# bump this tag in lockstep with the
+# .centaur/services/api/api/sandbox/kubernetes_agent_sandbox.py:16
+# constant (tracked as upstream PR in plan Phase 4f).
 agentSandbox:
   enabled: true
+  image:
+    tag: v0.4.6
 
 slackbot:
   # Slack ingress enabled. Requires real SLACK_BOT_TOKEN and
