@@ -37,8 +37,10 @@ from _bfts_state import (
     insert_node,
     insert_run,
     list_nodes_for_run,
+    list_seed_children,
     mark_node_failed,
     set_best_node,
+    update_node_aggregate_metric,
 )
 
 WORKFLOW_NAME = "bfts_tree"
@@ -61,6 +63,7 @@ class Input:
     max_debug_depth: int | None = None
     debug_prob: float | None = None
     prior_attempts_window: int | None = None
+    num_seeds: int | None = None
     max_iters: int = 20
     seed: int = 0
     sandbox_id: str = ""              # pre-provisioned by bfts_root
@@ -126,6 +129,7 @@ def _to_noderef(
         ),
         stage_name=row.get("stage_name", "draft"),
         is_leaf=(int(row.get("child_count") or 0) == 0),
+        is_seed_node=bool(row.get("is_seed_node")),
     )
 
 
@@ -156,6 +160,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         num_workers=inp.num_workers,
         metric_reducer=inp.metric_reducer,
         prior_attempts_window=inp.prior_attempts_window,
+        num_seeds=inp.num_seeds,
     )
 
     rng = random.Random(inp.seed)
@@ -396,9 +401,143 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             ),
         )
 
+    # F.4: multi-seed re-evaluation of the best node. Opt-in via
+    # ``num_seeds > 0``; default 0 preserves Phase 0-4 behavior. We
+    # fan out N seed children of ``best`` (each a ``bfts_expand_one``
+    # run in seed-override mode → no LLM, just the executor), wait,
+    # then aggregate mean/std of ``final_value`` into the best node's
+    # ``metric_json`` so downstream tooling sees the noise estimate
+    # alongside the point metric.
+    if best is not None and search.num_seeds > 0:
+        seed_children: list[tuple[str, dict[str, Any]]] = []
+        for seed_idx in range(search.num_seeds):
+            # Seed node IDs are deterministic in ``(run_id, seed_idx)``
+            # so a workflow replay reinserts the same bfts_nodes row
+            # (ON CONFLICT DO NOTHING) instead of spawning duplicates.
+            seed_node_id = (
+                f"{inp.run_id}-seed-{seed_idx}"
+                .replace("_", "-").replace(":", "-").lower()
+            )
+            child_run_id = f"{inp.run_id}:seed:{seed_idx}"
+            await ctx.step(
+                f"insert_seed_node_{seed_idx}",
+                lambda nid=seed_node_id, s=seed_idx: insert_node(
+                    pool,
+                    node_id=nid,
+                    run_id=inp.run_id,
+                    parent_node_id=best["node_id"],
+                    # Seed steps live in a reserved range above any
+                    # plausible regular ``step`` value so they never
+                    # collide with the main expansion sequence.
+                    step=99000 + s,
+                    stage_name="seed",
+                    plan=f"seed re-eval {s}",
+                    code=best["code"],
+                    is_seed_node=True,
+                    seed=s,
+                ),
+            )
+            child = await ctx.start_workflow(
+                f"start_seed_{seed_idx}",
+                workflow_name="bfts_expand_one",
+                run_input={
+                    "run_id": inp.run_id,
+                    "node_id": seed_node_id,
+                    "sandbox_id": inp.sandbox_id,
+                    "working_dir": f"seed_{seed_idx}",
+                    "parent_node": best,
+                    "idea": inp.idea,
+                    "llm_api_key_secret": llm.llm_api_key_secret,
+                    "draft_model": llm.draft_model,
+                    "feedback_model": llm.feedback_model,
+                    "vlm_model": llm.vlm_model,
+                    # Memory injection doesn't apply to seed mode but
+                    # the wire shape stays uniform.
+                    "prior_attempts_window": 0,
+                    "seed_override": seed_idx,
+                    "is_seed_node": True,
+                },
+                trigger_key=child_run_id,
+                eager_start=True,
+            )
+            seed_children.append((seed_node_id, child))
+        for nid, child in seed_children:
+            await ctx.wait_for_workflow(
+                f"wait_seed_{nid}", run_id=child["run_id"]
+            )
+        seed_rows = await ctx.step(
+            "list_seed_children",
+            lambda: list_seed_children(pool, parent_node_id=best["node_id"]),
+        )
+        aggregate = _aggregate_seed_metrics(seed_rows or [])
+        if aggregate is not None:
+            await ctx.step(
+                "write_aggregate_metric",
+                lambda agg=aggregate: update_node_aggregate_metric(
+                    pool, node_id=best["node_id"], aggregate=agg,
+                ),
+            )
+        ctx.log(
+            "seed_aggregate",
+            run_id=inp.run_id,
+            best_node_id=best["node_id"],
+            num_seeds=search.num_seeds,
+            aggregate=aggregate,
+        )
+
     return {
         "run_id": inp.run_id,
         "iters_used": iters_used,
         "node_count": len(final_nodes),
         "best_node_id": best["node_id"] if best else None,
+    }
+
+
+def _aggregate_seed_metrics(
+    seed_rows: list[dict[str, Any]],
+) -> dict[str, float] | None:
+    """Compute mean / std / n over ``final_value`` of non-buggy seed
+    children. ``metric_json`` arrives as either a raw JSON string
+    (asyncpg jsonb return) or a pre-parsed dict; tolerate both.
+
+    Returns ``None`` if no seed child produced a usable scalar, so
+    the caller can skip the aggregate write. Excludes buggy children
+    so a single seed crash doesn't poison the mean.
+    """
+    import json as _json
+
+    values: list[float] = []
+    for r in seed_rows:
+        if r.get("is_buggy"):
+            continue
+        m = r.get("metric_json")
+        if isinstance(m, str):
+            try:
+                m = _json.loads(m)
+            except _json.JSONDecodeError:
+                continue
+        if not isinstance(m, dict):
+            continue
+        v = m.get("final_value")
+        if isinstance(v, (int, float)):
+            values.append(float(v))
+            continue
+        # Newer schema: nested metric_names[*].data[*].final_value
+        names = m.get("metric_names")
+        if isinstance(names, list) and names:
+            first = names[0]
+            if isinstance(first, dict):
+                data = first.get("data")
+                if isinstance(data, list) and data:
+                    inner = data[0].get("final_value") if isinstance(data[0], dict) else None
+                    if isinstance(inner, (int, float)):
+                        values.append(float(inner))
+    if not values:
+        return None
+    mean = sum(values) / len(values)
+    var = sum((v - mean) ** 2 for v in values) / len(values)
+    return {
+        "aggregate_mean": mean,
+        "aggregate_std": var ** 0.5,
+        "aggregate_n": float(len(values)),
     }

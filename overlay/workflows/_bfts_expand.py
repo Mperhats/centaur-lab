@@ -119,12 +119,58 @@ class ExpandContext:
     # ignores this field (parent failure context is already in the
     # prompt).
     prior_attempts: list[dict[str, Any]] = field(default_factory=list)
+    # F.4: when set, ``expand_node`` skips the draft/debug/improve LLM
+    # propose call entirely and re-runs the parent's ``code`` with a
+    # deterministic random/numpy/torch seed preamble. ``parent_node``
+    # MUST be non-None and carry ``code``; the seeding mode is only
+    # ever invoked from ``bfts_tree.handler`` after ``set_best`` so
+    # the parent is the chosen best node. Everything else in the
+    # pipeline (exec, bug_judge, metric parse, plot, VLM) runs
+    # unchanged so seed nodes get the same persisted shape as a
+    # normal expansion (metric_json / is_buggy / etc.).
+    seed_override: int | None = None
 
 
 def _branch(parent: Optional[dict[str, Any]]) -> str:
     if parent is None:
         return "draft"
     return "debug" if parent.get("is_buggy") else "improve"
+
+
+def _seed_preamble(seed: int) -> str:
+    """Python preamble injected at the top of ``parent.code`` for F.4
+    seed re-evaluation. ``torch`` is optional (the bfts-executor base
+    image only installs it on x86_64); ``try/except`` keeps the seed
+    node working on the ARM64 image used by local-dev macs.
+    """
+    return (
+        f"import random; random.seed({seed})\n"
+        f"import numpy as np; np.random.seed({seed})\n"
+        f"try:\n"
+        f"    import torch; torch.manual_seed({seed})\n"
+        f"except Exception:\n"
+        f"    pass\n"
+    )
+
+
+async def _seed_propose(expand_ctx: ExpandContext) -> dict[str, str]:
+    """No-LLM "propose" stand-in for seed nodes.
+
+    ``expand_node`` calls this through ``ctx.step("seed_propose", ...)``
+    so the step shape (and durable replay contract) matches the
+    LLM-driven propose calls; we just synthesize the result instead
+    of round-tripping to the LLM.
+    """
+    parent = expand_ctx.parent_node
+    if parent is None or not parent.get("code"):
+        raise ValueError(
+            "seed_override requires a parent node with executable code"
+        )
+    seed = int(expand_ctx.seed_override or 0)
+    return {
+        "plan": f"seed re-evaluation with seed={seed}",
+        "code": _seed_preamble(seed) + parent["code"],
+    }
 
 
 def _propose_prompt(expand_ctx: ExpandContext) -> str:
@@ -236,11 +282,20 @@ async def _metric_extract(
 async def expand_node(*, ctx: Any, expand_ctx: ExpandContext) -> dict[str, Any]:
     """Run one full expansion. Returns a dict suitable for update_node_metric."""
 
-    branch = _branch(expand_ctx.parent_node)
-
-    proposed = await ctx.step(
-        f"{branch}_propose", lambda: _propose_code(expand_ctx)
-    )
+    # F.4: ``seed_override`` short-circuits the LLM propose step but
+    # leaves the rest of the pipeline (exec / bug_judge / metric_parse
+    # / plot / VLM) intact so seed nodes get the same persisted shape
+    # as a normal expansion.
+    if expand_ctx.seed_override is not None:
+        branch = "seed"
+        proposed = await ctx.step(
+            "seed_propose", lambda: _seed_propose(expand_ctx)
+        )
+    else:
+        branch = _branch(expand_ctx.parent_node)
+        proposed = await ctx.step(
+            f"{branch}_propose", lambda: _propose_code(expand_ctx)
+        )
 
     exec_res = _coerce_exec_result(await ctx.step(
         f"{branch}_exec",

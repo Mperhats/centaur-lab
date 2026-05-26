@@ -44,15 +44,29 @@ async def insert_node(
     plan: str,
     code: str,
     debug_depth: int = 0,
+    is_seed_node: bool = False,
+    seed: int | None = None,
 ) -> None:
+    """Insert an empty (or seed-bookkeeping) bfts_nodes row.
+
+    ``is_seed_node`` + ``seed`` are F.4 fields used by the multi-seed
+    re-evaluation fan-out in ``bfts_tree.handler``. Default ``FALSE`` /
+    ``NULL`` preserves the Phase 0-4 contract for every existing
+    caller. The migration ``20260526000002_add_seed_eval_columns.sql``
+    enforces ``NOT NULL`` + ``DEFAULT FALSE`` on ``is_seed_node`` at
+    the schema layer; we still pass the value explicitly so the SQL
+    is unambiguous at the DAO seam.
+    """
     await pool.execute(
         """
         INSERT INTO bfts_nodes
-            (node_id, run_id, parent_node_id, step, stage_name, plan, code, debug_depth)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            (node_id, run_id, parent_node_id, step, stage_name,
+             plan, code, debug_depth, is_seed_node, seed)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         ON CONFLICT (node_id) DO NOTHING
         """,
-        node_id, run_id, parent_node_id, step, stage_name, plan, code, debug_depth,
+        node_id, run_id, parent_node_id, step, stage_name,
+        plan, code, debug_depth, is_seed_node, seed,
     )
 
 
@@ -255,6 +269,7 @@ async def list_nodes_for_run(
                n.plan, n.code, n.term_out_json, n.exec_time_seconds, n.exc_type,
                n.exc_info_json, n.exc_stack_json, n.metric_json, n.is_buggy,
                n.is_buggy_plots, n.debug_depth, n.analysis, n.vlm_feedback_summary,
+               n.is_seed_node, n.seed,
                (SELECT COUNT(*) FROM bfts_nodes c
                    WHERE c.parent_node_id = n.node_id AND c.run_id = n.run_id)
                    AS child_count
@@ -265,6 +280,56 @@ async def list_nodes_for_run(
         run_id,
     )
     return [dict(r) for r in rows]
+
+
+async def list_seed_children(
+    pool: asyncpg.Pool, *, parent_node_id: str
+) -> list[dict[str, Any]]:
+    """F.4: return seed-only children of a parent node for aggregation.
+
+    Hits the partial index ``bfts_nodes_seed_parent_idx`` (from
+    ``20260526000002_add_seed_eval_columns.sql``) so even at large
+    node counts this is a single index seek. Filters at the DB layer
+    rather than in Python because we want the index to be used.
+    Caller (``_aggregate_seed_metrics`` in ``bfts_tree``) consumes
+    only ``node_id`` / ``seed`` / ``metric_json`` / ``is_buggy``.
+    """
+    rows = await pool.fetch(
+        """
+        SELECT node_id, seed, metric_json, is_buggy
+        FROM bfts_nodes
+        WHERE parent_node_id = $1 AND is_seed_node = TRUE
+        ORDER BY seed
+        """,
+        parent_node_id,
+    )
+    return [dict(r) for r in rows]
+
+
+async def update_node_aggregate_metric(
+    pool: asyncpg.Pool,
+    *,
+    node_id: str,
+    aggregate: dict[str, float],
+) -> None:
+    """F.4: merge an aggregate sub-dict into an existing ``metric_json``.
+
+    ``aggregate`` is e.g. ``{"aggregate_mean": 0.32, "aggregate_std":
+    0.04, "aggregate_n": 3.0}``. Postgres jsonb ``||`` operator does a
+    shallow concatenation so the merge cleanly overwrites the same
+    keys on replay without disturbing the rest of the JSON. The
+    ``COALESCE(... '{}'::jsonb)`` defends against ``metric_json IS
+    NULL`` (e.g. a degenerate best node whose parse step never ran).
+    """
+    await pool.execute(
+        """
+        UPDATE bfts_nodes
+        SET metric_json = COALESCE(metric_json, '{}'::jsonb) || $2::jsonb,
+            updated_at = NOW()
+        WHERE node_id = $1
+        """,
+        node_id, json.dumps(aggregate),
+    )
 
 
 async def set_best_node(

@@ -48,6 +48,11 @@ DEFAULT_NUM_WORKERS = 2
 # memory is the loose upstream analog
 # (.scientist/ai_scientist/treesearch/parallel_agent.py:2072-2081).
 DEFAULT_PRIOR_ATTEMPTS_WINDOW = 5
+# F.4: number of multi-seed re-evaluations of the best Stage-1 node.
+# 0 disables the fan-out (preserves Phase 0-4 behavior). 3 is a typical
+# small-sample stat sanity (mean / std over 3 seeds); higher values
+# eat sandbox quota. Sakana's default is 3-5 in their config.
+DEFAULT_NUM_SEEDS = 0
 
 # Source-tier names returned by the resolver helpers and recorded into
 # ``bfts_runs.config_json["sources"]`` for replay observability.
@@ -66,6 +71,7 @@ ENV_MAX_DEBUG_DEPTH = "BFTS_MAX_DEBUG_DEPTH"
 ENV_NUM_DRAFTS = "BFTS_NUM_DRAFTS"
 ENV_NUM_WORKERS = "BFTS_NUM_WORKERS"
 ENV_PRIOR_ATTEMPTS_WINDOW = "BFTS_PRIOR_ATTEMPTS_WINDOW"
+ENV_NUM_SEEDS = "BFTS_NUM_SEEDS"
 
 
 @dataclass(frozen=True)
@@ -126,6 +132,7 @@ class SearchSettings:
     num_workers: int
     metric_reducer: str
     prior_attempts_window: int
+    num_seeds: int
 
 
 @dataclass(frozen=True)
@@ -147,6 +154,7 @@ class SearchSources:
     num_workers: str
     metric_reducer: str
     prior_attempts_window: str
+    num_seeds: str
 
 
 def _validate_reducer(reducer: str) -> str:
@@ -165,6 +173,7 @@ def resolve_search_settings(
     num_workers: int | None = None,
     metric_reducer: str | None = None,
     prior_attempts_window: int | None = None,
+    num_seeds: int | None = None,
 ) -> tuple[SearchSettings, SearchSources]:
     """Merge per-run Input overrides, deployment env, and code defaults.
 
@@ -200,6 +209,9 @@ def resolve_search_settings(
         ENV_PRIOR_ATTEMPTS_WINDOW,
         DEFAULT_PRIOR_ATTEMPTS_WINDOW,
     )
+    num_seeds_val, num_seeds_src = _resolve_int(
+        num_seeds, ENV_NUM_SEEDS, DEFAULT_NUM_SEEDS,
+    )
     settings = SearchSettings(
         debug_prob=debug_prob_val,
         max_debug_depth=max_debug_depth_val,
@@ -207,6 +219,7 @@ def resolve_search_settings(
         num_workers=num_workers_val,
         metric_reducer=_validate_reducer(metric_reducer_raw),
         prior_attempts_window=prior_attempts_window_val,
+        num_seeds=num_seeds_val,
     )
     sources = SearchSources(
         debug_prob=debug_prob_src,
@@ -215,6 +228,7 @@ def resolve_search_settings(
         num_workers=num_workers_src,
         metric_reducer=metric_reducer_src,
         prior_attempts_window=prior_attempts_window_src,
+        num_seeds=num_seeds_src,
     )
     return settings, sources
 
@@ -228,6 +242,7 @@ async def resolve_search_config(
     num_workers: int | None = None,
     metric_reducer: str | None = None,
     prior_attempts_window: int | None = None,
+    num_seeds: int | None = None,
 ) -> tuple[SearchSettings, SearchSources]:
     """Same resolution as ``resolve_search_settings`` plus a DB layer.
 
@@ -276,6 +291,10 @@ async def resolve_search_config(
         prior_attempts_window, db_row, "prior_attempts_window",
         ENV_PRIOR_ATTEMPTS_WINDOW, DEFAULT_PRIOR_ATTEMPTS_WINDOW,
     )
+    num_seeds_val, num_seeds_src = _resolve_int_with_db(
+        num_seeds, db_row, "num_seeds",
+        ENV_NUM_SEEDS, DEFAULT_NUM_SEEDS,
+    )
     settings = SearchSettings(
         debug_prob=debug_prob_val,
         max_debug_depth=max_debug_depth_val,
@@ -283,6 +302,7 @@ async def resolve_search_config(
         num_workers=num_workers_val,
         metric_reducer=_validate_reducer(metric_reducer_raw),
         prior_attempts_window=prior_attempts_window_val,
+        num_seeds=num_seeds_val,
     )
     sources = SearchSources(
         debug_prob=debug_prob_src,
@@ -291,6 +311,7 @@ async def resolve_search_config(
         num_workers=num_workers_src,
         metric_reducer=metric_reducer_src,
         prior_attempts_window=prior_attempts_window_src,
+        num_seeds=num_seeds_src,
     )
     return settings, sources
 

@@ -96,6 +96,14 @@ class Input:
     # ``bfts_expand_one`` (tests, manual ``POST /api/workflows/...``) still
     # behaves sensibly. Set to 0 to disable memory injection.
     prior_attempts_window: int | None = None
+    # F.4: when set, the child workflow runs in seed re-evaluation mode:
+    # the LLM propose step is skipped and ``parent_node["code"]`` is
+    # re-executed with the named seed via ``_bfts_expand._seed_propose``.
+    # Always paired with ``is_seed_node=True``; ``bfts_tree.handler``
+    # sets both together. Memory injection (F.2) is irrelevant in seed
+    # mode but the field flows through for wire compatibility.
+    seed_override: int | None = None
+    is_seed_node: bool = False
 
 
 async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
@@ -138,6 +146,7 @@ async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
         feedback_model=llm.feedback_model,
         vlm_model=llm.vlm_model,
         prior_attempts=prior_attempts or [],
+        seed_override=inp.seed_override,
     )
 
     # No outer ctx.step / try/except: expand_node has its own per-LLM-call

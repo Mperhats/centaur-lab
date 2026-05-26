@@ -34,6 +34,13 @@ class NodeRef:
     metric_score: Union[float, tuple[float, ...]]
     stage_name: str
     is_leaf: bool
+    # F.4: ``True`` means this node was produced by a seed re-evaluation
+    # fan-out (``bfts_tree.handler`` post-set_best). Seed nodes are
+    # bookkeeping for metric aggregation; they must NEVER be returned by
+    # ``select_next`` (not as drafts, not as buggy leaves to debug, not
+    # as good candidates to improve). Default False keeps every Phase 0-4
+    # callsite valid without touching their fixtures.
+    is_seed_node: bool = False
 
 
 @dataclass(frozen=True)
@@ -45,7 +52,7 @@ class SearchConfig:
 
 
 def _draft_nodes(nodes: list[NodeRef]) -> list[NodeRef]:
-    return [n for n in nodes if n.parent_id is None]
+    return [n for n in nodes if n.parent_id is None and not n.is_seed_node]
 
 
 def _good_nodes(nodes: list[NodeRef]) -> list[NodeRef]:
@@ -56,14 +63,28 @@ def _good_nodes(nodes: list[NodeRef]) -> list[NodeRef]:
     selector doesn't stall on the async VLM path (Phase 3 runs the VLM gate
     as a separate workflow step, not inline). Sakana required ``is False``
     because plots were scored inline with execution.
+
+    F.4: seed-eval nodes are excluded — even if they have a great
+    ``metric_score`` they are not selection candidates.
     """
-    return [n for n in nodes if n.is_buggy is False and n.is_buggy_plots is not True]
+    return [
+        n for n in nodes
+        if n.is_buggy is False
+        and n.is_buggy_plots is not True
+        and not n.is_seed_node
+    ]
 
 
 def _buggy_leaf_nodes(nodes: list[NodeRef], max_depth: int) -> list[NodeRef]:
+    """F.4: seed-eval failures must not be retried as buggy leaves either —
+    re-running with the same seed has no information value, so we filter
+    ``is_seed_node`` out before the leaf check."""
     return [
         n for n in nodes
-        if n.is_buggy is True and n.is_leaf and n.debug_depth <= max_depth
+        if n.is_buggy is True
+        and n.is_leaf
+        and n.debug_depth <= max_depth
+        and not n.is_seed_node
     ]
 
 
@@ -156,4 +177,6 @@ def _node_makes_root_viable(node: NodeRef, root_id: str) -> bool:
     treats not-yet-executed nodes as candidates because they may still
     succeed; the selector errs on the side of keeping a root alive.
     """
+    if node.is_seed_node:
+        return False
     return node.root_id == root_id and (node.is_buggy is False or node.is_buggy is None)
