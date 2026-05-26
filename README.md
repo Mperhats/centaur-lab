@@ -11,9 +11,13 @@
 
 ```bash
 git submodule update --init --recursive
-uv sync && uv run pytest tests/
+uv sync --all-packages && uv run --all-packages pytest tests/
 docker build -t centaur-overlay:dev .    # smoke test; CI publishes to GHCR on merge to main
 ```
+
+`--all-packages` is what tells uv to install every workspace member's
+runtime deps (the `tools/*/pyproject.toml` files) into the root `.venv`.
+Plain `uv sync` only installs the dev group.
 
 Production deploys run in [CI](.github/workflows/overlay.yml)
 
@@ -66,12 +70,12 @@ git commit -m "bump .centaur to <sha>"
 
 `tools/<name>/pyproject.toml` is the single source of truth for that
 tool's runtime deps — both the API pod's `entrypoint.sh` (at startup)
-and the local uv workspace (at `uv sync`) read it.
+and the local uv workspace (at `uv sync --all-packages`) read it.
 
 **New tool.** `mkdir tools/<name>/`, drop a `pyproject.toml` with
-`[project].dependencies` and `[tool.uv].package = false`, add `<name>`
-to the root `pyproject.toml`'s `[project].dependencies` and
-`[tool.uv.sources]`. `uv sync` picks it up.
+`[project].dependencies` and `[tool.uv].package = false`. The root
+`pyproject.toml`'s `[tool.uv.workspace].members = ["tools/*"]` glob
+picks it up automatically; no edits to root needed.
 
 **Bumping a tool's dep version.** Edit `tools/<name>/pyproject.toml`
 only. Then `uv lock --upgrade-package <pkg>` if you want a fresh resolve.

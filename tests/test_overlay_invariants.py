@@ -7,6 +7,13 @@ gotcha — keep failures pointed at the specific class of mistake.
 
 If a test here fails, the fix is almost always a one-line edit to a
 ``pyproject.toml`` somewhere; the test message names the file.
+
+Note: workspace-config consistency (root <-> tool pyprojects) is not
+checked because the root pyproject discovers tools through a single
+``[tool.uv.workspace].members = ["tools/*"]`` glob — there's nothing
+per-tool to keep in sync. Newcomers run ``uv sync --all-packages``
+(documented in README + scripts/ + CI) to aggregate every workspace
+member's deps into the dev ``.venv``.
 """
 
 from __future__ import annotations
@@ -69,14 +76,6 @@ def _read_deps(pyproject: Path) -> set[str]:
     return out
 
 
-def _read_project_name(pyproject: Path) -> str:
-    return _normalize(tomllib.loads(pyproject.read_text())["project"]["name"])
-
-
-def _root_pyproject() -> dict:
-    return tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
-
-
 def _tool_pyprojects() -> list[Path]:
     return sorted((REPO_ROOT / "tools").glob("*/pyproject.toml"))
 
@@ -86,54 +85,6 @@ def _all_tool_runtime_deps() -> set[str]:
     for p in _tool_pyprojects():
         out.update(_read_deps(p))
     return out
-
-
-def test_workspace_config_consistent() -> None:
-    """Every per-tool pyproject is wired into the root via all three of:
-    ``[tool.uv.workspace].members`` (a glob covering the dir),
-    ``[project].dependencies`` (the tool's distribution name), and
-    ``[tool.uv.sources]`` (alias to ``{ workspace = true }``).
-
-    Drop any one piece and ``uv sync`` falls through to PyPI for that
-    name — at best fetching a wrong package, at worst failing opaquely.
-    A new contributor who deletes the ``[tool.uv.sources]`` entry
-    thinking it's redundant will silently break dev for everyone.
-    """
-    root = _root_pyproject()
-    member_globs = (
-        root.get("tool", {}).get("uv", {}).get("workspace", {}).get("members", [])
-    )
-    assert member_globs, (
-        "[tool.uv.workspace].members must list at least one glob "
-        "(currently expected: 'tools/*')"
-    )
-
-    declared_deps = {_normalize(d) for d in root["project"]["dependencies"]}
-    sources = root.get("tool", {}).get("uv", {}).get("sources", {})
-
-    failures: list[str] = []
-    for pp in _tool_pyprojects():
-        rel = pp.parent.relative_to(REPO_ROOT)
-        name = _read_project_name(pp)
-
-        if name not in declared_deps:
-            failures.append(
-                f"{rel}/pyproject.toml declares name={name!r} but it's missing "
-                f"from root pyproject.toml [project].dependencies — "
-                f"`uv sync` will not install it"
-            )
-            continue
-
-        # ``[tool.uv.sources]`` keys may be hyphenated or underscored; check both.
-        src = sources.get(name) or sources.get(name.replace("-", "_"))
-        if not src or src.get("workspace") is not True:
-            failures.append(
-                f"{name!r} is in root [project].dependencies but not "
-                f"aliased in root [tool.uv.sources]; uv will try to fetch "
-                f"it from PyPI instead of the workspace at {rel}"
-            )
-
-    assert not failures, "Workspace config inconsistent:\n  " + "\n  ".join(failures)
 
 
 def test_centaur_sdk_runtime_deps_satisfied() -> None:

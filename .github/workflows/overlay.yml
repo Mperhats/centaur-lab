@@ -59,13 +59,16 @@ jobs:
         with:
           enable-cache: true
 
+      # ``--all-packages`` aggregates every workspace member's
+      # ``[project].dependencies`` into the root ``.venv`` — without it,
+      # uv only installs the dev group and tool runtime deps are missing.
       # ``--frozen`` makes CI fail when uv.lock is out of date relative
       # to any pyproject.toml in the workspace (root or per-tool). Locks
       # get out of date silently when a contributor edits a per-tool
-      # pyproject without re-running ``uv sync`` and committing the
-      # regenerated lockfile; this is the gate that catches it.
+      # pyproject without re-running sync and committing the regenerated
+      # lockfile; this is the gate that catches it.
       - name: Install dev deps + aggregated runtime deps (locked)
-        run: uv sync --frozen --python 3.11
+        run: uv sync --frozen --all-packages --python 3.11
 
       - name: Lint
         run: uv run --python 3.11 ruff check .

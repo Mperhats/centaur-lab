@@ -4,24 +4,19 @@ version = "0.1.0"
 description = "centaur-lab organization overlay for Centaur (academic research domain)"
 requires-python = ">=3.11"
 license = "Apache-2.0 OR MIT"
-# Workspace members declared as path deps so ``uv sync`` (no flags)
-# installs every tool's runtime deps into the root ``.venv``
-# automatically. Each member opts out of building (``[tool.uv].package
-# = false``), so uv pulls in the member's ``[project].dependencies``
-# without trying to construct a wheel for the tool itself.
-dependencies = [
-    "pdf",
-    "semantic-scholar",
-]
 
-# Tool runtime deps live in ``tools/<name>/pyproject.toml`` — that's
-# the file upstream's API entrypoint
-# (.centaur/services/api/entrypoint.sh) scans on pod startup to
-# ``uv pip install`` every overlay tool's deps before launching
-# uvicorn. The workspace config below makes ``uv sync`` aggregate the
-# same per-tool ``[project].dependencies`` blocks into the local
-# ``.venv`` so the dev/test environment matches what the API pod sees,
-# with no duplicated dependency lists to drift.
+# Tool runtime deps live in ``tools/<name>/pyproject.toml`` — that's the
+# file upstream's API entrypoint (.centaur/services/api/entrypoint.sh)
+# scans on pod startup to ``uv pip install`` every overlay tool's deps
+# before launching uvicorn. The workspace glob below makes the same
+# per-tool ``[project].dependencies`` blocks discoverable to uv, so
+# ``uv sync --all-packages`` aggregates them into the dev ``.venv`` —
+# byte-for-byte the same set the API pod ends up with, with no
+# duplicated dep lists in this file to drift.
+#
+# Each tool opts out of being built as a wheel
+# (``[tool.uv].package = false`` in its own pyproject) — the repo is a
+# Docker image build context, not a Python distribution.
 #
 # ``centaur_sdk`` is intentionally not declared anywhere: upstream's
 # ``centaur_sdk/pyproject.toml`` declares ``packages = ["."]`` which
@@ -37,10 +32,6 @@ dependencies = [
 # matches what the API pod sees too.
 [tool.uv.workspace]
 members = ["tools/*"]
-
-[tool.uv.sources]
-pdf = { workspace = true }
-semantic-scholar = { workspace = true }
 
 # This repo is a Docker image build context, not a publishable Python
 # distribution — tell uv not to build the overlay itself.

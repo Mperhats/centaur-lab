@@ -11,10 +11,10 @@
 #      (transitively) MUST be declared here or in another overlay tool's
 #      pyproject; deps get unioned before install.
 #   3. The repo-root ``uv`` workspace — this directory is a workspace
-#      member (see ``../../pyproject.toml``), so ``uv sync`` from the
-#      repo root installs the same set into the local ``.venv``. That's
-#      what makes the dev/test environment match the API pod with no
-#      duplicated dependency lists.
+#      member (see ``../../pyproject.toml``), so ``uv sync --all-packages``
+#      from the repo root installs the same set into the local ``.venv``.
+#      That's what makes the dev/test environment match the API pod with
+#      no duplicated dependency lists.
 #
 # iron-proxy injection: ``[tool.centaur].secrets`` tells the firewall to
 # substitute the resolved value for ``SEMANTIC_SCHOLAR_API_KEY`` on

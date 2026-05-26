@@ -31,7 +31,7 @@ def main() -> int:
 
     run("git", "submodule", "update", "--remote", ".centaur")
     sha = capture("git", "-C", ".centaur", "rev-parse", "--short", "HEAD")
-    run("uv", "run", "pytest", "tests/")
+    run("uv", "run", "--all-packages", "pytest", "tests/")
     run("git", "add", ".centaur")
 
     print(f'\nPin advanced to {sha}. Commit with:\n  git commit -m "bump .centaur to {sha}"')
