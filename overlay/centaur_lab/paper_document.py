@@ -124,7 +124,14 @@ def build_paper_document(paper: dict, *, query: str | None = None) -> dict:
         for a in author_dicts
     ]
 
-    metadata_raw: dict[str, Any] = {
+    # OVERLAY: include all metadata keys with explicit nulls (instead of
+    # filtering ``None`` out) so JSONB key-presence checks behave the
+    # same way for ``semantic_scholar`` rows as for Slack rows upstream.
+    # Upstream's channel-day / thread projections list every key
+    # unconditionally; dropping ``None`` keys here meant downstream
+    # ``metadata ? 'doi'`` checks reported ``false`` rather than
+    # ``true`` for papers without a DOI.
+    metadata: dict[str, Any] = {
         "paperId": paper_id_str,
         "year": year_int,
         "venue": venue if venue else None,
@@ -135,8 +142,15 @@ def build_paper_document(paper: dict, *, query: str | None = None) -> dict:
         "openAccessPdf": open_access_pdf_url,
         "query": query,
     }
-    metadata: dict[str, Any] = {k: v for k, v in metadata_raw.items() if v is not None}
 
+    # OVERLAY: ``source_updated_at`` is *sync time* (when we last
+    # observed the row), not publication time. The Semantic Scholar
+    # Graph API does not expose a per-paper update timestamp, so the
+    # nearest analog is ``datetime.now(UTC)`` — taken at projection
+    # time. Setting this to ``occurred_at`` (paper-publication year)
+    # would report multi-year ETL lag to downstream freshness
+    # dashboards. ``occurred_at`` itself stays anchored to the
+    # publication year for chronological surfacing.
     return {
         "document_id": f"semantic_scholar:paper:{paper_id_str}",
         "source": "semantic_scholar",
@@ -151,7 +165,7 @@ def build_paper_document(paper: dict, *, query: str | None = None) -> dict:
         "author_name": author_name,
         "access_scope": "company",
         "occurred_at": occurred_at,
-        "source_updated_at": occurred_at,
+        "source_updated_at": datetime.now(UTC),
         "content_hash": _content_hash(title, body, url, metadata),
         "metadata": metadata,
     }

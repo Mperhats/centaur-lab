@@ -90,4 +90,13 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         papers_updated=result.get("papers_updated"),
         papers_noop=result.get("papers_noop"),
     )
-    return result
+    # S8: drop ``markdown`` from the persisted workflow result. The
+    # workflow's return is what lands in ``workflow_runs.output_json``;
+    # for a 20-paper brief the markdown is ~20 KB per run and compounds
+    # across reruns. The brief body is recoverable via
+    # ``brief_document_id`` (still returned above), and direct callers
+    # of ``SemanticScholarClient.research_brief`` (CLI ``--pretty``,
+    # in-process agent consumption) continue to receive ``markdown``
+    # inline from the tool method itself — only the workflow handler's
+    # envelope strips it.
+    return {k: v for k, v in result.items() if k != "markdown"}

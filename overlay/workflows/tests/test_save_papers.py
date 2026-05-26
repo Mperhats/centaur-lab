@@ -207,7 +207,8 @@ async def test_handler_emits_vm_metrics_per_upsert(
     ctx = MockContext(pool)
     mock = MockS2Client({"A": _paper("A"), "B": _paper("B")})
     recorder = MetricsRecorder()
-    monkeypatch.setattr(save_papers, "emit_document_metrics", recorder)
+    monkeypatch.setattr(save_papers, "observe_document_size", recorder.observe)
+    monkeypatch.setattr(save_papers, "record_document_change", recorder.record)
 
     with patch("save_papers.SemanticScholarClient") as mock_cls:
         mock_cls.return_value = mock
@@ -216,8 +217,15 @@ async def test_handler_emits_vm_metrics_per_upsert(
             ctx,
         )
 
-    assert len(recorder.calls) == 2
-    for document, action in recorder.calls:
+    # observe runs unconditionally before each upsert; record runs after
+    # with the resolved action — same ordering as upstream
+    # company_context_documents.
+    assert len(recorder.observe_calls) == 2
+    assert len(recorder.change_calls) == 2
+    for document in recorder.observe_calls:
+        assert document["source"] == "semantic_scholar"
+        assert document["source_type"] == "paper"
+    for document, action in recorder.change_calls:
         assert document["source"] == "semantic_scholar"
         assert document["source_type"] == "paper"
         assert action == "inserted"

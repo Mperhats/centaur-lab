@@ -9,14 +9,14 @@ import logging
 import os
 import re
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import asyncpg
 import httpx
 
 from centaur_sdk import secret
-from shared.metrics import emit_document_metrics
+from shared.metrics import observe_document_size, record_document_change
 from shared.paper_document import (
     _canonical_json,
     _content_hash,
@@ -385,7 +385,20 @@ def _build_brief_document(
     papers: list[dict[str, Any]],
     markdown: str,
 ) -> dict[str, Any]:
-    """Project the rendered brief into a ``company_context_documents`` row."""
+    """Project the rendered brief into a ``company_context_documents`` row.
+
+    The brief metadata follows the same explicit-nulls convention as
+    ``build_paper_document``: every key is listed even when its value
+    is ``None`` (e.g. ``year_from``) so JSONB key-presence checks
+    behave the same way across overlay sources.
+
+    ``source_updated_at`` is set to ``datetime.now(UTC)`` rather than
+    ``None`` for the same reason ``build_paper_document`` does: the
+    freshness dashboard tracking ``source_updated_at`` should see the
+    brief as freshly synced at projection time, not as a row with no
+    known source-side timestamp. ``occurred_at`` stays ``None`` — a
+    brief has no publication date analog.
+    """
     suffix = _brief_id_for(query, year_from)
     truncated_query = query[:_BRIEF_TITLE_QUERY_TRUNCATE]
     title = f"Research Brief: {truncated_query}"
@@ -411,7 +424,7 @@ def _build_brief_document(
         "author_name": "",
         "access_scope": "company",
         "occurred_at": None,
-        "source_updated_at": None,
+        "source_updated_at": datetime.now(UTC),
         "content_hash": _content_hash(title, markdown, "", metadata),
         "metadata": metadata,
     }
@@ -939,8 +952,9 @@ class SemanticScholarClient:
 
         conn = await self._connect()
         try:
+            observe_document_size(brief_doc)
             brief_action = await upsert_document(conn, brief_doc)
-            emit_document_metrics(brief_doc, brief_action)
+            record_document_change(brief_doc, brief_action)
 
             papers_inserted = 0
             papers_updated = 0
@@ -955,12 +969,13 @@ class SemanticScholarClient:
                     # only the upsertable subset. The outer error
                     # envelope handles unrecoverable failures.
                     continue
+                observe_document_size(paper_doc)
                 action = await upsert_document(
                     conn,
                     paper_doc,
                     parent_document_id=brief_doc["document_id"],
                 )
-                emit_document_metrics(paper_doc, action)
+                record_document_change(paper_doc, action)
                 if action == "inserted":
                     papers_inserted += 1
                 elif action == "updated":

@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 if TYPE_CHECKING:
     from api.workflow_engine import WorkflowContext
 
-from shared.metrics import emit_document_metrics
+from shared.metrics import observe_document_size, record_document_change
 from shared.paper_document import build_paper_document, upsert_document
 from tools.semantic_scholar.client import SemanticScholarClient
 
@@ -67,8 +67,9 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                 continue
 
             document = build_paper_document(paper, query=inp.query)
+            observe_document_size(document)
             action = await upsert_document(ctx._pool, document)
-            emit_document_metrics(document, action)
+            record_document_change(document, action)
             results.append(
                 {
                     "paperId": paper_id,

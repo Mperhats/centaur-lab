@@ -148,18 +148,33 @@ def _install_search_papers(
 
 
 class MetricsRecorder:
-    """Lightweight stand-in for ``emit_document_metrics`` used by tests."""
+    """Lightweight stand-in for the metrics shim used by tests.
+
+    Captures both pre-upsert ``observe_document_size`` invocations
+    (``observe_calls``) and post-upsert ``record_document_change``
+    invocations (``change_calls`` / aliased as ``calls`` for older
+    assertions that pre-date the split).
+    """
 
     def __init__(self) -> None:
-        self.calls: list[tuple[dict[str, Any], str]] = []
+        self.observe_calls: list[dict[str, Any]] = []
+        self.change_calls: list[tuple[dict[str, Any], str]] = []
 
-    def __call__(self, document: dict[str, Any], action: str) -> None:
-        self.calls.append((document, action))
+    @property
+    def calls(self) -> list[tuple[dict[str, Any], str]]:
+        return self.change_calls
+
+    def observe(self, document: dict[str, Any]) -> None:
+        self.observe_calls.append(document)
+
+    def record(self, document: dict[str, Any], action: str) -> None:
+        self.change_calls.append((document, action))
 
 
 def _install_metrics(monkeypatch: pytest.MonkeyPatch) -> MetricsRecorder:
     recorder = MetricsRecorder()
-    monkeypatch.setattr(s2_client, "emit_document_metrics", recorder)
+    monkeypatch.setattr(s2_client, "observe_document_size", recorder.observe)
+    monkeypatch.setattr(s2_client, "record_document_change", recorder.record)
     return recorder
 
 

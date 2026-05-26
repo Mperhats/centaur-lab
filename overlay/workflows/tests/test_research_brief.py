@@ -79,8 +79,16 @@ def _install_mock_client(
 async def test_research_brief_delegates_to_tool_method(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Wrapper forwards Input fields and passes the success dict through unchanged."""
-    expected = {
+    """Wrapper forwards Input fields and passes the success dict through, minus markdown.
+
+    S8: the workflow handler strips ``markdown`` from the dict it
+    returns so the persisted ``workflow_runs.output_json`` envelope
+    stays compact (the brief body is recoverable via
+    ``brief_document_id``). Direct callers of
+    ``SemanticScholarClient.research_brief`` still get the markdown
+    inline; only the workflow-handler return drops it.
+    """
+    tool_return = {
         "status": "completed",
         "brief_document_id": "semantic_scholar:research_brief:abc",
         "brief_action": "inserted",
@@ -90,7 +98,7 @@ async def test_research_brief_delegates_to_tool_method(
         "papers_noop": 0,
         "markdown": "# Research Brief: active inference\n",
     }
-    mock = MockSemanticScholarClient(return_value=expected)
+    mock = MockSemanticScholarClient(return_value=tool_return)
     _install_mock_client(monkeypatch, mock)
     ctx = MockContext(MockPool())
 
@@ -99,7 +107,9 @@ async def test_research_brief_delegates_to_tool_method(
         ctx,
     )
 
-    assert result == expected
+    expected_envelope = {k: v for k, v in tool_return.items() if k != "markdown"}
+    assert result == expected_envelope
+    assert "markdown" not in result
     assert mock.research_brief_calls == [
         {"query": "active inference", "limit": 3, "year_from": 2024}
     ]

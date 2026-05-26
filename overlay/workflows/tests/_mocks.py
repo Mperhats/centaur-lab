@@ -79,18 +79,32 @@ class MockContext:
 
 
 class MetricsRecorder:
-    """Lightweight stand-in for ``emit_document_metrics`` used by tests.
+    """Lightweight stand-in for the metrics shim used by tests.
 
-    Records each call as ``(document, action)`` so tests can assert call
-    counts and argument shape without mocking the real Prometheus
-    machinery (which isn't on sys.path during local runs anyway).
+    Records ``observe_document_size`` and ``record_document_change``
+    invocations against the same recorder so tests can assert both the
+    pre-upsert observation and the post-upsert change record without
+    mocking the real Prometheus machinery (which isn't on sys.path
+    during local runs anyway). ``observe_calls`` captures
+    pre-upsert size observations; ``change_calls`` captures post-upsert
+    ``(document, action)`` pairs. ``calls`` is preserved as an alias
+    for ``change_calls`` to keep older tests that asserted on
+    ``MetricsRecorder.calls`` working without renames.
     """
 
     def __init__(self) -> None:
-        self.calls: list[tuple[dict[str, Any], str]] = []
+        self.observe_calls: list[dict[str, Any]] = []
+        self.change_calls: list[tuple[dict[str, Any], str]] = []
 
-    def __call__(self, document: dict[str, Any], action: str) -> None:
-        self.calls.append((document, action))
+    @property
+    def calls(self) -> list[tuple[dict[str, Any], str]]:
+        return self.change_calls
+
+    def observe(self, document: dict[str, Any]) -> None:
+        self.observe_calls.append(document)
+
+    def record(self, document: dict[str, Any], action: str) -> None:
+        self.change_calls.append((document, action))
 
 
 class MockSemanticScholarClient:

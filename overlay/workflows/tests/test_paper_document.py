@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +25,22 @@ from shared.paper_document import (
 )
 
 from ._mocks import EXECUTE_ARG_INDEX, MockPool
+
+# ``build_paper_document`` stamps ``source_updated_at`` with
+# ``datetime.now(UTC)`` at projection time. Tests treat that as
+# "recent UTC datetime" rather than pinning it to a literal value; the
+# fudge factor below absorbs CI clock skew without letting genuinely
+# stale projections slip through.
+_RECENCY_TOLERANCE = timedelta(seconds=30)
+
+
+def _assert_recent_utc(value: Any) -> None:
+    """Assert ``value`` is a UTC datetime taken within the last few seconds."""
+    assert isinstance(value, datetime)
+    assert value.tzinfo is not None
+    assert value.utcoffset() == timedelta(0)
+    now = datetime.now(UTC)
+    assert now - _RECENCY_TOLERANCE <= value <= now + _RECENCY_TOLERANCE
 
 
 def _sample_paper() -> dict[str, Any]:
@@ -62,7 +78,9 @@ def test_basic_paper_builds_full_document() -> None:
     assert doc["author_name"] == "Ashish Vaswani"
     assert doc["access_scope"] == "company"
     assert doc["occurred_at"] == datetime(2017, 1, 1, tzinfo=UTC)
-    assert doc["source_updated_at"] == datetime(2017, 1, 1, tzinfo=UTC)
+    # ``source_updated_at`` tracks sync time (datetime.now(UTC) at
+    # projection), not publication year — see S10 in docs/review.md.
+    _assert_recent_utc(doc["source_updated_at"])
 
     body = doc["body"]
     assert "# Attention Is All You Need" in body
@@ -117,10 +135,15 @@ def test_missing_year_yields_null_occurred_at() -> None:
     paper["year"] = None
     doc = build_paper_document(paper)
     assert doc["occurred_at"] is None
-    assert doc["source_updated_at"] is None
+    # ``source_updated_at`` is sync time, not publication time, so it
+    # stays populated even when the paper has no known year.
+    _assert_recent_utc(doc["source_updated_at"])
     assert "- Year: Unknown" in doc["body"]
-    # year=None must be dropped from metadata per the "drop None values" rule.
-    assert "year" not in doc["metadata"]
+    # ``year`` is preserved as an explicit ``None`` in metadata (S11)
+    # so JSONB key-presence checks behave the same way for papers
+    # missing optional fields as they do for Slack rows upstream.
+    assert "year" in doc["metadata"]
+    assert doc["metadata"]["year"] is None
 
 
 def test_no_authors_yields_empty_author_fields() -> None:
@@ -133,13 +156,37 @@ def test_no_authors_yields_empty_author_fields() -> None:
     assert doc["metadata"]["authors"] == []
 
 
-def test_metadata_includes_query_only_when_provided() -> None:
+def test_metadata_includes_query_with_explicit_null_when_absent() -> None:
     paper = _sample_paper()
     doc_without = build_paper_document(paper)
-    assert "query" not in doc_without["metadata"]
+    # S11: metadata keys are present with explicit nulls rather than
+    # being dropped, so downstream ``metadata ? 'query'`` checks see
+    # the key on every row regardless of whether a query was passed.
+    assert "query" in doc_without["metadata"]
+    assert doc_without["metadata"]["query"] is None
 
     doc_with = build_paper_document(paper, query="diffusion models")
     assert doc_with["metadata"]["query"] == "diffusion models"
+
+
+def test_metadata_preserves_explicit_nulls_for_missing_optional_fields() -> None:
+    """S11: a paper missing every optional metadata field still surfaces
+    each key with an explicit ``None`` value so JSONB key-presence checks
+    (e.g. ``metadata ? 'doi'``) match the behaviour of upstream Slack
+    rows that always list every key.
+    """
+    paper = _sample_paper()
+    paper["externalIds"] = {}  # no DOI, no ArXiv
+    paper["openAccessPdf"] = None
+    paper["venue"] = None
+    paper["year"] = None
+
+    doc = build_paper_document(paper)
+
+    meta = doc["metadata"]
+    for key in ("doi", "arxivId", "openAccessPdf", "venue", "year", "query"):
+        assert key in meta, f"{key!r} should be present even when value is None"
+        assert meta[key] is None, f"{key!r} should be explicit None, got {meta[key]!r}"
 
 
 def test_content_hash_stable_across_calls_with_same_input() -> None:
