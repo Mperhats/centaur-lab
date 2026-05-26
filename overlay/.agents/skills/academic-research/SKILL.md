@@ -1,16 +1,14 @@
 ---
 name: academic-research
-description: Use when answering questions about academic papers, citations, literature reviews, or research briefs — search Semantic Scholar, build persisted lit-review briefs, surface paper metadata, walk the citation graph. Triggers on peer-reviewed papers, preprints, arXiv, NeurIPS, biology/chemistry journals, ML/AI research topics, "research brief", "lit review", "literature review", or "what does the literature say about X".
+description: "Use when answering questions about academic papers, citations, literature reviews, or research briefs — search Semantic Scholar, build persisted lit-review briefs, surface paper metadata, walk the citation graph. Triggers on peer-reviewed papers, preprints, arXiv, NeurIPS, biology/chemistry journals, ML/AI research topics, \"research brief\", \"lit review\", \"literature review\", or \"what does the literature say about X\"."
 ---
 
-# academic-research
+# Academic Research
 
 Use the `semantic_scholar` tool whenever the user asks about peer-reviewed
 papers, preprints, citations, or what a specific researcher has published.
 Prefer it over generic web search for anything that lives in the academic
 literature: arXiv, NeurIPS, biology/chem journals, etc.
-
-## When to use
 
 **Default flow: search-then-save.** Persistence is on by default — every
 academic-research turn grows the cache so future turns find the same papers
@@ -19,33 +17,7 @@ ONLY when the user explicitly says "just search", "don't save",
 "exploratory only", or otherwise signals they don't want the result
 remembered.
 
-- "Find papers about X" → `semantic_scholar.search(query=X, limit=10)` to
-  look up cached + live results, then **immediately follow up with
-  `save_papers`** on the live-lane `paperId`s. The hybrid path checks
-  `company_context_documents` first and tops up via the live API for
-  anything newer than the cache's cutoff year; the save step turns those
-  fresh hits into permanent cache. Prefer this over `search_papers` for
-  any query that might overlap previous research.
-- "Find papers strictly newer than my cache" / "what's been published this
-  month" → `semantic_scholar.search_papers(query=X, year_from=<recent year>)`
-  directly, then `save_papers` on the IDs. Use the raw live call only when
-  you specifically want to ignore the cache; the save follow-up still applies.
-- "Summarize this paper" given a DOI / arXiv ID / S2 ID →
-  `semantic_scholar.get_paper(paper_id=...)`, then `save_papers` with
-  `[paper_id]` so the next turn can find it cached.
-- "What does this paper cite?" / building a related-work list →
-  `semantic_scholar.get_references(paper_id=..., limit=20)`. References are
-  good `save_papers` candidates when the user is doing follow-up research
-  on the citation network; for a one-off "what does this paper cite"
-  question, skip the save.
-- "Build me a brief / lit review / writeup on X" / "what does the literature say about Y" →
-  `semantic_scholar.research_brief(query=X, limit=5, year_from=<optional>)`.
-  One call: S2 search + Markdown brief + upsert brief + upsert child papers
-  with `parent_document_id`. The `markdown` field is the renderable output —
-  post that back to Slack as your reply. **Do NOT use `call workflow run` for
-  briefs anymore — the tool method is the canonical surface.**
-
-## Cache-aware search (`semantic_scholar.search`)
+## Cache-Aware Search (`semantic_scholar.search`)
 
 The hybrid `search` method returns two ranked lanes in one response:
 
@@ -56,7 +28,7 @@ The response shape is `{status, query, limit, year_from, indexed_count, live_cou
 
 Hybrid `search` does not auto-persist — that's intentional so the agent has explicit control of when to grow the cache. **`research_brief` does write** (brief + child papers) — that's its whole point. So the tool/workflow split is no longer "tools find, workflows write"; it's "use whichever surface fits the affordance." When the user asks for a list, `search` + `save_papers`. When they ask for a brief, `research_brief`. The expected agent flow after `search` is still to call `save_papers` on the live-lane `paperId`s so the cache grows over time; saving is the default unless the user opted out. The indexed lane never needs a `save_papers` follow-up — those rows are already in `company_context_documents`.
 
-## Output expectations
+## Output Expectations
 
 For a Slack reply, return at most 5 papers unless the user asks for more.
 For each paper include: title, first author + et al., year, citation count,
@@ -67,7 +39,7 @@ Do NOT fabricate titles, authors, or DOIs. If `search_papers` returns
 nothing, say so and offer alternative queries — don't substitute web
 results.
 
-## Anti-patterns
+## What Not To Do
 
 - Don't use `web_search` for academic questions when this tool fits — its
   rankings are tuned for the open web, not the literature.
@@ -84,7 +56,7 @@ results.
   work, but in-Slack agent turns should always go through the tool.
 - Don't reach for `search_papers` when `search` will do. The hybrid path is strictly cheaper for any query that overlaps prior research (cached results return without an API call), and it gracefully falls through to live when the cache is empty. Use raw `search_papers` only when you specifically need to bypass the cache.
 
-## Persisting research
+## Persisting Research with Workflows
 
 Two on-demand surfaces turn ad-hoc Semantic Scholar lookups into durable
 knowledge by upserting rows into `company_context_documents`: the
@@ -93,13 +65,13 @@ method. Both are content-hash idempotent — re-running with the same input
 is safe and cheap (returns `noop` actions), so you don't have to track
 whether you've already saved something.
 
-### `save_papers` — remember specific papers
+### `save_papers` — Remember Specific Papers
 
 The implicit default after every `search` / `search_papers` / `get_paper`
 turn (see "Default flow: search-then-save" above). Also fires on explicit
 asks: "save these papers", "remember these for later", "add these to context".
 
-```
+```bash
 call workflow run '{"workflow_name":"save_papers","input":{"paper_ids":["173ba8ae...","abcd1234..."],"query":"diffusion models"}}'
 ```
 
@@ -112,7 +84,7 @@ Idempotency means the save call is cheap to make even when the agent
 isn't sure whether the papers are already cached: re-saving an unchanged
 paper returns `noop` and writes nothing.
 
-### `research_brief` — synthesized lit review, persisted
+### `research_brief` — Synthesized Lit Review, Persisted
 
 Use when the user wants a writeup, not just a list. Trigger phrases:
 "build a research brief", "give me a literature summary", "do a lit review
