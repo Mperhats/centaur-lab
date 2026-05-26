@@ -465,6 +465,7 @@ def test_search_sources_is_frozen_dataclass() -> None:
         num_drafts=SOURCE_ENV,
         num_workers=SOURCE_DEFAULT,
         metric_reducer=SOURCE_DEFAULT,
+        prior_attempts_window=SOURCE_DEFAULT,
     )
     with pytest.raises((AttributeError, Exception)):
         s.debug_prob = SOURCE_DEFAULT  # type: ignore[misc]

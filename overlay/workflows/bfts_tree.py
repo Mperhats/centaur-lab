@@ -60,6 +60,7 @@ class Input:
     num_workers: int | None = None
     max_debug_depth: int | None = None
     debug_prob: float | None = None
+    prior_attempts_window: int | None = None
     max_iters: int = 20
     seed: int = 0
     sandbox_id: str = ""              # pre-provisioned by bfts_root
@@ -154,6 +155,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         num_drafts=inp.num_drafts,
         num_workers=inp.num_workers,
         metric_reducer=inp.metric_reducer,
+        prior_attempts_window=inp.prior_attempts_window,
     )
 
     rng = random.Random(inp.seed)
@@ -285,6 +287,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                     "draft_model": llm.draft_model,
                     "feedback_model": llm.feedback_model,
                     "vlm_model": llm.vlm_model,
+                    "prior_attempts_window": search.prior_attempts_window,
                 },
                 trigger_key=child_run_id,
                 eager_start=True,

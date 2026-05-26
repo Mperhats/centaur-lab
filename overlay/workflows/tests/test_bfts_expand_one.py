@@ -166,6 +166,12 @@ def _patch_handler_deps(
     mark_stub = AsyncMock(return_value=None)
     monkeypatch.setattr(bfts_expand_one, "mark_buggy_plots", mark_stub)
 
+    monkeypatch.setattr(
+        bfts_expand_one,
+        "list_recent_node_summaries",
+        AsyncMock(return_value=[]),
+    )
+
     return expand_stub, update_stub, mark_stub
 
 

@@ -200,6 +200,39 @@ async def mark_buggy_plots(
     )
 
 
+async def list_recent_node_summaries(
+    pool: asyncpg.Pool,
+    *,
+    run_id: str,
+    limit: int,
+    exclude_node_id: str | None,
+) -> list[dict[str, Any]]:
+    """Recent executed nodes for prior-attempts memory injection (F.2).
+
+    Skips placeholder rows (``is_buggy IS NULL``) so the LLM doesn't see
+    its own in-flight slots, and skips ``exclude_node_id`` so the
+    current expansion never sees itself. Ordered most-recent-first;
+    callers reverse if they want chronological order in the prompt.
+
+    ``limit <= 0`` returns an empty list (caller can disable memory
+    injection by setting ``prior_attempts_window=0``); we still emit
+    the SQL to keep the path uniform, but with LIMIT 0.
+    """
+    rows = await pool.fetch(
+        """
+        SELECT node_id, stage_name, plan, is_buggy, analysis
+        FROM bfts_nodes
+        WHERE run_id = $1
+          AND is_buggy IS NOT NULL
+          AND ($2::text IS NULL OR node_id <> $2)
+        ORDER BY created_at DESC, node_id DESC
+        LIMIT $3
+        """,
+        run_id, exclude_node_id, max(0, int(limit)),
+    )
+    return [dict(r) for r in rows]
+
+
 async def list_nodes_for_run(
     pool: asyncpg.Pool, *, run_id: str
 ) -> list[dict[str, Any]]:

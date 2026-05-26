@@ -24,7 +24,7 @@ Underscore-prefixed: workflow loader skips it.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
@@ -40,6 +40,7 @@ from _bfts_prompts import (
     PROMPT_IMPL_GUIDELINE,
     PROMPT_RESP_FMT,
     REVIEW_FUNC_SPEC,
+    prior_attempts_section,
     render_prompts,
 )
 
@@ -110,6 +111,14 @@ class ExpandContext:
     draft_model: str = DEFAULT_DRAFT_MODEL
     feedback_model: str = DEFAULT_FEEDBACK_MODEL
     vlm_model: str = DEFAULT_VLM_MODEL
+    # F.2: most-recent-first list of node summaries injected into the
+    # draft / improve propose prompt as a markdown ``## Prior attempts``
+    # section. Loaded by bfts_expand_one via
+    # ``_bfts_state.list_recent_node_summaries`` before constructing
+    # this dataclass. Empty list disables the injection; debug branch
+    # ignores this field (parent failure context is already in the
+    # prompt).
+    prior_attempts: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _branch(parent: Optional[dict[str, Any]]) -> str:
@@ -120,9 +129,14 @@ def _branch(parent: Optional[dict[str, Any]]) -> str:
 
 def _propose_prompt(expand_ctx: ExpandContext) -> str:
     branch = _branch(expand_ctx.parent_node)
+    # F.2: prior-attempts memory is injected for draft + improve only.
+    # Debug already has the parent's failed code + stderr; piling on the
+    # last K nodes would inflate the prompt without adding signal.
+    memory_block = prior_attempts_section(expand_ctx.prior_attempts)
     if branch == "draft":
         return render_prompts(
             {"Idea": expand_ctx.idea},
+            memory_block,
             PROMPT_IMPL_GUIDELINE,
             PROMPT_RESP_FMT,
             {"Task": (
@@ -144,6 +158,7 @@ def _propose_prompt(expand_ctx: ExpandContext) -> str:
     parent = expand_ctx.parent_node or {}
     return render_prompts(
         {"Idea": expand_ctx.idea},
+        memory_block,
         PROMPT_IMPL_GUIDELINE,
         PROMPT_RESP_FMT,
         {"Previous good code": f"```python\n{parent.get('code','')}\n```"},

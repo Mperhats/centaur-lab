@@ -185,9 +185,47 @@ def render_prompts(*fragments: PromptType) -> str:
     return "\n".join(compile_prompt_to_md(f) for f in fragments)
 
 
+def prior_attempts_section(summaries: list[dict[str, Any]]) -> str:
+    """Render last-K node summaries as a markdown ``## Prior attempts`` section.
+
+    ``summaries`` arrives most-recent-first from
+    ``_bfts_state.list_recent_node_summaries``; we reverse so the LLM
+    reads them chronologically (oldest → newest). Empty list returns
+    the empty string so callers can append unconditionally without a
+    null-section header.
+
+    Each summary becomes one bullet with the node's short id, stage,
+    buggy flag, the first line of its plan, and the (one-line)
+    analysis. Sakana's Journal-based memory is the upstream analog
+    (parallel_agent.py:2072-2081); the cheap, no-extra-LLM-call
+    fixed-window option here resolves research 02 §OQ #7.
+    """
+    if not summaries:
+        return ""
+    lines = ["## Prior attempts (oldest first)\n"]
+    for s in reversed(summaries):
+        buggy = "yes" if s.get("is_buggy") else "no"
+        plan_raw = (s.get("plan") or "").strip().splitlines()
+        plan_one_line = plan_raw[0] if plan_raw else "(no plan recorded)"
+        analysis_raw = (s.get("analysis") or "").strip()
+        analysis_one_line = (
+            analysis_raw.splitlines()[0]
+            if analysis_raw
+            else "(no analysis)"
+        )
+        node_id = s.get("node_id") or "?"
+        short_nid = node_id[:8] if isinstance(node_id, str) else "?"
+        lines.append(
+            f"- **{short_nid}** ({s.get('stage_name', '?')}, "
+            f"buggy: {buggy}): {plan_one_line} — {analysis_one_line}"
+        )
+    return "\n".join(lines) + "\n"
+
+
 __all__: Iterable[str] = (
     "compile_prompt_to_md",
     "render_prompts",
+    "prior_attempts_section",
     "REVIEW_FUNC_SPEC",
     "METRIC_PARSE_SPEC",
     "VLM_FEEDBACK_SPEC",

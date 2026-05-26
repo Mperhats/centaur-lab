@@ -46,9 +46,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 if TYPE_CHECKING:
     from api.workflow_engine import WorkflowContext
 
-from _bfts_config import resolve_llm_api_key, resolve_llm_settings
+from _bfts_config import (
+    DEFAULT_PRIOR_ATTEMPTS_WINDOW,
+    resolve_llm_api_key,
+    resolve_llm_settings,
+)
 from _bfts_expand import ExpandContext, expand_node
-from _bfts_state import mark_buggy_plots, update_node_metric
+from _bfts_state import (
+    list_recent_node_summaries,
+    mark_buggy_plots,
+    update_node_metric,
+)
 
 WORKFLOW_NAME = "bfts_expand_one"
 SCHEDULE: dict[str, Any] = {}
@@ -83,6 +91,11 @@ class Input:
     draft_model: str | None = None
     feedback_model: str | None = None
     vlm_model: str | None = None
+    # F.2: forwarded by ``bfts_tree.handler``. None falls back to the
+    # ``DEFAULT_PRIOR_ATTEMPTS_WINDOW`` constant so a standalone-launched
+    # ``bfts_expand_one`` (tests, manual ``POST /api/workflows/...``) still
+    # behaves sensibly. Set to 0 to disable memory injection.
+    prior_attempts_window: int | None = None
 
 
 async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
@@ -95,6 +108,25 @@ async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
     llm_api_key = resolve_llm_api_key(llm.llm_api_key_secret)
     pool = ctx._pool
 
+    # F.2: load the prior-attempts memory window before constructing
+    # ExpandContext. Wrapped in ``ctx.step`` so the row snapshot is
+    # checkpointed alongside the other LLM-call steps and a workflow
+    # restart sees the same memory the original run did.
+    window = (
+        inp.prior_attempts_window
+        if inp.prior_attempts_window is not None
+        else DEFAULT_PRIOR_ATTEMPTS_WINDOW
+    )
+    prior_attempts = await ctx.step(
+        "load_prior_attempts",
+        lambda: list_recent_node_summaries(
+            pool,
+            run_id=inp.run_id,
+            limit=window,
+            exclude_node_id=inp.node_id,
+        ),
+    )
+
     expand_ctx = ExpandContext(
         sandbox_id=inp.sandbox_id,
         parent_node=inp.parent_node,
@@ -105,6 +137,7 @@ async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
         draft_model=llm.draft_model,
         feedback_model=llm.feedback_model,
         vlm_model=llm.vlm_model,
+        prior_attempts=prior_attempts or [],
     )
 
     # No outer ctx.step / try/except: expand_node has its own per-LLM-call

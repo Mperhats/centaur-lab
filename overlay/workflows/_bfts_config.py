@@ -41,6 +41,13 @@ DEFAULT_DEBUG_PROB = 0.5
 DEFAULT_MAX_DEBUG_DEPTH = 3
 DEFAULT_NUM_DRAFTS = 4
 DEFAULT_NUM_WORKERS = 2
+# F.2: how many recent executed-node summaries to inject as a markdown
+# "Prior attempts" section into draft / improve prompts. 0 disables the
+# memory injection entirely; the debug branch always skips (parent
+# failure context is already in the prompt). Sakana's Journal-based
+# memory is the loose upstream analog
+# (.scientist/ai_scientist/treesearch/parallel_agent.py:2072-2081).
+DEFAULT_PRIOR_ATTEMPTS_WINDOW = 5
 
 # Source-tier names returned by the resolver helpers and recorded into
 # ``bfts_runs.config_json["sources"]`` for replay observability.
@@ -58,6 +65,7 @@ ENV_DEBUG_PROB = "BFTS_DEBUG_PROB"
 ENV_MAX_DEBUG_DEPTH = "BFTS_MAX_DEBUG_DEPTH"
 ENV_NUM_DRAFTS = "BFTS_NUM_DRAFTS"
 ENV_NUM_WORKERS = "BFTS_NUM_WORKERS"
+ENV_PRIOR_ATTEMPTS_WINDOW = "BFTS_PRIOR_ATTEMPTS_WINDOW"
 
 
 @dataclass(frozen=True)
@@ -117,6 +125,7 @@ class SearchSettings:
     num_drafts: int
     num_workers: int
     metric_reducer: str
+    prior_attempts_window: int
 
 
 @dataclass(frozen=True)
@@ -137,6 +146,7 @@ class SearchSources:
     num_drafts: str
     num_workers: str
     metric_reducer: str
+    prior_attempts_window: str
 
 
 def _validate_reducer(reducer: str) -> str:
@@ -154,6 +164,7 @@ def resolve_search_settings(
     num_drafts: int | None = None,
     num_workers: int | None = None,
     metric_reducer: str | None = None,
+    prior_attempts_window: int | None = None,
 ) -> tuple[SearchSettings, SearchSources]:
     """Merge per-run Input overrides, deployment env, and code defaults.
 
@@ -184,12 +195,18 @@ def resolve_search_settings(
     metric_reducer_raw, metric_reducer_src = _resolve_str(
         metric_reducer, ENV_METRIC_REDUCER, DEFAULT_METRIC_REDUCER
     )
+    prior_attempts_window_val, prior_attempts_window_src = _resolve_int(
+        prior_attempts_window,
+        ENV_PRIOR_ATTEMPTS_WINDOW,
+        DEFAULT_PRIOR_ATTEMPTS_WINDOW,
+    )
     settings = SearchSettings(
         debug_prob=debug_prob_val,
         max_debug_depth=max_debug_depth_val,
         num_drafts=num_drafts_val,
         num_workers=num_workers_val,
         metric_reducer=_validate_reducer(metric_reducer_raw),
+        prior_attempts_window=prior_attempts_window_val,
     )
     sources = SearchSources(
         debug_prob=debug_prob_src,
@@ -197,6 +214,7 @@ def resolve_search_settings(
         num_drafts=num_drafts_src,
         num_workers=num_workers_src,
         metric_reducer=metric_reducer_src,
+        prior_attempts_window=prior_attempts_window_src,
     )
     return settings, sources
 
@@ -209,6 +227,7 @@ async def resolve_search_config(
     num_drafts: int | None = None,
     num_workers: int | None = None,
     metric_reducer: str | None = None,
+    prior_attempts_window: int | None = None,
 ) -> tuple[SearchSettings, SearchSources]:
     """Same resolution as ``resolve_search_settings`` plus a DB layer.
 
@@ -253,12 +272,17 @@ async def resolve_search_config(
         metric_reducer, db_row, "metric_reducer",
         ENV_METRIC_REDUCER, DEFAULT_METRIC_REDUCER,
     )
+    prior_attempts_window_val, prior_attempts_window_src = _resolve_int_with_db(
+        prior_attempts_window, db_row, "prior_attempts_window",
+        ENV_PRIOR_ATTEMPTS_WINDOW, DEFAULT_PRIOR_ATTEMPTS_WINDOW,
+    )
     settings = SearchSettings(
         debug_prob=debug_prob_val,
         max_debug_depth=max_debug_depth_val,
         num_drafts=num_drafts_val,
         num_workers=num_workers_val,
         metric_reducer=_validate_reducer(metric_reducer_raw),
+        prior_attempts_window=prior_attempts_window_val,
     )
     sources = SearchSources(
         debug_prob=debug_prob_src,
@@ -266,6 +290,7 @@ async def resolve_search_config(
         num_drafts=num_drafts_src,
         num_workers=num_workers_src,
         metric_reducer=metric_reducer_src,
+        prior_attempts_window=prior_attempts_window_src,
     )
     return settings, sources
 

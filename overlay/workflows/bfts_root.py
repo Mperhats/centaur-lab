@@ -41,6 +41,7 @@ class Input:
     num_workers: int | None = None
     max_debug_depth: int | None = None
     debug_prob: float | None = None
+    prior_attempts_window: int | None = None
     max_iters: int = 20
     seed_base: int = 0
     # Optional per-run LLM overrides. When omitted, deployment env (BFTS_* in
@@ -95,6 +96,7 @@ async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
         num_drafts=inp.num_drafts,
         num_workers=inp.num_workers,
         metric_reducer=inp.metric_reducer,
+        prior_attempts_window=inp.prior_attempts_window,
     )
     ctx.log(
         "bfts_root_resolved_search_config",
@@ -135,6 +137,7 @@ async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
                     "num_workers": search.num_workers,
                     "max_debug_depth": search.max_debug_depth,
                     "debug_prob": search.debug_prob,
+                    "prior_attempts_window": search.prior_attempts_window,
                     "max_iters": inp.max_iters,
                     "seed": inp.seed_base + i,
                     "sandbox_id": sandbox_id,
