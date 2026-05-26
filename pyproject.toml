@@ -4,33 +4,48 @@ version = "0.1.0"
 description = "centaur-lab organization overlay for Centaur (academic research domain)"
 requires-python = ">=3.11"
 license = "Apache-2.0 OR MIT"
+# Workspace members declared as path deps so ``uv sync`` (no flags)
+# installs every tool's runtime deps into the root ``.venv``
+# automatically. Each member opts out of building (``[tool.uv].package
+# = false``), so uv pulls in the member's ``[project].dependencies``
+# without trying to construct a wheel for the tool itself.
+dependencies = [
+    "pdf",
+    "semantic-scholar",
+]
 
-# Single source of truth for every dep used by ``tools/`` and
-# ``workflows/``. Per-tool ``pyproject.toml`` files have been removed —
-# matching the centaur-acme example layout — so this list is what
-# ``uv sync`` installs into the root ``.venv`` and what CI verifies.
+# Tool runtime deps live in ``tools/<name>/pyproject.toml`` — that's
+# the file upstream's API entrypoint
+# (.centaur/services/api/entrypoint.sh) scans on pod startup to
+# ``uv pip install`` every overlay tool's deps before launching
+# uvicorn. The workspace config below makes ``uv sync`` aggregate the
+# same per-tool ``[project].dependencies`` blocks into the local
+# ``.venv`` so the dev/test environment matches what the API pod sees,
+# with no duplicated dependency lists to drift.
 #
-# ``centaur_sdk`` is intentionally not listed here: upstream's
+# ``centaur_sdk`` is intentionally not declared anywhere: upstream's
 # ``centaur_sdk/pyproject.toml`` declares ``packages = ["."]`` which
 # flattens module files into the wheel root, so a normal ``pip install``
-# / ``uv add`` does not expose ``from centaur_sdk import …``. Instead we
-# expose the SDK via a ``centaur_sdk`` → ``.centaur/centaur_sdk``
-# symlink at the repo root, which lets every Python tool that already
-# has the repo root on ``sys.path`` (pytest, ``uv run python -m …``,
-# IDEs, mypy / pyright) resolve the package directly. Bumping the
+# / ``uv add`` does not expose ``from centaur_sdk import …``. We expose
+# the SDK via a ``centaur_sdk`` → ``.centaur/centaur_sdk`` symlink at
+# the repo root, which lets every Python entrypoint that already has
+# the repo root on ``sys.path`` (pytest, ``uv run python -m …``, IDEs,
+# mypy / pyright) resolve the package directly. Bumping the
 # ``.centaur`` submodule pin updates the SDK in lockstep with the API.
-dependencies = [
-    "asyncpg>=0.30.0",
-    "httpx>=0.27.0",
-    "pydantic>=2.0.0",
-    "pymupdf>=1.24.0",
-    "pymupdf4llm>=0.0.17",
-    "pypdf>=4.0.0",
-    "python-dotenv>=1.0.0",
-    "rich>=13.0.0",
-    "semanticscholar>=0.12.0",
-    "typer>=0.12.0",
-]
+# Note: the SDK declares its own runtime deps (currently ``rich``);
+# those land in the ``.venv`` via ``rich`` being a per-tool dep, which
+# matches what the API pod sees too.
+[tool.uv.workspace]
+members = ["tools/*"]
+
+[tool.uv.sources]
+pdf = { workspace = true }
+semantic-scholar = { workspace = true }
+
+# This repo is a Docker image build context, not a publishable Python
+# distribution — tell uv not to build the overlay itself.
+[tool.uv]
+package = false
 
 [dependency-groups]
 dev = [
@@ -39,19 +54,14 @@ dev = [
     "ruff>=0.6.0",
 ]
 
-# This repo is a Docker image build context, not a publishable Python
-# distribution — tell uv not to build the overlay itself.
-[tool.uv]
-package = false
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # Repo root on the path so ``from tools.semantic_scholar.client import …``
 # and ``from workflows.research_brief import …`` resolve as namespace
 # packages — byte-identical to how the API pod sets up TOOL_DIRS /
-# WORKFLOW_DIRS at startup. ``centaur_sdk`` resolves through the symlink
-# at the repo root (see the ``dependencies`` comment above), so we don't
-# need ``.centaur`` on the path here anymore.
+# WORKFLOW_DIRS at startup. ``centaur_sdk`` resolves through the
+# repo-root symlink (see the comment near the top of this file), so we
+# don't need ``.centaur`` on the path here anymore.
 pythonpath = ["."]
 asyncio_mode = "strict"
 

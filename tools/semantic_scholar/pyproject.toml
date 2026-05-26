@@ -1,27 +1,55 @@
-[project]
-name = "semantic-scholar"
-version = "0.1.0"
-description = "Search Semantic Scholar, fetch paper metadata, walk the citation graph, and build research-brief bundles."
-requires-python = ">=3.11"
-license = "Apache-2.0 OR MIT"
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-# Runtime manifest read by upstream's tool_manager. Dev/test deps live
-# in the root pyproject.toml (single venv); this file exists for two
-# things only:
-#   1. Tool discovery (tool_manager scans tools/<name>/pyproject.toml)
-#   2. iron-proxy header injection (the [tool.centaur].secrets block
-#      tells the firewall to substitute the real key for outbound
-#      requests to api.semanticscholar.org).
+# Single source of truth for the Semantic Scholar tool's runtime deps,
+# read by three different consumers:
+#
+#   1. ``tool_manager`` (.centaur/services/api/api/tool_manager.py)
+#      — the API pod scans every ``TOOL_DIRS`` entry for
+#      ``pyproject.toml`` and registers each as a tool; it reads
+#      ``[tool.centaur]`` for ``module`` and ``secrets``.
+#   2. The API pod's ``entrypoint.sh`` — walks the same files at pod
+#      startup and ``uv pip install``s the union of every
+#      ``[project].dependencies``. So everything ``client.py`` imports
+#      (transitively) MUST be declared here or in another overlay tool's
+#      pyproject; deps get unioned before install.
+#   3. The repo-root ``uv`` workspace — this directory is a workspace
+#      member (see ``../../pyproject.toml``), so ``uv sync`` from the
+#      repo root installs the same set into the local ``.venv``. That's
+#      what makes the dev/test environment match the API pod with no
+#      duplicated dependency lists.
+#
+# iron-proxy injection: ``[tool.centaur].secrets`` tells the firewall to
+# substitute the resolved value for ``SEMANTIC_SCHOLAR_API_KEY`` on
+# outbound requests to ``api.semanticscholar.org``.
 #
 # ``secrets`` (required, not ``optional_secrets``): the agent only sees
 # this tool when the cluster Secret resolves SEMANTIC_SCHOLAR_API_KEY.
 # Anonymous calls would degrade silently to S2's tight 1 req/sec
 # unauthenticated rate limit — better to hide the tool than have the
 # agent burn turns on rate-limit errors.
+[project]
+name = "semantic-scholar"
+version = "0.1.0"
+description = "Search Semantic Scholar, fetch paper metadata, walk the citation graph, and build research-brief bundles."
+requires-python = ">=3.11"
+license = "Apache-2.0 OR MIT"
+dependencies = [
+    "httpx>=0.27.0",
+    "python-dotenv>=1.0.0",
+    "rich>=13.0.0",
+    "semanticscholar>=0.12.0",
+    "typer>=0.12.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# This is a tool manifest, not a publishable wheel — opt out of building
+# so uv treats it as a workspace member that contributes its
+# ``[project].dependencies`` to the root ``.venv`` without trying to
+# install the tool itself.
+[tool.uv]
+package = false
+
 [tool.centaur]
 module = "client.py"
 secrets = [

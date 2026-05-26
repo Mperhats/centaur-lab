@@ -22,10 +22,14 @@
 # into sandbox pods at ``/home/agent/overlay/org``. Alpine is
 # sufficient — the overlay only ships static files; tool and workflow
 # handlers are .py modules the API pod discovers via TOOL_DIRS /
-# WORKFLOW_DIRS at startup, and tool deps are aggregated in the root
-# ``pyproject.toml`` (per-tool pyprojects were dropped to match the
-# centaur-acme example layout). CI publishes this image to GHCR on
-# pushes to main (see ``.github/workflows/overlay.yml``).
+# WORKFLOW_DIRS at startup. Tool runtime deps are declared in each
+# ``tools/<name>/pyproject.toml`` and installed by the API pod's
+# ``entrypoint.sh`` at startup (which scans ``TOOL_DIRS`` for
+# ``[project].dependencies`` blocks). The repo-root ``pyproject.toml``
+# is a uv workspace whose members are those same per-tool files, so
+# the dev/test ``.venv`` resolves the same dep set with no duplicated
+# manifest. CI publishes this image to GHCR on pushes to main (see
+# ``.github/workflows/overlay.yml``).
 FROM alpine:3.20
 WORKDIR /overlay
 COPY . /overlay
