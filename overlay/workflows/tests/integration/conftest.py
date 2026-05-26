@@ -41,8 +41,14 @@ async def db_pool():
     if not dsn:
         pytest.skip(
             "CENTAUR_TEST_DATABASE_URL not set; integration tests require a "
-            "real Postgres (see overlay/workflows/tests/integration/conftest.py "
-            "module docstring for setup)."
+            "real Postgres. Quick setup against the cluster:\n"
+            "  kubectl port-forward -n centaur-system "
+            "svc/centaur-centaur-postgres 5432:5432 &\n"
+            "  PGPASSWORD=$(kubectl get secret -n centaur-system "
+            "centaur-infra-env -o jsonpath='{.data.POSTGRES_PASSWORD}' "
+            "| base64 -d)\n"
+            "  export CENTAUR_TEST_DATABASE_URL="
+            "postgres://tempo:$PGPASSWORD@localhost:5432/ai_v2"
         )
 
     pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)

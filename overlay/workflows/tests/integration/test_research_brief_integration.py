@@ -4,6 +4,11 @@ Verifies the brief-plus-papers parent/child write path lands the rows the
 unit suite mocks: one ``source_type='research_brief'`` row, N
 ``source_type='paper'`` rows whose ``parent_document_id`` points back at
 the brief, and idempotency on rerun via ``content_hash``.
+
+Test names use the workflow-name prefix (``test_research_brief_*``) rather
+than the unit suite's ``test_handler_*`` convention so a CI failure log
+makes clear which workflow regressed without context-switching to the
+file path.
 """
 
 from __future__ import annotations
@@ -20,7 +25,7 @@ _WORKFLOWS_DIR = Path(__file__).resolve().parent.parent.parent
 if str(_WORKFLOWS_DIR) not in sys.path:
     sys.path.insert(0, str(_WORKFLOWS_DIR))
 
-from tests._fakes import FakeContext  # noqa: E402
+from tests._fakes import FakeContext, FakeSemanticScholarClient  # noqa: E402
 
 
 def _paper(paper_id: str, *, title: str | None = None) -> dict[str, Any]:
@@ -39,30 +44,6 @@ def _paper(paper_id: str, *, title: str | None = None) -> dict[str, Any]:
     }
 
 
-class _StubS2Client:
-    """Stub Semantic Scholar client returning canned search results.
-
-    research_brief calls ``search_papers`` (not ``get_paper``); the stub
-    returns whatever list it was constructed with regardless of query so
-    tests stay deterministic.
-    """
-
-    def __init__(self, results: list[dict[str, Any]]) -> None:
-        self._results = results
-
-    def search_papers(
-        self,
-        query: str,
-        limit: int = 10,
-        year_from: int | None = None,
-        fields: str | None = None,
-    ) -> list[dict[str, Any]]:
-        return [dict(p) for p in self._results]
-
-    def close(self) -> None:
-        pass
-
-
 @pytest.mark.asyncio
 async def test_research_brief_writes_brief_and_papers_with_parent_link(
     db_pool: Any, monkeypatch: pytest.MonkeyPatch
@@ -73,7 +54,7 @@ async def test_research_brief_writes_brief_and_papers_with_parent_link(
     monkeypatch.setattr(
         research_brief,
         "SemanticScholarClient",
-        lambda: _StubS2Client(papers),
+        lambda: FakeSemanticScholarClient(search_results=papers),
     )
 
     result = await research_brief.handler(
@@ -112,7 +93,7 @@ async def test_research_brief_is_idempotent_on_rerun(
     monkeypatch.setattr(
         research_brief,
         "SemanticScholarClient",
-        lambda: _StubS2Client(papers),
+        lambda: FakeSemanticScholarClient(search_results=papers),
     )
     inp = research_brief.Input(query="active inference")
 
@@ -140,7 +121,7 @@ async def test_research_brief_no_results_writes_brief_only(
     monkeypatch.setattr(
         research_brief,
         "SemanticScholarClient",
-        lambda: _StubS2Client([]),
+        lambda: FakeSemanticScholarClient(search_results=[]),
     )
 
     result = await research_brief.handler(

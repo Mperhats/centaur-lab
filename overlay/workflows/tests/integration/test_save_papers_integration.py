@@ -4,6 +4,10 @@ Mirrors the shape of .centaur/services/api/tests/test_company_context_documents.
 seed nothing (paper workflow doesn't depend on slack tables), call the workflow
 handler with a FakeContext wrapping the real db_pool, then assert on the rows
 that actually landed in company_context_documents.
+
+Test names use the workflow-name prefix (``test_save_papers_*``) rather than
+the unit suite's ``test_handler_*`` convention so a CI failure log makes
+clear which workflow regressed without context-switching to the file path.
 """
 
 from __future__ import annotations
@@ -21,7 +25,7 @@ _WORKFLOWS_DIR = Path(__file__).resolve().parent.parent.parent
 if str(_WORKFLOWS_DIR) not in sys.path:
     sys.path.insert(0, str(_WORKFLOWS_DIR))
 
-from tests._fakes import FakeContext  # noqa: E402
+from tests._fakes import FakeContext, FakeSemanticScholarClient  # noqa: E402
 
 _PAPER_173BA: dict[str, Any] = {
     "paperId": "173ba8ae4582b6f9f6919aa3f813579a5349f1f9",
@@ -53,25 +57,6 @@ _PAPER_OTHER: dict[str, Any] = {
 }
 
 
-class _StubS2Client:
-    """Stub Semantic Scholar client returning canned papers by id.
-
-    Mirrors the unit-test stub pattern. ``get_paper`` returns a dict for known
-    ids and raises for unknown ones (so error-path tests are explicit).
-    """
-
-    def __init__(self, papers_by_id: dict[str, dict[str, Any]]) -> None:
-        self._papers = papers_by_id
-
-    def get_paper(self, paper_id: str, fields: Any = None) -> dict[str, Any]:
-        if paper_id not in self._papers:
-            raise RuntimeError(f"unknown paper id in stub: {paper_id}")
-        return dict(self._papers[paper_id])
-
-    def close(self) -> None:
-        pass
-
-
 @pytest.mark.asyncio
 async def test_save_papers_writes_paper_row_with_full_shape(
     db_pool: Any, monkeypatch: pytest.MonkeyPatch
@@ -81,7 +66,9 @@ async def test_save_papers_writes_paper_row_with_full_shape(
     monkeypatch.setattr(
         save_papers,
         "SemanticScholarClient",
-        lambda: _StubS2Client({_PAPER_173BA["paperId"]: _PAPER_173BA}),
+        lambda: FakeSemanticScholarClient(
+            papers_by_id={_PAPER_173BA["paperId"]: _PAPER_173BA}
+        ),
     )
 
     result = await save_papers.handler(
@@ -123,7 +110,9 @@ async def test_save_papers_is_idempotent_on_rerun(
     monkeypatch.setattr(
         save_papers,
         "SemanticScholarClient",
-        lambda: _StubS2Client({_PAPER_173BA["paperId"]: _PAPER_173BA}),
+        lambda: FakeSemanticScholarClient(
+            papers_by_id={_PAPER_173BA["paperId"]: _PAPER_173BA}
+        ),
     )
     inp = save_papers.Input(paper_ids=[_PAPER_173BA["paperId"]])
 
@@ -149,7 +138,9 @@ async def test_save_papers_partial_failure_writes_successful_papers(
     monkeypatch.setattr(
         save_papers,
         "SemanticScholarClient",
-        lambda: _StubS2Client({_PAPER_173BA["paperId"]: _PAPER_173BA}),
+        lambda: FakeSemanticScholarClient(
+            papers_by_id={_PAPER_173BA["paperId"]: _PAPER_173BA}
+        ),
     )
 
     result = await save_papers.handler(

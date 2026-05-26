@@ -91,3 +91,48 @@ class MetricsRecorder:
 
     def __call__(self, document: dict[str, Any], action: str) -> None:
         self.calls.append((document, action))
+
+
+class FakeSemanticScholarClient:
+    """Stub of ``SemanticScholarClient`` supporting both lookup paths.
+
+    Real ``SemanticScholarClient`` exposes ``get_paper`` (used by
+    ``save_papers``) and ``search_papers`` (used by ``research_brief``);
+    this fake mirrors both so a single class can back integration tests
+    for either workflow. Configure whichever path the test exercises:
+    ``papers_by_id`` for ``get_paper`` calls, ``search_results`` for
+    ``search_papers`` calls. Calling an unconfigured path raises
+    ``RuntimeError`` so misuse fails loudly.
+    """
+
+    def __init__(
+        self,
+        *,
+        papers_by_id: dict[str, dict[str, Any]] | None = None,
+        search_results: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self._papers_by_id = papers_by_id or {}
+        self._search_results = search_results
+
+    def get_paper(
+        self, paper_id: str, fields: Any = None
+    ) -> dict[str, Any]:
+        if paper_id not in self._papers_by_id:
+            raise RuntimeError(f"unknown paper id in stub: {paper_id}")
+        return dict(self._papers_by_id[paper_id])
+
+    def search_papers(
+        self,
+        query: str,
+        limit: int = 10,
+        year_from: int | None = None,
+        fields: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if self._search_results is None:
+            raise RuntimeError(
+                "FakeSemanticScholarClient: search_results not configured"
+            )
+        return [dict(p) for p in self._search_results]
+
+    def close(self) -> None:
+        pass
