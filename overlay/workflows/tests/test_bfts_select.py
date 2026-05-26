@@ -76,7 +76,7 @@ def test_debug_chosen_when_prob_is_one_and_buggy_leaf_exists() -> None:
 def test_max_debug_depth_excludes_node() -> None:
     cfg = SearchConfig(num_drafts=1, num_workers=1, max_debug_depth=3, debug_prob=1.0)
     rng = random.Random(0)
-    # debug_depth at the cap (3) → ineligible for further debugging.
+    # debug_depth above the cap (4 > 3) → ineligible for further debugging.
     n = _N("dx", "parent", is_buggy=True, is_buggy_plots=None, debug_depth=4, metric_score=float("inf")).to_ref()
     selected = select_next(nodes=[n], cfg=cfg, rng=rng)
     # No debuggable, no good_nodes → fall back to drafting (None).

@@ -42,6 +42,14 @@ def _draft_nodes(nodes: list[NodeRef]) -> list[NodeRef]:
 
 
 def _good_nodes(nodes: list[NodeRef]) -> list[NodeRef]:
+    """Nodes eligible for "improve"-style expansion.
+
+    Divergence from Sakana (`.scientist/ai_scientist/treesearch/journal.py:406`):
+    we treat ``is_buggy_plots is None`` (VLM hasn't run yet) as "good" so the
+    selector doesn't stall on the async VLM path (Phase 3 runs the VLM gate
+    as a separate workflow step, not inline). Sakana required ``is False``
+    because plots were scored inline with execution.
+    """
     return [n for n in nodes if n.is_buggy is False and n.is_buggy_plots is not True]
 
 
@@ -71,7 +79,7 @@ def select_next(
     drafts = _draft_nodes(nodes)
     viable_roots = {
         d.root_id for d in drafts
-        if any(_node_is_viable_leaf(n, d.root_id) for n in nodes)
+        if any(_node_makes_root_viable(n, d.root_id) for n in nodes)
     }
 
     while len(selected) < cfg.num_workers:
@@ -82,7 +90,8 @@ def select_next(
 
         buggy_leaves = _buggy_leaf_nodes(nodes, cfg.max_debug_depth)
         if buggy_leaves and rng.random() < cfg.debug_prob:
-            candidate = rng.choice(buggy_leaves)
+            buggy_leaves_sorted = sorted(buggy_leaves, key=lambda n: n.node_id)
+            candidate = rng.choice(buggy_leaves_sorted)
             if (
                 candidate.root_id not in processed_roots
                 or len(processed_roots) >= len(viable_roots)
@@ -96,7 +105,7 @@ def select_next(
             selected.append(None)
             continue
 
-        good_sorted = sorted(good, key=lambda n: n.metric_score)
+        good_sorted = sorted(good, key=lambda n: (n.metric_score, n.node_id))
         # Try to pick best per untaken root.
         picked = None
         for cand in good_sorted:
@@ -130,6 +139,14 @@ def _phantom_draft(idx: int) -> NodeRef:
     )
 
 
-def _node_is_viable_leaf(node: NodeRef, root_id: str) -> bool:
-    """A root is viable if at least one leaf in its subtree is not buggy."""
+def _node_makes_root_viable(node: NodeRef, root_id: str) -> bool:
+    """True if `node` belongs to `root_id`'s subtree AND is not known-buggy.
+
+    A root is considered viable if at least one of its descendants (leaf or
+    internal) is either not-yet-executed (``is_buggy is None``) or executed
+    successfully (``is_buggy is False``). Divergence from Sakana
+    (`parallel_agent.py:1960`) which checks only leaves: BFTS-on-Centaur
+    treats not-yet-executed nodes as candidates because they may still
+    succeed; the selector errs on the side of keeping a root alive.
+    """
     return node.root_id == root_id and (node.is_buggy is False or node.is_buggy is None)
