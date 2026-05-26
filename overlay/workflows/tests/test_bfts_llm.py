@@ -1,0 +1,67 @@
+"""Test: _bfts_llm wraps OpenAI chat-completions with function-call extraction."""
+from __future__ import annotations
+
+import json as json_module
+import sys
+from pathlib import Path
+
+import httpx
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from _bfts_llm import LLMCall, call_with_function
+
+
+@pytest.mark.asyncio
+async def test_function_call_extraction(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_post(self, url, json=None, headers=None, **_):
+        captured["url"] = url
+        captured["body"] = json
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{
+                    "message": {
+                        "tool_calls": [{
+                            "id": "x",
+                            "type": "function",
+                            "function": {
+                                "name": "submit_review",
+                                "arguments": json_module.dumps({"is_bug": False, "summary": "ok"}),
+                            },
+                        }]
+                    }
+                }]
+            },
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    out = await call_with_function(
+        LLMCall(
+            model="gpt-4o-2024-11-20",
+            temperature=0.5,
+            api_key="sk-test",
+            prompt="judge",
+        ),
+        function_spec={
+            "type": "function",
+            "function": {
+                "name": "submit_review",
+                "description": "judge",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "is_bug": {"type": "boolean"},
+                        "summary": {"type": "string"},
+                    },
+                    "required": ["is_bug", "summary"],
+                },
+            },
+        },
+    )
+    assert out == {"is_bug": False, "summary": "ok"}
+    assert captured["url"].endswith("/v1/chat/completions")
