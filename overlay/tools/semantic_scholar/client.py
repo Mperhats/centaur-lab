@@ -1,25 +1,11 @@
-"""Semantic Scholar Graph API client.
-
-Reference: https://api.semanticscholar.org/api-docs/graph
-
-The Graph API is callable anonymously (heavily rate-limited) or with an
-``x-api-key`` for higher quotas. We send the header only when the secret is
-set so anonymous calls don't accidentally hit a 401 on a stale placeholder.
-
-In addition to the live Graph API helpers (``search_papers``,
-``get_paper``, ``get_references``), this module exposes a hybrid
-``search`` method that consults already-indexed papers in
-``company_context_documents`` before topping up via the live API. The
-indexed-lane helpers below are ported from
-``.centaur/tools/productivity/company_context/client.py`` — see the
-"keep in sync" note above them.
-"""
+"""Semantic Scholar Graph API client with hybrid indexed/live search and research-brief generation."""
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import re
 import time
@@ -37,6 +23,8 @@ from shared.paper_document import (
     build_paper_document,
     upsert_document,
 )
+
+log = logging.getLogger(__name__)
 
 DEFAULT_PAPER_FIELDS = "title,authors,year,abstract,citationCount,url,openAccessPdf"
 DEFAULT_REFERENCE_FIELDS = "title,authors,year,citationCount,url"
@@ -430,7 +418,16 @@ def _build_brief_document(
 
 
 class SemanticScholarClient:
-    """Search papers, fetch metadata, and walk the citation graph."""
+    """Search papers, fetch metadata, walk the citation graph, and build research briefs.
+
+    Wraps the Semantic Scholar Graph API
+    (https://api.semanticscholar.org/api-docs/graph), which is callable
+    anonymously (heavily rate-limited) or with an ``x-api-key`` for
+    higher quotas — the header is sent only when the secret is set so
+    anonymous calls don't accidentally hit a 401 on a stale placeholder.
+    Exposes a hybrid ``search`` that consults already-indexed papers in
+    ``company_context_documents`` before topping up via the live API.
+    """
 
     BASE_URL = "https://api.semanticscholar.org/graph/v1"
 
@@ -722,6 +719,7 @@ class SemanticScholarClient:
                 )
             )
         except Exception as exc:
+            log.warning("semantic_scholar search failed", exc_info=True)
             return {"status": "error", "error": str(exc)}
 
     async def _search_async(
@@ -809,6 +807,7 @@ class SemanticScholarClient:
                         continue
                     live_results.append(_live_paper_result(paper))
             except Exception as exc:
+                log.warning("semantic_scholar live api error", exc_info=True)
                 live_error = str(exc)
 
             return {
@@ -907,6 +906,7 @@ class SemanticScholarClient:
                 )
             )
         except Exception as exc:
+            log.warning("semantic_scholar research_brief failed", exc_info=True)
             return {"status": "error", "error": str(exc)}
 
     async def _research_brief_async(
@@ -995,5 +995,5 @@ class SemanticScholarClient:
 
 
 def _client() -> SemanticScholarClient:
-    """Factory the Centaur tool loader calls to instantiate the tool."""
+    """Factory for tool loader."""
     return SemanticScholarClient()

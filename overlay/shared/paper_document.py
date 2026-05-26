@@ -179,6 +179,9 @@ async def upsert_document(
     effective_parent = parent_document_id if parent_document_id is not None else document.get(
         "parent_document_id"
     )
+    # OVERLAY: compound hash (intrinsic + effective_parent) — diverges from
+    # upstream's raw intrinsic-hash convention to make re-parenting trigger
+    # UPDATE even when content is unchanged. See function docstring for why.
     effective_hash = _content_hash(document["content_hash"], effective_parent)
 
     existing_hash = await pool.fetchval(
