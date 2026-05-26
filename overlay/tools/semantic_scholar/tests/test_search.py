@@ -137,10 +137,19 @@ def test_search_handles_api_failure(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_search_does_not_require_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``search()`` is read-only against S2 — no DB plumbing involved.
+
+    The ``database_url`` kwarg was removed from the constructor when the
+    persistence-adjacent methods (``research_brief`` / ``archive_paper``)
+    were converted to return projection bundles instead of opening their
+    own pool. Sentinel test guarding the read-only contract: a client
+    instantiated with no DB envvars and no constructor arg still
+    services ``search()`` happily.
+    """
     monkeypatch.delenv("DATABASE_URL", raising=False)
     _install_search_papers(monkeypatch, [_live_paper("p1")])
 
-    client = SemanticScholarClient(api_key="", database_url="")
+    client = SemanticScholarClient(api_key="")
     result = client.search("hello")
 
     assert result["status"] == "ok"

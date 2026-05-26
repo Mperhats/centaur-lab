@@ -178,12 +178,12 @@ def _render_research_brief_summary(query: str, result: dict) -> None:
     table.add_column("Field", style="cyan")
     table.add_column("Value", style="white")
     table.add_row("status", str(result.get("status", "")))
-    table.add_row("brief_document_id", str(result.get("brief_document_id", "")))
-    table.add_row("brief_action", str(result.get("brief_action", "")))
+    brief_doc = result.get("brief_doc") or {}
+    table.add_row("brief_document_id", str(brief_doc.get("document_id", "")))
     table.add_row("results_count", str(result.get("results_count", 0)))
-    table.add_row("papers_inserted", str(result.get("papers_inserted", 0)))
-    table.add_row("papers_updated", str(result.get("papers_updated", 0)))
-    table.add_row("papers_noop", str(result.get("papers_noop", 0)))
+    table.add_row("paper_docs", str(len(result.get("paper_docs") or [])))
+    table.add_row("limit", str(result.get("limit", "")))
+    table.add_row("year_from", str(result.get("year_from", "")))
     console.print(table)
 
 
@@ -202,16 +202,16 @@ def research_brief_cmd(
     json_output: bool = typer.Option(False, "--json", help="Print the full result dict as JSON."),
     pretty: bool = typer.Option(False, "--pretty", help="Print only the rendered Markdown brief."),
 ) -> None:
-    """Build and persist a research brief on a topic.
+    """Build a research brief and print the projection bundle.
 
-    Calls SemanticScholarClient.research_brief, which searches Semantic
-    Scholar, renders a Markdown lit review, and writes the brief plus
-    its citing papers to company_context_documents for future RAG
-    retrieval. Idempotent on (query, year_from) — re-running with the
-    same inputs updates the existing rows in place.
+    Calls ``SemanticScholarClient.research_brief``, which searches
+    Semantic Scholar, renders a Markdown lit review, and projects the
+    brief plus its citing papers into ``company_context_documents`` row
+    dicts. This command does NOT persist — run the ``research_brief``
+    workflow if you need rows in the database.
     """
     # Mutual exclusion: ``--pretty`` strips everything but the markdown,
-    # ``--json`` prints the full result dict — they describe two different
+    # ``--json`` prints the full bundle — they describe two different
     # output modes, so accepting both would silently let one win and mask
     # the operator's intent. Mirror upstream's deep-research pattern of
     # explicit single-flag selection.
@@ -222,11 +222,6 @@ def research_brief_cmd(
     result = asyncio.run(client.research_brief(query=query, limit=limit, year_from=year_from))
 
     if result.get("status") == "error":
-        # The tool method's error envelope is the canonical place for
-        # operator-actionable messages (empty query, missing DATABASE_URL,
-        # S2 outage). Surface it verbatim and exit non-zero so callers
-        # piping through ``glow`` or scripting around the CLI can branch
-        # on exit code instead of parsing stdout.
         console.print(f"[red]research_brief failed:[/] {result.get('error', '')}")
         raise typer.Exit(1)
 
@@ -239,7 +234,7 @@ def research_brief_cmd(
         return
 
     if json_output:
-        print(json.dumps(result, indent=2))
+        print(json.dumps(result, indent=2, default=str))
         return
 
     _render_research_brief_summary(query, result)
@@ -254,26 +249,26 @@ def archive_cmd(
         help="Override PDF URL (defaults to openAccessPdf.url with arxiv fallback).",
     ),
     json_output: bool = typer.Option(
-        False, "--json", help="Emit raw JSON instead of a summary table."
+        False, "--json", help="Emit the raw bundle as JSON instead of a summary."
     ),
 ) -> None:
-    """Download, parse, and archive a paper PDF into paper_archives + company_context_documents.
+    """Download, parse, and project a paper PDF into row-shaped dicts.
 
-    Requires DATABASE_URL to point at a Centaur DB with the
-    20260526000001_add_paper_archives migration applied. ``just db::port-forward``
-    plus ``just db::fetch-secret`` gives you a local DSN.
+    Calls ``SemanticScholarClient.archive_paper``, which fetches the
+    PDF, parses it, and returns ``paper_doc`` / ``fulltext_doc`` /
+    ``archive_row`` dicts. This command does NOT persist — run the
+    ``archive_papers`` workflow if you need rows in the database.
     """
     client = _make_client()
     result = asyncio.run(client.archive_paper(paper_id, source_url=source_url))
 
     if json_output:
-        print(json.dumps(result, indent=2))
+        print(json.dumps(result, indent=2, default=str))
         return
 
     status = str(result.get("status", "unknown"))
     color_for_status = {
-        "completed": "green",
-        "noop": "yellow",
+        "ok": "green",
         "skipped": "yellow",
         "error": "red",
     }
@@ -285,11 +280,8 @@ def archive_cmd(
         "parser_used",
         "pdf_sha256",
         "size_bytes",
-        "paper_document_id",
-        "paper_action",
-        "fulltext_document_id",
-        "fulltext_action",
-        "archive_action",
+        "mime_type",
+        "stage",
         "reason",
         "error",
     ):

@@ -1,10 +1,11 @@
 """Unit tests for ``SemanticScholarClient.research_brief``.
 
-Stubs asyncpg and the S2 search call — no network or DB I/O. Shared
-mocks live in ``centaur_lab.testing``. Real-DB persistence (rows
-landing, SQL-level idempotency, no-results brief-only path) is covered
-by ``tests/integration/test_research_brief_integration.py`` and
-intentionally NOT duplicated here.
+The method is now pure with respect to Postgres — it searches Semantic
+Scholar, renders a Markdown brief, projects each paper into a
+``company_context_documents`` row dict, and returns the bundle. No
+asyncpg, no pool. Persistence-level idempotency and parent linkage
+across real rows is the workflow handler's job; that's covered in
+``overlay/workflows/tests/test_research_brief.py``.
 """
 
 from __future__ import annotations
@@ -15,24 +16,12 @@ from typing import Any
 import pytest
 from semanticscholar.Paper import Paper
 
-from centaur_lab.testing import (
-    EXECUTE_ARG_INDEX,
-    MockAsyncpgConn,
-    install_mock_conn,
-)
 from semantic_scholar.client import SemanticScholarClient
 
 
 def _run_brief(client: SemanticScholarClient, *args: Any, **kwargs: Any) -> dict[str, Any]:
-    """Drive the now-async ``research_brief`` from a sync test."""
+    """Drive the async ``research_brief`` from a sync test."""
     return asyncio.run(client.research_brief(*args, **kwargs))
-
-
-def _install_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DATABASE_URL", "postgres://test/db")
-    monkeypatch.setattr(
-        "semantic_scholar.client.secret", lambda _k, default="": default, raising=True
-    )
 
 
 def _install_search_papers(
@@ -52,34 +41,6 @@ def _install_search_papers(
 
     monkeypatch.setattr(SemanticScholarClient, "search_papers", _search_papers, raising=True)
     return calls
-
-
-class MetricsRecorder:
-    """Captures ``observe_document_size`` + ``record_document_change`` calls.
-
-    Matches the same-named helper in ``workflows/tests/test_save_papers.py``
-    so both test trees use a single naming convention for file-local test
-    doubles (no leading underscore — these aren't module API).
-    """
-
-    def __init__(self) -> None:
-        self.observe_calls: list[dict[str, Any]] = []
-        self.change_calls: list[tuple[dict[str, Any], str]] = []
-
-    def observe(self, document: dict[str, Any]) -> None:
-        self.observe_calls.append(document)
-
-    def record(self, document: dict[str, Any], action: str) -> None:
-        self.change_calls.append((document, action))
-
-
-def _install_metrics(monkeypatch: pytest.MonkeyPatch) -> MetricsRecorder:
-    import centaur_lab.brief as brief_module
-
-    recorder = MetricsRecorder()
-    monkeypatch.setattr(brief_module, "observe_document_size", recorder.observe, raising=True)
-    monkeypatch.setattr(brief_module, "record_document_change", recorder.record, raising=True)
-    return recorder
 
 
 def _paper(paper_id: str) -> Paper:
@@ -105,44 +66,25 @@ def _client() -> SemanticScholarClient:
 
 def test_research_brief_empty_query_returns_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """Whitespace-only query short-circuits before any I/O."""
-    _install_database_url(monkeypatch)
-    connect_calls = install_mock_conn(monkeypatch, MockAsyncpgConn())
     search_calls = _install_search_papers(monkeypatch, [])
 
     result = _run_brief(_client(), "   ")
 
-    assert result == {"status": "error", "error": "query cannot be empty"}
-    assert connect_calls == []
+    assert result == {"status": "error", "query": "   ", "error": "query cannot be empty"}
     assert search_calls == []
 
 
 def test_research_brief_non_positive_limit_returns_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """``limit <= 0`` short-circuits before any I/O."""
-    _install_database_url(monkeypatch)
-    connect_calls = install_mock_conn(monkeypatch, MockAsyncpgConn())
     search_calls = _install_search_papers(monkeypatch, [])
 
     result = _run_brief(_client(), "anything", limit=0)
 
-    assert result == {"status": "error", "error": "limit must be positive"}
-    assert connect_calls == []
-    assert search_calls == []
-
-
-def test_research_brief_no_database_url_returns_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Missing ``DATABASE_URL`` returns the env error envelope and skips I/O."""
-    monkeypatch.delenv("DATABASE_URL", raising=False)
-    monkeypatch.setattr("semantic_scholar.client.secret", lambda _key, default="": "", raising=True)
-    connect_calls = install_mock_conn(monkeypatch, MockAsyncpgConn())
-    search_calls = _install_search_papers(monkeypatch, [])
-
-    result = _run_brief(_client(), "anything")
-
     assert result == {
         "status": "error",
-        "error": "DATABASE_URL is required for semantic_scholar.research_brief",
+        "query": "anything",
+        "error": "limit must be positive",
     }
-    assert connect_calls == []
     assert search_calls == []
 
 
@@ -150,124 +92,119 @@ def test_research_brief_clamps_limit_above_max(monkeypatch: pytest.MonkeyPatch) 
     """``limit`` is clamped to ``MAX_RESEARCH_BRIEF_LIMIT`` before reaching S2.
 
     The workflow's input schema bounds limit to 1..100, but the client clamps
-    further to 1..``MAX_RESEARCH_BRIEF_LIMIT`` (currently 20) to keep the
-    S2 fan-out and per-brief LLM/index budget bounded. Asserts the *clamped*
-    value reaches ``search_papers``, not the raw user input.
+    further to keep the S2 fan-out and per-brief LLM/index budget bounded.
+    Asserts the *clamped* value reaches ``search_papers``, not the raw user
+    input.
     """
     from semantic_scholar.client import MAX_RESEARCH_BRIEF_LIMIT
 
-    _install_database_url(monkeypatch)
-    install_mock_conn(monkeypatch, MockAsyncpgConn())
     search_calls = _install_search_papers(monkeypatch, [])
 
     result = _run_brief(_client(), "anything", limit=100)
 
-    assert result["status"] == "completed"
+    assert result["status"] == "ok"
+    assert result["limit"] == MAX_RESEARCH_BRIEF_LIMIT
     assert search_calls == [
         {"query": "anything", "limit": MAX_RESEARCH_BRIEF_LIMIT, "year_from": None}
     ]
 
 
-def test_research_brief_persists_brief_and_papers_with_parent_link(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Success path: brief upserts, every paper upserts with parent_document_id linked."""
-    _install_database_url(monkeypatch)
-    mock = MockAsyncpgConn()
-    install_mock_conn(monkeypatch, mock)
+def test_research_brief_returns_bundle_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Success path: bundle has brief_doc + paper_docs with parent linkage."""
     papers = [_paper("p1"), _paper("p2"), _paper("p3")]
     search_calls = _install_search_papers(monkeypatch, papers)
 
     result = _run_brief(_client(), "active inference", limit=3, year_from=2020)
 
-    assert result["status"] == "completed"
-    brief_document_id = result["brief_document_id"]
-    assert brief_document_id
+    assert result["status"] == "ok"
+    assert result["query"] == "active inference"
+    assert result["year_from"] == 2020
+    assert result["limit"] == 3
+    assert result["results_count"] == 3
+    assert isinstance(result["markdown"], str) and result["markdown"]
+
+    brief_doc = result["brief_doc"]
+    assert brief_doc["source_type"] == "research_brief"
+    assert brief_doc["document_id"].startswith("semantic_scholar:research_brief:")
+    assert brief_doc["parent_document_id"] is None
+
+    paper_docs = result["paper_docs"]
+    assert len(paper_docs) == 3
+    for paper_doc in paper_docs:
+        assert paper_doc["source_type"] == "paper"
+        assert paper_doc["parent_document_id"] == brief_doc["document_id"]
 
     assert search_calls == [{"query": "active inference", "limit": 3, "year_from": 2020}]
 
-    # 1 brief + 3 paper upserts = 4 execute calls.
-    assert len(mock.execute_calls) == 4
-    assert mock.execute_calls[0][1][EXECUTE_ARG_INDEX["document_id"]] == brief_document_id
-    parent_idx = EXECUTE_ARG_INDEX["parent_document_id"]
-    for paper_call in mock.execute_calls[1:]:
-        assert paper_call[1][parent_idx] == brief_document_id
 
-    total = result["papers_inserted"] + result["papers_updated"] + result["papers_noop"]
-    assert total == len(papers)
-    assert mock.close_count == 1
+def test_research_brief_no_results_returns_empty_paper_docs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A query with zero results still produces a brief — no paper rows."""
+    _install_search_papers(monkeypatch, [])
+
+    result = _run_brief(_client(), "no matches please")
+
+    assert result["status"] == "ok"
+    assert result["results_count"] == 0
+    assert result["paper_docs"] == []
+    assert result["brief_doc"]["metadata"]["results_count"] == 0
 
 
-def test_research_brief_search_failure_returns_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """S2 failure short-circuits before opening a DB connection — no metrics, no writes."""
-    _install_database_url(monkeypatch)
-    mock = MockAsyncpgConn()
-    connect_calls = install_mock_conn(monkeypatch, mock)
-    _install_search_papers(monkeypatch, exc=RuntimeError("S2 down"))
-    recorder = _install_metrics(monkeypatch)
+def test_research_brief_skips_papers_missing_paperId(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Papers without ``paperId`` are dropped from ``paper_docs`` (no stable PK).
+
+    The render-side helper still walks every paper for the Markdown
+    body, so the bad paper needs the full wire shape minus ``paperId``
+    — only the projection step is expected to drop it.
+    """
+    good = _paper("p1")
+    bad_dict = {
+        "title": "no id",
+        "authors": [],
+        "year": 2024,
+        "abstract": "",
+        "citationCount": 0,
+        "url": "https://example.invalid/no-id",
+        "openAccessPdf": None,
+        "venue": "",
+        "externalIds": {},
+    }
+    bad = Paper(bad_dict)
+    _install_search_papers(monkeypatch, [good, bad])
 
     result = _run_brief(_client(), "anything")
 
-    assert result == {"status": "error", "error": "S2 down"}
-    # ``research_brief`` runs the S2 search BEFORE ``asyncpg.connect``; when
-    # it raises, no connection is opened and no metrics are emitted.
-    assert connect_calls == []
-    assert mock.execute_calls == []
-    assert recorder.observe_calls == []
-    assert recorder.change_calls == []
+    assert result["status"] == "ok"
+    assert len(result["paper_docs"]) == 1
+    assert result["paper_docs"][0]["source_document_id"] == "p1"
 
 
-def test_research_brief_idempotent_rerun_returns_all_noop(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Re-running with identical inputs yields ``brief_action='noop'`` and every paper noop."""
-    _install_database_url(monkeypatch)
-    papers = [_paper("p1"), _paper("p2")]
+def test_research_brief_search_failure_returns_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """S2 failure surfaces as a structured error envelope; never raises."""
+    _install_search_papers(monkeypatch, exc=RuntimeError("S2 down"))
 
-    # Pass 1: capture the document_id → effective content_hash map the
-    # production code writes. Without a real DB to read back from, we
-    # mine execute_calls and feed those hashes to a second mock so the
-    # upsert short-circuits on rerun.
-    discover_mock = MockAsyncpgConn()
-    install_mock_conn(monkeypatch, discover_mock)
-    _install_search_papers(monkeypatch, papers)
-    first = _run_brief(_client(), "active inference")
-    assert first["status"] == "completed"
-    assert first["brief_action"] == "inserted"
+    result = _run_brief(_client(), "anything")
 
-    hashes: dict[str, str] = {
-        str(args[EXECUTE_ARG_INDEX["document_id"]]): str(args[EXECUTE_ARG_INDEX["content_hash"]])
-        for _sql, args in discover_mock.execute_calls
-    }
-
-    # Pass 2: preload fetchval so every upsert sees a matching existing
-    # hash and returns "noop" without ever calling execute.
-    rerun_mock = MockAsyncpgConn(fetchval_for_doc_id=hashes)
-    install_mock_conn(monkeypatch, rerun_mock)
-    _install_search_papers(monkeypatch, papers)
-    second = _run_brief(_client(), "active inference")
-
-    assert second["status"] == "completed"
-    assert second["brief_action"] == "noop"
-    assert second["papers_noop"] == len(papers)
-    assert second["papers_inserted"] == 0
-    assert second["papers_updated"] == 0
-    assert rerun_mock.execute_calls == []
+    assert result == {"status": "error", "query": "anything", "error": "S2 down"}
 
 
-def test_research_brief_emits_metrics_for_brief_and_papers(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``observe_document_size`` + ``record_document_change`` fire once per upserted doc."""
-    _install_database_url(monkeypatch)
-    install_mock_conn(monkeypatch, MockAsyncpgConn())
-    papers = [_paper("p1"), _paper("p2")]
-    _install_search_papers(monkeypatch, papers)
-    recorder = _install_metrics(monkeypatch)
+def test_research_brief_does_not_touch_asyncpg(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The bundle method must never reach for asyncpg — the workflow owns the pool.
 
-    result = _run_brief(_client(), "active inference")
+    Sentinel test for the tool-vs-workflow boundary: if a future refactor
+    re-introduces ``asyncpg.connect`` inside ``research_brief``, this fails
+    loudly. The shim raises rather than mocking so any code path that tries
+    to open a connection blows up the test.
+    """
+    import asyncpg
 
-    assert result["status"] == "completed"
-    # 1 brief + 2 papers = 3 of each metric call, brief recorded first.
-    assert len(recorder.observe_calls) == 3
-    assert len(recorder.change_calls) == 3
-    source_types = [doc["source_type"] for doc, _action in recorder.change_calls]
-    assert source_types == ["research_brief", "paper", "paper"]
+    def _explode(*_args, **_kwargs):
+        raise AssertionError("research_brief must not call asyncpg.connect")
+
+    monkeypatch.setattr(asyncpg, "connect", _explode)
+    _install_search_papers(monkeypatch, [_paper("p1")])
+
+    result = _run_brief(_client(), "anything")
+
+    assert result["status"] == "ok"

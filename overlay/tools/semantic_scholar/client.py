@@ -7,16 +7,15 @@ Three sync network methods that delegate to the upstream
 with the ``{"status": ...}`` envelope contract the Slack/sandbox tool
 runtime depends on.
 
-Persistence work (``research_brief``, ``archive_paper``) is delegated
-to module-level helpers in ``centaur_lab``; this client opens a
-short-lived asyncpg pool when invoked directly by an agent. The
-``archive_papers`` and ``research_brief`` workflow handlers skip the
-tool's persistence methods and call the same helpers directly with the
-workflow's own pool, so the tool never has to bridge between
-"caller-owns-pool" and "tool-opens-pool" — the workflow takes the
-former path, the agent takes the latter.
+This module is read-only with respect to Postgres. ``research_brief``
+and ``archive_paper`` return *projection bundles* — dicts shaped for
+the inlined ``_upsert_document`` / ``_upsert_paper_archive`` helpers in
+each workflow handler — and never open a pool of their own. Workflow
+handlers in ``overlay/workflows/`` own all DB writes; the agent-facing
+contract is "tool returns the rows, caller persists them".
 
-The typed objects returned to callers are the upstream library's
+The typed objects returned by ``search_papers`` / ``get_paper`` /
+``get_references`` are the upstream library's
 ``semanticscholar.Paper.Paper``. Wire-shape consumers (``search``
 envelope, CLI ``--json``) recover the original JSON dict via
 ``Paper.raw_data``; ``Paper(data)`` stores ``data`` by reference so a
@@ -27,17 +26,29 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
-from typing import Any
+from typing import Any, Final
 
-import asyncpg
+from pdf.fetch.http import (
+    PdfFetchError,
+    PdfHttpError,
+    PdfNetworkError,
+    PdfNotPdfError,
+    PdfTooLargeError,
+    download_pdf,
+)
+from pdf.parse.markdown import (
+    PdfInsufficientTextError,
+    PdfParseError,
+    parse_pdf,
+)
+from pdf.utils import compute_pdf_sha256
 from semanticscholar import SemanticScholar
 from semanticscholar.Paper import Paper
 from semanticscholar.SemanticScholarException import SemanticScholarException
 
-from centaur_lab.brief import persist_research_brief_from_papers
-from centaur_lab.paper_archive import archive_paper_to_pool
 from centaur_sdk import secret
+from semantic_scholar import projections
+from semantic_scholar.utils import derive_pdf_url
 
 log = logging.getLogger(__name__)
 
@@ -69,36 +80,40 @@ MAX_SEARCH_LIMIT = 50
 DEFAULT_RESEARCH_BRIEF_LIMIT = 5
 MAX_RESEARCH_BRIEF_LIMIT = 20
 
+# Archive-pipeline knobs. Held on the client (not the workflow) so the
+# agent-facing ``archive_paper`` method ships sensible defaults without
+# forcing every caller to repeat the constants; matches the previous
+# values in ``centaur_lab/paper_archive.py``.
+MAX_PDF_BYTES: Final[int] = 50 * 1024 * 1024
+PDF_DOWNLOAD_TIMEOUT_S: Final[float] = 60.0
+PDF_USER_AGENT: Final[str] = "centaur-scientist/0.1 (paper-archive; +https://centaur.run)"
+ARCHIVE_PARSER_MIN_SIZE: Final[int] = 100
+
 
 def _clamp(value: int, *, minimum: int, maximum: int) -> int:
     return max(minimum, min(int(value), maximum))
 
 
 class SemanticScholarClient:
-    """Search papers, fetch metadata, walk the citation graph, build research briefs.
+    """Search papers, fetch metadata, walk the citation graph, build research-brief bundles.
 
     Wraps the upstream ``semanticscholar`` library against the Graph
     API. Anonymous calls work (heavy rate limits); pass
     ``SEMANTIC_SCHOLAR_API_KEY`` via the secret sidecar for production
     quotas. The library handles HTTP, retries, and typed-object parsing.
+
+    The two persistence-adjacent methods (``research_brief``,
+    ``archive_paper``) return projection bundles — pure dicts shaped for
+    the workflow-owned upsert SQL. They never open a pool of their own.
     """
 
-    def __init__(
-        self,
-        api_key: str | None = None,
-        timeout: float = 30.0,
-        database_url: str | None = None,
-    ) -> None:
+    def __init__(self, api_key: str | None = None, timeout: float = 30.0) -> None:
         # API key is resolved lazily on first ``self.client`` access; the
         # tool manager's ``_collect_methods()`` pass instantiates this
         # class while ``ToolContext.secrets`` is still empty.
         self._api_key = api_key
         self._timeout = timeout
         self._client: SemanticScholar | None = None
-        env_database_url = os.getenv("DATABASE_URL")  # noqa: TID251
-        self._database_url = (
-            database_url or env_database_url or secret("DATABASE_URL", default="")
-        ).strip()
 
     def _get_api_key(self) -> str | None:
         if self._api_key:
@@ -220,28 +235,42 @@ class SemanticScholarClient:
         limit: int = DEFAULT_RESEARCH_BRIEF_LIMIT,
         year_from: int | None = None,
     ) -> dict[str, Any]:
-        """Build and persist a research brief on a topic.
+        """Search Semantic Scholar, render a Markdown brief, project to DB-row dicts.
 
-        Opens a short-lived asyncpg pool, searches Semantic Scholar,
-        renders a Markdown lit review, and writes the brief plus its
-        citing papers to ``company_context_documents``. Idempotent on
-        ``(query, year_from)`` via :func:`brief.brief_id_for`.
+        Returns a bundle the workflow handler persists; never opens a
+        pool or writes to Postgres. Idempotent inputs produce identical
+        bundles — the workflow's ``_upsert_document`` short-circuits on
+        unchanged ``content_hash``.
 
-        Never raises — returns ``{"status": "error", ...}`` on failure.
-        ``limit`` above the per-call ceiling is clamped, not rejected.
-        Workflow callers should skip this and call
-        :func:`centaur_lab.brief.persist_research_brief_from_papers`
-        directly with their own pool.
+        Bundle shape on success::
+
+            {
+                "status": "ok",
+                "query": str,
+                "year_from": int | None,
+                "limit": int,
+                "results_count": int,
+                "markdown": str,
+                "brief_doc": dict,          # company_context_documents row
+                "paper_docs": list[dict],   # each parent_document_id ==
+                                            # brief_doc["document_id"]
+            }
+
+        On error::
+
+            {"status": "error", "query": ..., "error": "..."}
+
+        Never raises. ``limit`` above
+        :data:`MAX_RESEARCH_BRIEF_LIMIT` is clamped, not rejected.
         """
         normalized_query = query.strip() if query else ""
         if not normalized_query:
-            return {"status": "error", "error": "query cannot be empty"}
+            return {"status": "error", "query": query, "error": "query cannot be empty"}
         if limit <= 0:
-            return {"status": "error", "error": "limit must be positive"}
-        if not self._database_url:
             return {
                 "status": "error",
-                "error": "DATABASE_URL is required for semantic_scholar.research_brief",
+                "query": normalized_query,
+                "error": "limit must be positive",
             }
 
         clamped_limit = _clamp(limit, minimum=1, maximum=MAX_RESEARCH_BRIEF_LIMIT)
@@ -249,25 +278,46 @@ class SemanticScholarClient:
         try:
             papers = await asyncio.to_thread(
                 self.search_papers,
-                query=normalized_query,
+                normalized_query,
                 limit=clamped_limit,
                 year_from=year_from,
             )
-            conn = await asyncpg.connect(self._database_url, command_timeout=60)
-            try:
-                result = await persist_research_brief_from_papers(
-                    conn,
-                    query=normalized_query,
-                    papers=papers,
-                    year_from=year_from,
-                    limit=clamped_limit,
-                )
-            finally:
-                await conn.close()
-            return {"status": "completed", **result}
         except Exception as exc:
-            log.warning("semantic_scholar research_brief failed", exc_info=True)
-            return {"status": "error", "error": str(exc)}
+            log.warning("semantic_scholar research_brief search failed", exc_info=True)
+            return {"status": "error", "query": normalized_query, "error": str(exc)}
+
+        markdown = projections.render_brief(normalized_query, year_from, papers)
+        brief_doc = projections.build_brief_document(
+            normalized_query, year_from, clamped_limit, papers, markdown
+        )
+
+        paper_docs: list[dict[str, Any]] = []
+        for paper in papers:
+            try:
+                paper_docs.append(
+                    projections.build_paper_document(
+                        paper,
+                        query=normalized_query,
+                        parent_document_id=brief_doc["document_id"],
+                    )
+                )
+            except ValueError:
+                # Mirrors the pre-bundle behaviour: a paper missing paperId
+                # cannot be projected (no stable primary key), so we drop
+                # it from the bundle and let the brief itself carry the
+                # un-projectable paper's metadata via ``paper_ids``.
+                continue
+
+        return {
+            "status": "ok",
+            "query": normalized_query,
+            "year_from": year_from,
+            "limit": clamped_limit,
+            "results_count": len(papers),
+            "markdown": markdown,
+            "brief_doc": brief_doc,
+            "paper_docs": paper_docs,
+        }
 
     async def archive_paper(
         self,
@@ -275,30 +325,139 @@ class SemanticScholarClient:
         *,
         source_url: str | None = None,
     ) -> dict[str, Any]:
-        """Download, parse, and persist a paper's PDF.
+        """Fetch metadata + PDF for a paper, project to DB-row dicts. No DB.
 
-        Opens a short-lived asyncpg pool and runs the archive pipeline
-        via :func:`centaur_lab.paper_archive.archive_paper_to_pool`.
-        Idempotent on ``(paper_id, pdf_sha256)``. Never raises; returns
-        ``{"status": "completed" | "skipped" | "noop" | "error", ...}``.
-        Workflow callers with their own pool should call
-        ``archive_paper_to_pool`` directly.
+        Returns a bundle the caller persists. Never raises.
+
+        Bundle shape on success::
+
+            {
+                "status": "ok",
+                "paper_id": str,
+                "pdf_sha256": str,
+                "source_url": str,
+                "size_bytes": int,
+                "mime_type": str,
+                "parser_used": str,
+                "paper_doc": dict,          # company_context_documents row
+                "fulltext_doc": dict,       # company_context_documents row
+                "archive_row": dict,        # paper_archives row
+            }
+
+        Skipped / error shapes::
+
+            {"status": "skipped", "paper_id", "reason": "no_pdf_url"}
+            {"status": "skipped", "paper_id", "source_url",
+             "reason": "too_large", "max_bytes", "received_bytes"}
+            {"status": "error",   "paper_id", "stage": "metadata"|"fetch"|"parse",
+             "reason": "<code>", "source_url"?: str, "error": str, ...}
         """
+        normalized_id = (paper_id or "").strip()
+        if not normalized_id:
+            return {
+                "status": "error",
+                "paper_id": paper_id,
+                "stage": "metadata",
+                "reason": "empty_paper_id",
+                "error": "paper_id cannot be empty",
+            }
+
         try:
-            if not self._database_url:
-                return {
-                    "status": "error",
-                    "paper_id": paper_id,
-                    "error": "DATABASE_URL is required for semantic_scholar.archive_paper",
-                }
-            conn = await asyncpg.connect(self._database_url, command_timeout=60)
-            try:
-                return await archive_paper_to_pool(self, conn, paper_id, source_url=source_url)
-            finally:
-                await conn.close()
-        except Exception as exc:
-            log.warning("archive_paper_failed", exc_info=True)
-            return {"status": "error", "paper_id": paper_id, "error": str(exc)}
+            paper = await asyncio.to_thread(self.get_paper, normalized_id)
+        except (RuntimeError, ValueError) as exc:
+            return {
+                "status": "error",
+                "paper_id": normalized_id,
+                "stage": "metadata",
+                "reason": "fetch_failed",
+                "error": str(exc),
+            }
+
+        url = source_url or derive_pdf_url(paper)
+        if not url:
+            return {
+                "status": "skipped",
+                "paper_id": normalized_id,
+                "reason": "no_pdf_url",
+            }
+
+        try:
+            data, mime = await asyncio.to_thread(
+                download_pdf,
+                url,
+                timeout=PDF_DOWNLOAD_TIMEOUT_S,
+                max_bytes=MAX_PDF_BYTES,
+                user_agent=PDF_USER_AGENT,
+            )
+        except PdfTooLargeError as exc:
+            return {
+                "status": "skipped",
+                "paper_id": normalized_id,
+                "source_url": url,
+                "reason": "too_large",
+                "max_bytes": exc.max_bytes,
+                "received_bytes": exc.received_bytes,
+            }
+        except (PdfHttpError, PdfNetworkError, PdfNotPdfError, PdfFetchError) as exc:
+            return {
+                "status": "error",
+                "paper_id": normalized_id,
+                "source_url": url,
+                "stage": "fetch",
+                "reason": exc.reason,
+                "error": str(exc),
+            }
+
+        pdf_sha256 = compute_pdf_sha256(data)
+
+        try:
+            parsed_text, parser_used = await asyncio.to_thread(
+                parse_pdf,
+                data,
+                min_size=ARCHIVE_PARSER_MIN_SIZE,
+            )
+        except (PdfInsufficientTextError, PdfParseError) as exc:
+            return {
+                "status": "error",
+                "paper_id": normalized_id,
+                "source_url": url,
+                "stage": "parse",
+                "reason": exc.reason,
+                "error": str(exc),
+            }
+
+        paper_doc = projections.build_paper_document(paper)
+        fulltext_doc = projections.build_fulltext_document(
+            paper,
+            parsed_text=parsed_text,
+            parser_used=parser_used,
+            truncated=False,
+            pdf_sha256=pdf_sha256,
+            source_url=url,
+        )
+        archive_row = projections.build_paper_archive_row(
+            paper,
+            data=data,
+            mime=mime,
+            pdf_sha256=pdf_sha256,
+            parsed_text=parsed_text,
+            parser_used=parser_used,
+            source_url=url,
+            truncated=False,
+        )
+
+        return {
+            "status": "ok",
+            "paper_id": normalized_id,
+            "pdf_sha256": pdf_sha256,
+            "source_url": url,
+            "size_bytes": len(data),
+            "mime_type": mime,
+            "parser_used": parser_used,
+            "paper_doc": paper_doc,
+            "fulltext_doc": fulltext_doc,
+            "archive_row": archive_row,
+        }
 
 
 def _client() -> SemanticScholarClient:
