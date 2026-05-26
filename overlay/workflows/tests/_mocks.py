@@ -39,13 +39,14 @@ EXECUTE_ARG_INDEX: dict[str, int] = {
 
 
 class MockPool:
-    """Async-pool mock recording fetchval/fetchrow/execute calls for assertions.
+    """Async-pool mock recording fetch/fetchval/fetchrow/execute calls for assertions.
 
     Matches the surface of the asyncpg pool that
     ``_paper_document.upsert_document`` actually consumes — a single
     ``fetchval`` (existing content hash lookup) followed by an ``execute``
     (the UPSERT). ``fetchrow`` is also recorded for the
-    ``_bfts_hyperparams.latest_hyperparams`` DAO. All calls are appended to
+    ``_bfts_hyperparams.latest_hyperparams`` DAO, and ``fetch`` for the
+    ``bfts_reflection_nightly`` recent-runs scan. All calls are appended to
     public ``*_calls`` lists so tests can assert on positional arguments via
     ``EXECUTE_ARG_INDEX``.
     """
@@ -56,12 +57,15 @@ class MockPool:
         existing_hash: str | None = None,
         execute_status: str = "INSERT 0 1",
         fetchrow_result: dict[str, Any] | None = None,
+        fetch_result: list[dict[str, Any]] | None = None,
     ) -> None:
         self._existing_hash = existing_hash
         self._execute_status = execute_status
         self._fetchrow_result = fetchrow_result
+        self._fetch_result = fetch_result if fetch_result is not None else []
         self.fetchval_calls: list[tuple[str, tuple[Any, ...]]] = []
         self.fetchrow_calls: list[tuple[str, tuple[Any, ...]]] = []
+        self.fetch_calls: list[tuple[str, tuple[Any, ...]]] = []
         self.execute_calls: list[tuple[str, tuple[Any, ...]]] = []
 
     async def fetchval(self, query: str, *args: Any) -> str | None:
@@ -71,6 +75,10 @@ class MockPool:
     async def fetchrow(self, query: str, *args: Any) -> dict[str, Any] | None:
         self.fetchrow_calls.append((query, args))
         return self._fetchrow_result
+
+    async def fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
+        self.fetch_calls.append((query, args))
+        return self._fetch_result
 
     async def execute(self, query: str, *args: Any) -> str:
         self.execute_calls.append((query, args))

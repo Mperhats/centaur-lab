@@ -26,11 +26,25 @@ DEFAULT_FEEDBACK_MODEL = "claude-sonnet-4-20250514"
 DEFAULT_VLM_MODEL = "claude-sonnet-4-20250514"
 DEFAULT_METRIC_REDUCER = DEFAULT_REDUCER
 
+# Search-policy defaults consumed by the Phase 4c bfts_reflection_nightly
+# workflow as the initial values written into bfts_hyperparams, and by
+# upcoming Phase 4c.4 resolver logic (Input → BFTS_* env → these). The
+# `bfts_root.Input` per-run defaults intentionally remain separate so a
+# single ad-hoc run can override them without going through the table.
+DEFAULT_DEBUG_PROB = 0.5
+DEFAULT_MAX_DEBUG_DEPTH = 3
+DEFAULT_NUM_DRAFTS = 4
+DEFAULT_NUM_WORKERS = 2
+
 ENV_LLM_API_KEY_SECRET = "BFTS_LLM_API_KEY_SECRET"
 ENV_DRAFT_MODEL = "BFTS_DRAFT_MODEL"
 ENV_FEEDBACK_MODEL = "BFTS_FEEDBACK_MODEL"
 ENV_VLM_MODEL = "BFTS_VLM_MODEL"
 ENV_METRIC_REDUCER = "BFTS_METRIC_REDUCER"
+ENV_DEBUG_PROB = "BFTS_DEBUG_PROB"
+ENV_MAX_DEBUG_DEPTH = "BFTS_MAX_DEBUG_DEPTH"
+ENV_NUM_DRAFTS = "BFTS_NUM_DRAFTS"
+ENV_NUM_WORKERS = "BFTS_NUM_WORKERS"
 
 
 @dataclass(frozen=True)
