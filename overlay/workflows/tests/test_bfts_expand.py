@@ -40,6 +40,7 @@ async def test_draft_expansion_calls_in_order() -> None:
         "metric_extract": {"metric_names": []},
         "plot_propose": "import matplotlib",
         "plot_exec": {"term_out": [], "exec_time": 0.1, "exc_type": None, "exc_info": None, "exc_stack": None},
+        "collect_artifacts": [],
     }
     ctx = _RecordingCtx(canned)
     expand_ctx = ExpandContext(
@@ -56,6 +57,7 @@ async def test_draft_expansion_calls_in_order() -> None:
         "metric_extract",
         "plot_propose",
         "plot_exec",
+        "collect_artifacts",
     ]
     assert result["code"] == "print(1)"
     assert result["is_buggy"] is False

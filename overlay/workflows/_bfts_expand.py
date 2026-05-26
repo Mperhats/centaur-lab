@@ -21,6 +21,7 @@ Underscore-prefixed: workflow loader skips it.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 
 from _bfts_llm import LLMCall, call_for_text, call_with_function, extract_code
@@ -195,6 +196,30 @@ async def expand_node(*, ctx: Any, expand_ctx: ExpandContext) -> dict[str, Any]:
         ),
     )
 
+    artifacts = await ctx.step(
+        "collect_artifacts",
+        lambda: ctx.tools.bfts_executor.collect_artifacts(
+            sandbox_id=expand_ctx.sandbox_id,
+            dest_dir=Path(f"/tmp/bfts/{expand_ctx.node_id}"),
+            node_id=expand_ctx.node_id,
+        ),
+    )
+    plot_paths = [
+        str(Path(f"/tmp/bfts/{expand_ctx.node_id}/experiment_{expand_ctx.node_id}") / name)
+        for name in artifacts if name.endswith(".png")
+    ]
+
+    if plot_paths:
+        vlm = await ctx.step(
+            "vlm_analyze",
+            lambda: ctx.tools.bfts_vlm.analyze_plots(
+                plot_paths=plot_paths,
+                task_desc=str(expand_ctx.idea.get("Title", "")),
+            ),
+        )
+    else:
+        vlm = {"is_valid": False, "per_plot_analyses": [], "summary": "no plots produced"}
+
     return {
         "plan": proposed["plan"],
         "code": proposed["code"],
@@ -211,6 +236,9 @@ async def expand_node(*, ctx: Any, expand_ctx: ExpandContext) -> dict[str, Any]:
         "parse_term_out": parse_exec["term_out"],
         "plot_code": plot_code,
         "plot_term_out": plot_exec["term_out"],
+        "is_buggy_plots": not vlm["is_valid"],
+        "plot_analyses": vlm["per_plot_analyses"],
+        "vlm_feedback_summary": vlm["summary"],
     }
 
 
