@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from bfts_executor.network_policy import (
+from tools.bfts_executor.network_policy import (
     POLICY_NAME,
     ensure_sandbox_egress_policy,
 )

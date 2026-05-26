@@ -30,7 +30,7 @@ from typing import Any
 
 import pytest
 
-from semantic_scholar.client import SemanticScholarClient
+from tools.semantic_scholar.client import SemanticScholarClient
 
 
 def _paper(paper_id: str, *, title: str | None = None) -> dict[str, Any]:
@@ -82,7 +82,7 @@ def _set_database_url(monkeypatch: pytest.MonkeyPatch, dsn: str) -> None:
     """
     monkeypatch.setenv("DATABASE_URL", dsn)
     monkeypatch.setattr(
-        "semantic_scholar.client.secret",
+        "tools.semantic_scholar.client.secret",
         lambda _key, default="": default,
     )
 

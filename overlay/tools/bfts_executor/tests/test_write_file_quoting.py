@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from bfts_executor.client import _KubernetesSandboxAPI
+from tools.bfts_executor.client import _KubernetesSandboxAPI
 
 
 @dataclass

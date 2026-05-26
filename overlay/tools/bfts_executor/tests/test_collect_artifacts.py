@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from bfts_executor.client import BFTSExecutor
+from tools.bfts_executor.client import BFTSExecutor
 
 
 class _FakeSandboxAPI:

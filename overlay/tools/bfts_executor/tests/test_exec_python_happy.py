@@ -5,8 +5,8 @@ from dataclasses import dataclass
 
 import pytest
 
-from bfts_executor.client import BFTSExecutor
-from bfts_executor.models import ExecutionResult
+from tools.bfts_executor.client import BFTSExecutor
+from tools.bfts_executor.models import ExecutionResult
 
 
 @dataclass

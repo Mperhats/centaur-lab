@@ -1,7 +1,7 @@
 """Test: ExecutionResult preserves Sakana's wire shape exactly."""
 from __future__ import annotations
 
-from bfts_executor.models import ExecutionResult
+from tools.bfts_executor.models import ExecutionResult
 
 
 def test_execution_result_minimal_construction() -> None:

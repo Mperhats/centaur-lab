@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from bfts_executor.client import _KubernetesSandboxAPI
+from tools.bfts_executor.client import _KubernetesSandboxAPI
 
 
 @pytest.mark.asyncio

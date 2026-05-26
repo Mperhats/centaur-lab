@@ -24,8 +24,8 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from semantic_scholar.cli import app
-from semantic_scholar.client import SemanticScholarClient
+from tools.semantic_scholar.cli import app
+from tools.semantic_scholar.client import SemanticScholarClient
 
 
 def _success_result(*, markdown: str = "# Brief\n\nBody paragraph.") -> dict[str, Any]:

@@ -25,8 +25,8 @@ from typing import Any
 import httpx
 import pytest
 
-import semantic_scholar.client as s2_client
-from semantic_scholar.client import SemanticScholarClient
+import tools.semantic_scholar.client as s2_client
+from tools.semantic_scholar.client import SemanticScholarClient
 
 # ---------------------------------------------------------------------------
 # httpx.AsyncClient stand-in

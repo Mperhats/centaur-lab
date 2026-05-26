@@ -28,8 +28,16 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "strict"
+# ``../..`` is the ``overlay/`` root: it puts the ``tools.*`` namespace
+# package on sys.path so test imports look like ``from
+# tools.semantic_scholar.client import ...`` — byte-identical to how
+# the API pod resolves tools at runtime via the ``tools.*`` namespace
+# bootstrap in ``.centaur/services/api/api/app.py``. Do NOT add ``..``
+# here; that would expose ``semantic_scholar`` and ``pdf`` as bare
+# top-level packages, which is a runtime-vs-test divergence the API
+# pod does not honour and which previously masked
+# ``ModuleNotFoundError`` bugs at deploy time.
 pythonpath = [
-    "..",
     "../..",
     "../../../.centaur",
 ]

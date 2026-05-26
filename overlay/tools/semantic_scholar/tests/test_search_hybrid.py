@@ -29,8 +29,8 @@ from typing import Any
 import httpx
 import pytest
 
-import semantic_scholar.client as s2_client
-from semantic_scholar.client import (
+import tools.semantic_scholar.client as s2_client
+from tools.semantic_scholar.client import (
     BIBTEX_PAPER_FIELDS,
     DEFAULT_PAPER_FIELDS,
     DEFAULT_REFERENCE_FIELDS,

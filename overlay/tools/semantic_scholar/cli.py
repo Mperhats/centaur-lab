@@ -5,9 +5,17 @@ so ``SEMANTIC_SCHOLAR_API_KEY`` (if present) is honored; tool clients
 running inside Centaur read the key via ``secret(...)`` from the manager
 sidecar instead.
 
-Run from this directory:
+Invocation:
 
+    # From this directory (recommended for ad-hoc smoke tests):
     uv run python cli.py search "diffusion models protein design" --limit 5
+
+    # From ``overlay/`` (matches how the API pod imports the module):
+    uv run python -m tools.semantic_scholar.cli search "..." --limit 5
+
+There is intentionally no ``python -m semantic_scholar.cli`` form. The
+bare top-level name would let the CLI succeed for an import path the
+API pod cannot resolve, masking ``ModuleNotFoundError`` until deploy.
 """
 
 import json
@@ -18,27 +26,33 @@ import typer
 from dotenv import find_dotenv, load_dotenv
 from rich.console import Console
 
-# Make `from centaur_sdk import ...` (used by client.py) resolvable when
-# running from `uv run`. The upstream centaur_sdk pyproject uses
-# `packages = ["."]`, which produces an editable install Python cannot
-# import as a package — so we put the submodule's parent on sys.path
-# instead. The API pod resolves the SDK normally via its own editable
-# install, so this is a CLI-only workaround.
+# Make ``from centaur_sdk import ...`` and ``from tools.semantic_scholar
+# .client import ...`` (used by this CLI) resolvable when running from
+# ``uv run``. The CLI runtime has no analog of the API pod's tool
+# loader or pytest's ``[tool.pytest.ini_options].pythonpath``; we have
+# to replicate the same two anchors here:
+#
+#   * ``overlay/``  — exposes the ``tools.*`` namespace package the
+#     same way ``.centaur/services/api/api/app.py`` does at runtime,
+#     and also makes ``centaur_lab.*`` (used by client.py) importable.
+#   * ``.centaur/`` — works around upstream centaur_sdk's
+#     ``[tool.hatch.build.targets.wheel] packages = ["."]``, which
+#     produces an editable install whose ``.pth`` points INTO the
+#     package dir rather than its parent, leaving ``centaur_sdk``
+#     itself un-importable as a package. The API pod sidesteps this
+#     via its own editable install in
+#     ``.centaur/services/api/pyproject.toml``; the CLI cannot.
+#
+# Do NOT add ``overlay/tools/`` here. That would expose
+# ``semantic_scholar`` as a bare top-level package — a runtime/test
+# divergence the API pod does not honour (mirrors the comment on
+# ``pythonpath`` in this tool's ``pyproject.toml``).
 _THIS_DIR = Path(__file__).resolve().parent
-_SDK_PARENT = _THIS_DIR.parents[2] / ".centaur"
-if _SDK_PARENT.is_dir() and str(_SDK_PARENT) not in sys.path:
-    sys.path.insert(0, str(_SDK_PARENT))
-# Allow both `python cli.py ...` and `python -m semantic_scholar.cli`.
-if str(_THIS_DIR.parent) not in sys.path:
-    sys.path.insert(0, str(_THIS_DIR.parent))
-# Put `overlay/` on sys.path so `from centaur_lab.X import Y` (used by
-# client.py for paper_document + metrics helpers) resolves under the
-# CLI. The API pod gets this for free via the tool loader's bootstrap.
-# The package is named `centaur_lab` (not `shared`) because upstream's
-# tool loader reserves the `shared.*` namespace for its tools runtime.
 _OVERLAY_DIR = _THIS_DIR.parents[1]
-if str(_OVERLAY_DIR) not in sys.path:
-    sys.path.insert(0, str(_OVERLAY_DIR))
+_CENTAUR_DIR = _THIS_DIR.parents[2] / ".centaur"
+for _path in (_OVERLAY_DIR, _CENTAUR_DIR):
+    if _path.is_dir() and str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
 
 # Walk up from CWD to find a `.env`. The repo convention is one root .env
 # (fed into the k8s Secret by `just bootstrap-secrets`); per-tool `.env`
@@ -53,7 +67,7 @@ console = Console()
 def _make_client():
     # Lazy-imported so the centaur_sdk path bootstrap above is in effect
     # before client.py tries `from centaur_sdk import secret`.
-    from semantic_scholar.client import SemanticScholarClient
+    from tools.semantic_scholar.client import SemanticScholarClient
 
     return SemanticScholarClient()
 

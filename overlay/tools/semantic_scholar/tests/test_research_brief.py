@@ -17,8 +17,8 @@ import asyncpg
 import pytest
 
 from centaur_lab.paper_document import _content_hash
-from semantic_scholar import client as s2_client
-from semantic_scholar.client import SemanticScholarClient
+from tools.semantic_scholar import client as s2_client
+from tools.semantic_scholar.client import SemanticScholarClient
 
 # ---------------------------------------------------------------------------
 # Mocks
@@ -112,7 +112,7 @@ def _install_database_url(
 ) -> None:
     monkeypatch.setenv("DATABASE_URL", url)
     monkeypatch.setattr(
-        "semantic_scholar.client.secret",
+        "tools.semantic_scholar.client.secret",
         lambda _key, default="": default,
     )
 
@@ -271,7 +271,7 @@ def test_research_brief_no_database_url_returns_error(
 ) -> None:
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.setattr(
-        "semantic_scholar.client.secret",
+        "tools.semantic_scholar.client.secret",
         lambda _key, default="": "",
     )
     connect_calls = _install_mock_conn(monkeypatch, MockAsyncpgConn())
