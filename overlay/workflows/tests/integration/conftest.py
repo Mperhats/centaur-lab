@@ -31,8 +31,11 @@ import pytest_asyncio
 async def db_pool():
     """Yield an asyncpg pool connected to CENTAUR_TEST_DATABASE_URL.
 
-    Truncates company_context_documents before yielding so each test
-    starts from a known-empty state. Pool is closed after the test.
+    Performs a scoped cleanup of company_context_documents rows with
+    source = 'semantic_scholar' before yielding so each test starts
+    from a known-empty state for the workflows under test. Rows from
+    other sources (e.g. Slack ETL) on the shared dev DB are left
+    untouched. Pool is closed after the test.
     """
     dsn = os.environ.get("CENTAUR_TEST_DATABASE_URL", "").strip()  # noqa: TID251
     if not dsn:
@@ -44,7 +47,13 @@ async def db_pool():
 
     pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
     try:
-        await pool.execute("TRUNCATE TABLE company_context_documents CASCADE")
+        # Scoped cleanup: never touch rows written by Slack ETL or any other
+        # source. These workflows only write source = 'semantic_scholar', so
+        # deleting that subset gives us a clean slate without nuking the
+        # shared dev DB.
+        await pool.execute(
+            "DELETE FROM company_context_documents WHERE source = 'semantic_scholar'"
+        )
         yield pool
     finally:
         await pool.close()
