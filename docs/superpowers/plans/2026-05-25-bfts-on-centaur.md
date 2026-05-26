@@ -25,7 +25,7 @@
 The spec at `docs/centaur-science.md` was written before the four research reports. These deltas are baked into the plan below; do not re-introduce the spec's original framing.
 
 1. **"agent-sandbox v0.1.x" → v0.4.6.** Spec says project is "v0.1.x" and "early"; per research 01 §TL;DR the latest release is **v0.4.6 (2026-05-14)**, the chart at `.centaur/contrib/chart/charts/agent-sandbox/` already pins `tag: v0.4.6`, and Centaur's `KubernetesAgentSandboxBackend` is shipped in-tree. Plan pins to v0.4.6 explicitly and stages a re-vendor playbook for the v1alpha1 → v1beta1 graduation.
-2. **"Hibernation" is pod stop/start with PV reattach, *not* memory checkpoint.** Spec implies hibernation preserves in-RAM state; per research 01 §TL;DR and §Gotcha #3 memory-checkpoint suspend (`PodSnapshot`) is GKE-only. On Docker Desktop / non-GKE the only mechanism is `spec.replicas: 0|1` — pod is deleted, PVC is reattached on resume. Plan names this explicitly ("pause/resume" not "hibernate"), and stores per-node experiment state on the Sandbox PVC at `/home/agent/state` so the work survives pause.
+2. **"Hibernation" is pod stop/start with PV reattach, *not* memory checkpoint.** Spec implies hibernation preserves in-RAM state; per research 01 §TL;DR and §Gotcha #3 memory-checkpoint suspend (`PodSnapshot`) is GKE-only. On Docker Desktop / non-GKE the only mechanism is `spec.replicas: 0|1` — pod is deleted, PVC is reattached on resume. Plan names this explicitly ("pause/resume" not "hibernate"), and stores per-node experiment state on the per-Sandbox PVC mounted at `/workspace` (see Spec correction #12 for why this path replaces the originally-considered `/home/agent/state`) so the work survives pause.
 3. **`SandboxTemplate` / `SandboxClaim` / `SandboxWarmPool` are bundled but *unused* by Centaur today.** Spec says "back the controller with `SandboxWarmPool`" and "per-role `SandboxTemplate`s"; per research 03 §Sandboxing and research 01 §Capability matrix, the chart sets `agentSandbox.controller.extensions: false` and `KubernetesAgentSandboxBackend` creates raw `Sandbox` CRs directly. Plan chooses **bare `Sandbox` CRs created by the workflow** (Option A in research 01 §Integration proposal) for the MVP — fewer moving parts, no upstream-chart edits — and defers WarmPool/Template/Claim to Phase 4+.
 4. **`/api/webhooks/{slug}` creates a new run; it does *not* resume a waiting one.** Spec says GPU completion posts to a `/api/webhooks/{slug}` callback that resumes the workflow; per research 03 §Webhooks and §TL;DR, `/api/webhooks/{slug}` always *creates* a new run. To wake a `ctx.wait_for_event(...)` caller, you POST to `/workflows/events`. Plan defers the full GPU split to Phase 4 but stubs the wait/relay topology in Phase 2's input schema so swapping it in later doesn't reshape the controller.
 5. **"Skills as tunable hyperparameters" is a category mismatch.** Spec proposes that the nightly reflection loop tunes "search hyperparameters" as a Centaur skill; per research 03 §Outer-loop and §Skills, skills are static Markdown prompt fragments mounted into the sandbox — not parameters, not edited by Centaur, not connected to workflow inputs. Plan reformulates the outer loop as a `bfts_hyperparams` overlay table; deferred to Phase 4+ and only sketched here.
@@ -33,7 +33,10 @@ The spec at `docs/centaur-science.md` was written before the four research repor
 7. **Per-stage scope: MVP ships *Stage 1 (drafting) only*.** Spec is non-committal; per research 02 §Mapping the 4-stage curriculum (`AgentManager`) is AI-Scientist-curriculum-specific, not BFTS. Plan ships Stage 1 (`num_drafts` independent draft nodes + debug retries + improvement of best draft). Stages 2–4 are deferred to a follow-on plan.
 8. **Worker concurrency.** Spec doesn't mention it; per research 03 §Workflow programming model the default `WORKFLOW_WORKER_CONCURRENCY` is 2. Plan bumps to 16 in `values.local.yaml` (room for `num_drafts=3` + intra-tree fan-out of `num_workers=4` per Sakana defaults, with headroom for `bfts_executor` per-step calls and other workflows).
 9. **Tree state lives in an overlay table, not in the checkpoint blob.** Spec says "controller owns the search tree in durable Postgres-backed state"; per research 03 §State & durability storage, storing the whole tree as one growing JSONB checkpoint rewrites it every step. Plan creates an overlay-owned `bfts_nodes` table; checkpoints hold IDs only.
-10. **Iron-proxy egress allowlist defaults open (`"*"`).** Spec asks to "lock the egress allowlist"; per research 03 §Gotchas and §Secrets/iron-proxy, the allowlist defaults to `"*"` and is configured in `.centaur/services/iron-proxy/iron-proxy.yaml`. Since this repo's AGENTS.md forbids editing `.centaur/`, plan documents the current open-egress posture, files an upstream PR task to add a Helm escape hatch, and uses the `Sandbox` NetworkPolicy (when extensions are enabled in Phase 4+) as the in-MVP scoping mechanism — not in scope of Phase 0–3.
+10. **Iron-proxy egress allowlist defaults open (`"*"`).** Spec asks to "lock the egress allowlist"; per research 03 §Gotchas and §Secrets/iron-proxy, the allowlist defaults to `"*"` and is configured in `.centaur/services/iron-proxy/iron-proxy.yaml`. iron-proxy is *not* on the BFTS data path — BFTS pods don't call external model providers (the workflow does, from inside the API pod). Egress for BFTS pods is scoped at the K8s NetworkPolicy layer instead — see correction #13. iron-proxy's posture is therefore irrelevant to BFTS; no upstream PR is required for this plan.
+11. **Open Q-1 → Decision:** the `bfts_executor` tool creates `agents.x-k8s.io/v1alpha1 Sandbox` CRDs directly via `kubernetes_asyncio.client.CustomObjectsApi`, mirroring the body shape of `KubernetesAgentSandboxBackend._create_workload` (`.centaur/services/api/api/sandbox/kubernetes_agent_sandbox.py:109-154`) but with a workflow-generated `sandbox_id = f"bfts-{ctx.run_id}-tree-{tree_idx}"`, no `sandbox_sessions` row, no harness, and a `bfts-executor:latest` image whose CMD is `["sleep", "infinity"]`. We do **not** call `ctx.agent_turn(...)` to provision sandboxes — that path is for "spawn → message → execute → wait-for-terminal" agent runs (see `do_agent_turn` at `.centaur/services/api/api/workflow_engine.py:1124`) and pulls in `spawn_assignment`, slackbot session opening, and per-agent-execution event rows that BFTS doesn't need. **Implementation pointer:** Phase 1 Task 1.6 (CRD body + lifecycle), Task 1.8 (pause/resume retention smoke), Task 1.9 (tool registration); Phase 2 Task 2.9 (workflow generates sandbox_id and calls `bfts_executor.create_sandbox` via `ctx.step`, no `agent_turn` warmup).
+12. **Open Q-2 → Decision:** state persists on a per-sandbox PVC created via `spec.volumeClaimTemplates` declared **inline inside the BFTS Sandbox CRD body**. We do **not** set `KUBERNETES_SANDBOX_STATE_VOLUME_ENABLED=1` / `sandbox.stateVolume.enabled: true` — both are read globally (`.centaur/services/api/api/sandbox/kubernetes_agent_sandbox.py:21` and `.centaur/services/api/api/sandbox/kubernetes.py:102`) and would attach a state PVC to every Centaur sandbox spawned for any reason (Slack mentions, agent turns, warm pool), which is out of scope for this plan. The BFTS executor's inline `volumeClaimTemplates` (one `metadata.name=workspace` claim with `ReadWriteOnce` + 10Gi default) is mounted at `/workspace` inside the BFTS pod; `WORKDIR` is `/workspace` so Sakana's `os.path.join(os.getcwd(), 'working')` (research 02 §Code execution contract) resolves to `/workspace/working/`. Retention across pause/resume is shipped by the controller already (`shutdownPolicy: "Retain"` + `replicas: 0|1` patch — see `kubernetes_agent_sandbox.py:114, 159-185`); BFTS mirrors the same `pause_sandbox` / `resume_sandbox` / `stop_sandbox` (delete CRD; PVC reaped by owner refs because we use `volumeClaimTemplates`). **Implementation pointer:** Phase 1 Task 1.6 (inline `volumeClaimTemplates`), Task 1.8 (write-sentinel → pause → resume → read-sentinel retention smoke).
+13. **Open Q-3 → Decision:** the BFTS executor, on first use of a Sandbox, idempotently creates a single namespace-scoped `networking.k8s.io/v1 NetworkPolicy` named `bfts-sandbox-egress` that selects pods labelled `centaur.ai/bfts-sandbox: "true"` and allows TCP/8000 to the api pod (status callbacks) + TCP/443 to the public internet (datasets, PyPI). The chart's default-deny (`.centaur/contrib/chart/templates/networkpolicy.yaml:9-13`) and `-allow-dns` (L15-34) handle ingress + DNS, and Kubernetes NetworkPolicy is union-based so this additive `Egress`-only rule is sufficient. We deliberately **do not** add the `centaur.ai/managed: "true"` label to BFTS pods — that label is the podSelector for the chart's `-sandbox` NetworkPolicy at L307-327, which locks egress to api:8000 only and would block PyPI/dataset fetches. RBAC is already granted (`.centaur/contrib/chart/templates/rbac.yaml:39-41` allows `create|delete|get|list|watch` on `networking.k8s.io/networkpolicies`); idempotency is the 409-conflict catch pattern already used in `kubernetes.py` for proxy NetworkPolicies (search `_create_proxy_network_policies` at L696-816 — same pattern: delete-then-create). **Implementation pointer:** Phase 1 Task 1.7 (NetworkPolicy creation, idempotent).
 
 ---
 
@@ -45,10 +48,8 @@ All paths are absolute from the repo root. Files under `.centaur/` and `.scienti
 
 | File | Status | Responsibility |
 |---|---|---|
-| `values.local.yaml` | Modify | Pin agent-sandbox subchart at `v0.4.6` (already correct), bump `WORKFLOW_WORKER_CONCURRENCY=16` via `api.extraEnv`, ensure `sandbox.controller: agent-sandbox` and `sandbox.stateVolume.enabled: true` are set (already correct). |
-| `Justfile` | Modify | Add `just bfts-smoke` recipe that POSTs a minimal `bfts_smoke` run, polls for terminal, asserts an artifact lands at `/home/agent/state/smoke/done`. |
-| `overlay/workflows/bfts_smoke.py` | Create | One-file workflow that spawns one agent turn whose only job is `mkdir -p /home/agent/state/smoke && touch /home/agent/state/smoke/done && cat /home/agent/state/smoke/done`. Validates Sandbox CR + PVC end-to-end. |
-| `overlay/workflows/tests/test_bfts_smoke.py` | Create | Unit test of the workflow's input parsing + a no-op handler stub call. |
+| `values.local.yaml` | Modify | Pin agent-sandbox subchart at `v0.4.6` (already correct) and bump `WORKFLOW_WORKER_CONCURRENCY=16` via `api.extraEnv`. The chart-global `sandbox.stateVolume.enabled` knob is intentionally **not** required — BFTS Sandboxes carry their own inline `volumeClaimTemplates` (Spec correction #12) so the global env var (which would attach a PVC to every Centaur sandbox) stays opt-in. |
+| `Justfile` | Modify | Add `just bfts-platform-smoke` recipe that uses pure `kubectl` to create a one-off `Sandbox` CRD against the bundled agent-sandbox controller, exec into the pod, and tear it down. No overlay workflow involved — this validates the controller + RBAC layer the BFTS executor will later drive. |
 | `docs/superpowers/plans/2026-05-25-bfts-on-centaur.md` | This file | (already exists after Task 0). |
 
 ### Phase 1 — Sandbox executor contract
@@ -56,12 +57,17 @@ All paths are absolute from the repo root. Files under `.centaur/` and `.scienti
 | File | Status | Responsibility |
 |---|---|---|
 | `overlay/tools/bfts_executor/__init__.py` | Create | Module marker. |
-| `overlay/tools/bfts_executor/pyproject.toml` | Create | Tool registration; no external HTTP secrets (the sandbox is internal to the cluster). Deps: `kubernetes_asyncio`, `httpx` (the latter for in-sandbox HTTP exec if Centaur's `commands.run` path is not yet wired). |
-| `overlay/tools/bfts_executor/client.py` | Create | `BFTSExecutor` class exposing `exec_python(sandbox_id, code, timeout_s)` → `ExecutionResult` dict and `collect_artifacts(sandbox_id, dest_prefix)` → list of artifact paths. Uses Centaur's existing `KubernetesAgentSandboxBackend` only as a *reference* — directly drives `agents.x-k8s.io/v1alpha1 Sandbox` via `kubernetes_asyncio.client.CustomObjectsApi` for parity with the existing backend (no SDK double-driving — per research 01 §Gaps the integration must wrap). |
+| `overlay/tools/bfts_executor/pyproject.toml` | Create | Tool registration; no external HTTP secrets (the sandbox is internal to the cluster). Deps: `kubernetes_asyncio`, `aiohttp`, `dataclasses-json`. |
+| `overlay/Dockerfile.bfts-executor` | Create | Minimal `python:3.11-slim` image with `numpy`/`matplotlib`/`scikit-learn`/`torch` and `coreutils` (for `timeout(1)`). `WORKDIR /workspace`; CMD `["sleep", "infinity"]`. Built locally via `just bfts-build-executor`; consumed by `_KubernetesSandboxAPI.create_sandbox` as `bfts-executor:latest`. |
+| `overlay/tools/bfts_executor/client.py` | Create | `BFTSExecutor` class exposing `create_sandbox(sandbox_id, ...)`, `pause_sandbox(sandbox_id)`, `resume_sandbox(sandbox_id)`, `stop_sandbox(sandbox_id)`, `exec_python(sandbox_id, code, timeout_s)` → `ExecutionResult`, and `collect_artifacts(sandbox_id, dest_dir, node_id)`. Drives `agents.x-k8s.io/v1alpha1 Sandbox` directly via `kubernetes_asyncio.client.CustomObjectsApi` (mirroring the body shape of `KubernetesAgentSandboxBackend._create_workload` at `.centaur/services/api/api/sandbox/kubernetes_agent_sandbox.py:109-154`) — no SDK double-driving (research 01 §Gaps the integration must wrap). |
+| `overlay/tools/bfts_executor/network_policy.py` | Create | `ensure_sandbox_egress_policy(networking_api, namespace)` — idempotently creates the namespace-scoped `bfts-sandbox-egress` NetworkPolicy that selects `centaur.ai/bfts-sandbox: "true"` pods and permits TCP/8000 to api + TCP/443 to the internet (Spec correction #13). |
 | `overlay/tools/bfts_executor/models.py` | Create | `ExecutionResult` dataclass identical in shape to Sakana's (`term_out: list[str]`, `exec_time: float`, `exc_type: str \| None`, `exc_info: dict \| None`, `exc_stack: list[tuple] \| None`) — research 02 §Code execution contract. |
 | `overlay/tools/bfts_executor/tests/__init__.py` | Create | Module marker. |
 | `overlay/tools/bfts_executor/tests/test_exec_python_contract.py` | Create | Mocks `kubernetes_asyncio` and asserts the wire shape of an `ExecutionResult`. Verifies SIGINT-then-SIGKILL behavior on timeout via a fake clock. |
 | `overlay/tools/bfts_executor/tests/test_artifact_collection.py` | Create | Asserts `collect_artifacts` copies `working/experiment_data.npy` + `working/*.png` out of the sandbox to a Centaur-side path keyed by node id. |
+| `overlay/tools/bfts_executor/tests/test_create_sandbox_body.py` | Create | Asserts the BFTS Sandbox CRD body matches the upstream shape (apiVersion `agents.x-k8s.io/v1alpha1`, kind `Sandbox`, `spec.replicas: 1`, `service: false`, `shutdownPolicy: "Retain"`, inline `volumeClaimTemplates`, labels include `centaur.ai/bfts-sandbox: "true"` but **not** `centaur.ai/managed: "true"`). |
+| `overlay/tools/bfts_executor/tests/test_network_policy.py` | Create | Asserts `ensure_sandbox_egress_policy` issues `create_namespaced_network_policy` once and silently no-ops on a 409 conflict (idempotency). |
+| `Justfile` | Modify (Phase 1) | Add `bfts-build-executor` recipe (Task 1.6) that builds `overlay/Dockerfile.bfts-executor` locally and `bfts-retention-smoke` recipe (Task 1.8) — the end-of-Phase-1 integration smoke that drives `BFTSExecutor` from inside the api pod: create → write `/workspace/sentinel.txt` → pause → resume → read sentinel → stop. Proves PVC retention across `replicas: 0|1` matches `kubernetes_agent_sandbox.py:159-185`. |
 
 ### Phase 2 — Tree controller (MVP, Stage 1 only)
 
@@ -76,7 +82,7 @@ All paths are absolute from the repo root. Files under `.centaur/` and `.scienti
 | `overlay/workflows/_bfts_prompts.py` | Create | The four prompt fragments mirrored verbatim from `.scientist/ai_scientist/treesearch/parallel_agent.py:273-451` and the four function specs (`review_func_spec`, `metric_parse_spec`, `vlm_feedback_spec`, `plot_selection_spec`). Pure data — no executions. |
 | `overlay/workflows/_bfts_metric.py` | Create | `MetricValue` Python type: nested dict shape from research 02 §`MetricValue`; `mean()` collapse + first-metric `lower_is_better`. Documented as known footgun #6 from the master task list (see Phase 4 deferred fix). |
 | `overlay/workflows/bfts_tree.py` | Create | The tree controller workflow. `WORKFLOW_NAME = "bfts_tree"`. Owns the per-step loop: `select_next` → `for node in selected: child = await ctx.step("expand", _expand_one, node)` → `wait_all` → write back via `_bfts_state`. Terminates when `≥1 good_node` exists OR `steps >= max_iters` (Sakana stage1 completion rule). |
-| `overlay/workflows/bfts_root.py` | Create | Thin entry workflow. Takes `idea: dict` + a flattened `bfts_config` dict, fans out `num_drafts` independent `bfts_tree` child workflows via `ctx.start_workflow` + `ctx.wait_for_workflow`, and writes a `bfts_runs` row tying them together. |
+| `overlay/workflows/bfts_root.py` | Create | Thin entry workflow. Takes `idea: dict` + a flattened `bfts_config` dict, generates a deterministic `sandbox_id = f"bfts-{ctx.run_id}-tree-{i}"` per child tree, calls `ctx.tools.bfts_executor.create_sandbox(...)` via `ctx.step` (no `ctx.agent_turn` warmup — see Spec correction #11), then fans out `num_drafts` independent `bfts_tree` child workflows via `ctx.start_workflow` + `ctx.wait_for_workflow`, and writes a `bfts_runs` row tying them together. |
 | `overlay/workflows/tests/test_bfts_select.py` | Create | Property tests of `_bfts_select.select_next` against the Sakana reference: draft-only until `num_drafts` reached, debug-with-prob, improve-best when good nodes exist. |
 | `overlay/workflows/tests/test_bfts_expand.py` | Create | Verifies the expansion sub-step list shape (number of LLM calls + exec calls per branch). |
 | `overlay/workflows/tests/test_bfts_state.py` | Create | Integration test against a real `asyncpg` pool (skips when `CENTAUR_TEST_DATABASE_URL` unset, matching existing overlay test convention). |
@@ -104,7 +110,7 @@ All paths are absolute from the repo root. Files under `.centaur/` and `.scienti
 | `overlay/workflows/ideation.py` | Future | Phase 1 of the S2 sub-plan (research 04 §Option B). |
 | `overlay/workflows/gather_citations.py` | Future | Phase 2 of the S2 sub-plan (research 04 §Option C). |
 | `overlay/tools/bfts_executor/sandbox_templates/` | Future | Per-role `SandboxTemplate` + `SandboxWarmPool` CRs once `agentSandbox.controller.extensions: true` is flipped on. |
-| **Upstream PRs (separate ownership)** | Future | (a) Helm value for `iron-proxy` `domains` allowlist (today only configurable via editing `.centaur/services/iron-proxy/iron-proxy.yaml`). (b) Bump `_AGENT_SANDBOX_VERSION` constant in `.centaur/services/api/api/sandbox/kubernetes_agent_sandbox.py:16` once upstream graduates v1alpha1 → v1beta1. |
+| **Upstream PRs (separate ownership)** | Future | Bump `_AGENT_SANDBOX_VERSION` constant in `.centaur/services/api/api/sandbox/kubernetes_agent_sandbox.py:16` once upstream graduates v1alpha1 → v1beta1. The iron-proxy `domains: ["*"]` posture is intentionally **not** on this list — iron-proxy is not on the BFTS data path (Spec correction #10 + #13). |
 
 ---
 
@@ -112,7 +118,7 @@ All paths are absolute from the repo root. Files under `.centaur/` and `.scienti
 
 Each phase ends with a recipe + verification step. You can ship after any phase and have working software.
 
-- **Phase 0** — Foundation. Smoke-test that a workflow can spawn a `Sandbox`, exec one command, write to `/home/agent/state`, and tear down. No BFTS logic. Verifies the platform end-to-end.
+- **Phase 0** — Foundation. Pure-`kubectl` smoke that creates a `Sandbox` CRD against the bundled agent-sandbox controller, execs one command, writes to `/workspace`, and tears down. No overlay workflow involved. Verifies the platform end-to-end.
 - **Phase 1** — Sandbox executor contract. The `bfts_executor` tool that exposes `exec_python(...)` returning the Sakana `ExecutionResult` shape. Tested in isolation against a mocked Kubernetes API.
 - **Phase 2** — Tree controller (Stage 1 only). The `bfts_tree` + `bfts_root` workflows running on a toy experiment (input idea = "fit a 2-layer MLP on a 1000-sample synthetic regression task; report MSE"). End-to-end: tree builds, debug retries fire, improves happen, terminates on good node.
 - **Phase 3** — VLM gating + best-node export. The `bfts_vlm` tool, the `is_buggy_plots` gate wired into `good_nodes`, the final `export_best` step.
@@ -134,7 +140,7 @@ Each phase ends with a recipe + verification step. You can ship after any phase 
 ```bash
 helm template ${CENTAUR_RELEASE} .centaur/contrib/chart \
     -f .centaur/contrib/chart/values.dev.yaml -f values.local.yaml \
-    --show-only charts/agent-sandbox/templates/deployment.yaml 2>/dev/null \
+    --show-only charts/agentSandbox/templates/deployment.yaml 2>/dev/null \
   | grep -E 'image: .*agent-sandbox-controller'
 ```
 
@@ -243,162 +249,98 @@ git commit -m "ops: bump WORKFLOW_WORKER_CONCURRENCY to 16 for BFTS fan-out"
 
 ---
 
-## Task 0.2: Smoke workflow that spawns a Sandbox and writes state
+## Task 0.2: Pure-kubectl platform smoke (Sandbox CRD round trip)
 
-**Why:** Before any BFTS code lands we need ground truth that (a) an overlay workflow loads, (b) `ctx.agent_turn` actually spawns an `agents.x-k8s.io/v1alpha1 Sandbox` via the `KubernetesAgentSandboxBackend` (`sandbox.controller: agent-sandbox`, already set in `values.local.yaml:71`), (c) the state PVC at `/home/agent/state` accepts writes, and (d) the workflow returns a terminal status. This is the platform check the rest of the plan is built on.
+**Why:** Before any BFTS code lands we need ground truth that (a) the bundled agent-sandbox controller is healthy, (b) the api pod's ServiceAccount can create `agents.x-k8s.io/v1alpha1 Sandbox` CRDs (`.centaur/contrib/chart/templates/rbac.yaml:42-44` grants the verbs), (c) a Sandbox CR with inline `volumeClaimTemplates` actually attaches a PVC at `/workspace`, and (d) `pods/exec` works through the api-pod kubeconfig. This is the platform check the rest of the plan is built on — it deliberately bypasses any overlay workflow / `ctx.agent_turn` path (those are agent-execution primitives — see `do_agent_turn` at `.centaur/services/api/api/workflow_engine.py:1124` — and the BFTS executor in Phase 1 does **not** route through them; Spec correction #11). The full `bfts_executor.create_sandbox → write sentinel → pause → resume → read sentinel → stop` retention smoke lives at the end of Phase 1 (Task 1.8) once the tool exists.
 
-**Files:**
-- Create: `overlay/workflows/bfts_smoke.py`
-- Create: `overlay/workflows/tests/test_bfts_smoke.py`
+**Files:** none created; this task is verification-only.
 
-- [ ] **Step 1: Write the failing unit test**
+- [ ] **Step 1: Define the verification command**
 
-Create `overlay/workflows/tests/test_bfts_smoke.py`:
+The smoke is "kubectl creates a Sandbox CRD via the api-pod's kubeconfig, the agent-sandbox controller reconciles it into a pod, `kubectl exec` writes and reads a file inside `/workspace`, then we tear the CRD down and the PVC is reaped by owner refs". One shell script, no Python.
 
-```python
-"""Unit test: bfts_smoke workflow input parsing + handler shape."""
-from __future__ import annotations
+- [ ] **Step 2: Run before the controller is healthy to confirm it fails**
 
-import sys
-from pathlib import Path
+If `just up` has not been run yet (or the agent-sandbox controller hasn't reconciled), the script below exits non-zero on the `kubectl wait` step. After `just up` it should pass. Use the failure mode as the pre-edit baseline.
 
-import pytest
+- [ ] **Step 3: Write the smoke script inline**
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from bfts_smoke import Input, WORKFLOW_NAME, handler
-
-
-def test_workflow_name_is_stable() -> None:
-    assert WORKFLOW_NAME == "bfts_smoke"
-
-
-def test_input_defaults() -> None:
-    inp = Input()
-    assert inp.marker == "default"
-
-
-def test_input_accepts_marker() -> None:
-    inp = Input(marker="phase0-foundation")
-    assert inp.marker == "phase0-foundation"
-
-
-@pytest.mark.asyncio
-async def test_handler_returns_marker_payload() -> None:
-    """Handler returns a dict that includes the marker we passed in.
-
-    We stub the WorkflowContext as a minimal object; the real handler MUST
-    not import anything from api.* at module load (only under TYPE_CHECKING)
-    so this import-and-call works outside the API pod.
-    """
-    inp = Input(marker="phase0-foundation")
-
-    class _StubCtx:
-        async def agent_turn(self, prompt: str, **kwargs: object) -> dict[str, object]:
-            return {"result_text": "OK", "status": "completed", "prompt_seen": prompt}
-
-        def log(self, *args: object, **kwargs: object) -> None:
-            pass
-
-    result = await handler(inp, _StubCtx())
-    assert result["marker"] == "phase0-foundation"
-    assert result["agent_status"] == "completed"
-```
-
-- [ ] **Step 2: Run the test to verify it fails**
+Run, from the repo root, as the user (this is a one-off script we'll Justfile-wrap in Task 0.3):
 
 ```bash
-cd overlay/workflows && uv run --python 3.11 --with pytest --with pytest-asyncio pytest tests/test_bfts_smoke.py -v
+set -euo pipefail
+ns=$CENTAUR_NAMESPACE
+sandbox_id="bfts-platform-smoke-$(date +%s)"
+api_sa=$(kubectl -n "$ns" get deploy "${CENTAUR_RELEASE}-centaur-api" -o jsonpath='{.spec.template.spec.serviceAccountName}')
+cleanup() {
+  kubectl -n "$ns" delete sandbox.agents.x-k8s.io "$sandbox_id" --ignore-not-found --wait=true >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+cat <<YAML | kubectl -n "$ns" apply -f -
+apiVersion: agents.x-k8s.io/v1alpha1
+kind: Sandbox
+metadata:
+  name: ${sandbox_id}
+  labels:
+    centaur.ai/bfts-sandbox: "true"
+spec:
+  replicas: 1
+  service: false
+  shutdownPolicy: Retain
+  volumeClaimTemplates:
+    - metadata:
+        name: workspace
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+  podTemplate:
+    metadata:
+      labels:
+        centaur.ai/bfts-sandbox: "true"
+    spec:
+      containers:
+        - name: sandbox
+          image: busybox:1.36
+          command: ["sleep", "infinity"]
+          workingDir: /workspace
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+YAML
+
+kubectl -n "$ns" wait --for=condition=Ready pod/"$sandbox_id" --timeout=120s
+kubectl -n "$ns" exec "$sandbox_id" -- sh -c \
+  'mkdir -p /workspace/smoke && printf "%s" "PLATFORM_OK" > /workspace/smoke/marker && cat /workspace/smoke/marker'
+echo "platform smoke: sandbox ${sandbox_id} round-trip OK"
 ```
 
-Expected: FAIL with `ModuleNotFoundError: No module named 'bfts_smoke'`.
+Expected stdout: `PLATFORM_OKplatform smoke: sandbox bfts-platform-smoke-<epoch> round-trip OK`. Non-zero exit on any step = platform is not BFTS-ready; investigate before moving on.
 
-- [ ] **Step 3: Write minimal implementation**
+Quoted shape pointers (read once, then copy verbatim into the YAML):
+- `apiVersion: agents.x-k8s.io/v1alpha1` matches the constant at `.centaur/services/api/api/sandbox/kubernetes_agent_sandbox.py:15-17`.
+- `spec.replicas: 1`, `service: false`, `shutdownPolicy: "Retain"` mirror `_create_workload` at `.centaur/services/api/api/sandbox/kubernetes_agent_sandbox.py:111-114`.
+- `volumeClaimTemplates` shape mirrors `kubernetes_agent_sandbox.py:131-136`.
 
-Create `overlay/workflows/bfts_smoke.py`:
-
-```python
-"""Workflow: smoke-test the platform end-to-end.
-
-Spawns one agent turn whose only job is to write a marker file to the
-sandbox state PVC (mounted at /home/agent/state per values.local.yaml).
-Validates: workflow discovery, Sandbox CR creation via the agent-sandbox
-backend, PVC attach, agent turn completion, terminal workflow status.
-
-This is Phase 0 of docs/superpowers/plans/2026-05-25-bfts-on-centaur.md.
-No BFTS logic; just platform plumbing.
-"""
-
-from __future__ import annotations
-
-import sys
-from dataclasses import dataclass
-from pathlib import Path
-from typing import TYPE_CHECKING, Any
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-if TYPE_CHECKING:
-    from api.workflow_engine import WorkflowContext
-
-WORKFLOW_NAME = "bfts_smoke"
-
-
-@dataclass
-class Input:
-    marker: str = "default"
-
-
-_PROMPT = """You are running inside a Centaur sandbox. Execute these shell
-commands exactly, in order, then reply with the single word `SMOKE_OK`:
-
-```
-mkdir -p /home/agent/state/smoke
-printf '%s' "{marker}" > /home/agent/state/smoke/marker
-cat /home/agent/state/smoke/marker
-```
-
-Do not run any other commands. Reply with only SMOKE_OK on success."""
-
-
-async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
-    prompt = _PROMPT.format(marker=inp.marker)
-    result = await ctx.agent_turn(
-        prompt,
-        thread_key=f"bfts_smoke:{inp.marker}",
-    )
-    ctx.log(
-        "bfts_smoke_completed",
-        marker=inp.marker,
-        agent_status=result.get("status"),
-    )
-    return {
-        "marker": inp.marker,
-        "agent_status": result.get("status"),
-        "agent_result_text": result.get("result_text"),
-    }
-```
-
-- [ ] **Step 4: Run the test to verify it passes**
+- [ ] **Step 4: Verify the controller reconciled cleanly**
 
 ```bash
-cd overlay/workflows && uv run --python 3.11 --with pytest --with pytest-asyncio pytest tests/test_bfts_smoke.py -v
+kubectl -n $CENTAUR_NAMESPACE get sandbox.agents.x-k8s.io -l centaur.ai/bfts-sandbox=true
 ```
 
-Expected: 4 passed.
+Expected: empty list (the trap ran cleanup). If you see the sandbox lingering, run `kubectl -n $CENTAUR_NAMESPACE delete sandbox.agents.x-k8s.io <name>` manually.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Commit (no code change in this task)**
 
-```bash
-git add overlay/workflows/bfts_smoke.py overlay/workflows/tests/test_bfts_smoke.py
-git commit -m "feat(bfts): add Phase 0 smoke workflow"
-```
+No files were created by this task. The next task (0.3) wraps the script in a Justfile recipe; commit there.
 
 ---
 
-## Task 0.3: Justfile recipe to drive the smoke workflow
+## Task 0.3: Justfile recipe wrapping the pure-kubectl platform smoke
 
-**Why:** Hand-rolling `kubectl exec ... curl POST /workflows/runs` per test cycle drifts. Codify the smoke as a recipe so the next iteration is `just overlay::build && just deploy && just bfts-smoke`.
+**Why:** Hand-rolling the script from Task 0.2 per test cycle drifts. Codify it as a recipe so the next iteration is `just up && just bfts-platform-smoke`. The recipe deliberately does **not** depend on the overlay image or any workflow — Phase 1's `bfts_executor.create_sandbox` does not exist yet, and the full BFTS round trip lands in Task 1.8.
 
 **Files:**
 - Modify: `Justfile`
@@ -406,87 +348,112 @@ git commit -m "feat(bfts): add Phase 0 smoke workflow"
 - [ ] **Step 1: Define the verification command**
 
 The recipe should:
-1. POST a `bfts_smoke` run with a unique marker;
-2. poll `/workflows/runs/{run_id}` until status is terminal;
-3. assert the result includes `marker == <the marker we passed>` and `agent_status == "completed"`.
+1. Generate a unique `sandbox_id`.
+2. `kubectl apply` an inline Sandbox CRD with `centaur.ai/bfts-sandbox: "true"` labels, inline `volumeClaimTemplates`, `image: busybox:1.36`, CMD `["sleep", "infinity"]`, `workingDir: /workspace`.
+3. `kubectl wait` for pod ready.
+4. `kubectl exec` into the pod, write `PLATFORM_OK` to `/workspace/smoke/marker`, read it back.
+5. Delete the Sandbox CR (PVC follows the CR's owner refs via `volumeClaimTemplates`).
+6. Exit 0 on success; non-zero on any step.
 
-Verification: `just bfts-smoke` exits 0 and prints `SMOKE OK` on success; exits non-zero on any other terminal state.
+Verification: `just bfts-platform-smoke` exits 0 and prints `PLATFORM SMOKE OK`.
 
 - [ ] **Step 2: Run before the edit to confirm it fails**
 
 ```bash
-just bfts-smoke
+just bfts-platform-smoke
 ```
 
-Expected: `error: Justfile does not contain recipe 'bfts-smoke'`.
+Expected: `error: Justfile does not contain recipe 'bfts-platform-smoke'`.
 
 - [ ] **Step 3: Add the recipe**
 
 Append to `Justfile` (at the bottom, after the existing `dev` recipe ending around line 143):
 
 ```just
-# Phase 0 smoke: confirms an overlay workflow can spawn a Sandbox via the
-# agent-sandbox backend, write to /home/agent/state, and reach terminal.
-# See docs/superpowers/plans/2026-05-25-bfts-on-centaur.md (Phase 0).
+# Phase 0 platform smoke: confirms the agent-sandbox controller + api SA RBAC
+# can create a Sandbox CRD with the BFTS shape (labels, inline volumeClaim,
+# workspace mount path) and that pods/exec works. No overlay workflow
+# involved; this is a pure-kubectl check against the bundled controller.
+# See docs/superpowers/plans/2026-05-25-bfts-on-centaur.md (Phase 0 Task 0.2).
 [group('bfts')]
-bfts-smoke:
+bfts-platform-smoke:
     #!/usr/bin/env bash
     set -euo pipefail
-    marker="phase0-$(date +%s)"
-    api_deploy="deploy/${CENTAUR_RELEASE}-centaur-api"
-    exec_curl() {
-      kubectl exec -n $CENTAUR_NAMESPACE "$api_deploy" -- sh -c \
-        'curl -sS "$@" -H "X-Api-Key: $SLACKBOT_API_KEY"' -- "$@"
+    ns=$CENTAUR_NAMESPACE
+    sandbox_id="bfts-platform-smoke-$(date +%s)"
+    cleanup() {
+      kubectl -n "$ns" delete sandbox.agents.x-k8s.io "$sandbox_id" \
+        --ignore-not-found --cascade=foreground --wait=true || true
     }
-    run=$(exec_curl -X POST http://localhost:8000/workflows/runs \
-        -H "Content-Type: application/json" \
-        -d "{\"workflow_name\":\"bfts_smoke\",\"input\":{\"marker\":\"${marker}\"}}")
-    run_id=$(printf '%s' "$run" | jq -r '.run_id')
-    echo "submitted run ${run_id} (marker ${marker})"
-    for _ in $(seq 1 90); do
-      state=$(exec_curl "http://localhost:8000/workflows/runs/${run_id}")
-      status=$(printf '%s' "$state" | jq -r '.status // empty')
-      case "$status" in
-        completed)
-          out_marker=$(printf '%s' "$state" | jq -r '.output_json.marker // empty')
-          if [ "$out_marker" = "$marker" ]; then
-            echo "SMOKE OK (run ${run_id})"
-            exit 0
-          fi
-          echo "completed but marker mismatch: expected '${marker}', got '${out_marker}'" >&2
-          printf '%s\n' "$state" | jq >&2
-          exit 1
-          ;;
-        failed|failed_permanent|cancelled)
-          printf '%s\n' "$state" | jq >&2
-          exit 1
-          ;;
-      esac
-      sleep 2
-    done
-    echo "smoke timed out waiting for run ${run_id}" >&2
-    exec_curl "http://localhost:8000/workflows/runs/${run_id}" | jq >&2
+    trap cleanup EXIT
+    cat <<YAML | kubectl -n "$ns" apply -f -
+    apiVersion: agents.x-k8s.io/v1alpha1
+    kind: Sandbox
+    metadata:
+      name: ${sandbox_id}
+      labels:
+        centaur.ai/bfts-sandbox: "true"
+    spec:
+      replicas: 1
+      service: false
+      shutdownPolicy: Retain
+      volumeClaimTemplates:
+        - metadata:
+            name: workspace
+          spec:
+            accessModes: ["ReadWriteOnce"]
+            resources:
+              requests:
+                storage: 1Gi
+      podTemplate:
+        metadata:
+          labels:
+            centaur.ai/bfts-sandbox: "true"
+        spec:
+          containers:
+            - name: sandbox
+              image: busybox:1.36
+              command: ["sleep", "infinity"]
+              workingDir: /workspace
+              volumeMounts:
+                - name: workspace
+                  mountPath: /workspace
+    YAML
+    kubectl -n "$ns" wait --for=condition=Ready pod/"$sandbox_id" --timeout=120s
+    out=$(kubectl -n "$ns" exec "$sandbox_id" -- sh -c \
+      'mkdir -p /workspace/smoke && printf "%s" "PLATFORM_OK" > /workspace/smoke/marker && cat /workspace/smoke/marker')
+    if [ "$out" = "PLATFORM_OK" ]; then
+      echo "PLATFORM SMOKE OK (sandbox ${sandbox_id})"
+      exit 0
+    fi
+    echo "unexpected exec output: '${out}'" >&2
     exit 1
 ```
 
 - [ ] **Step 4: Build + deploy + run the smoke**
 
 ```bash
-just overlay::build
-just deploy
+just up
 kubectl rollout status -n centaur-system deploy/centaur-centaur-api --timeout=120s
-just bfts-smoke
+just bfts-platform-smoke
 ```
 
-Expected output: `SMOKE OK (run <uuid>)` and exit 0.
+Expected output: `PLATFORM SMOKE OK (sandbox bfts-platform-smoke-<epoch>)` and exit 0.
 
-If `agent_status` is not `completed`, inspect `kubectl logs -n centaur-system deploy/centaur-centaur-api --tail=200` for sandbox spawn errors. The most common failure is `sandbox readiness timed out` — check that `sandbox.image.pullPolicy: IfNotPresent` is set (it is in this repo) and that the `centaur-agent:latest` image was built (`cd .centaur && just build`).
+If `kubectl wait` times out, inspect:
+
+```bash
+kubectl -n $CENTAUR_NAMESPACE describe sandbox.agents.x-k8s.io -l centaur.ai/bfts-sandbox=true
+kubectl -n $CENTAUR_NAMESPACE logs deploy/agent-sandbox-controller --tail=200
+```
+
+The most common cause is the agent-sandbox controller subchart not installed; confirm `agentSandbox.enabled: true` in `values.local.yaml` (already correct) and re-run `just deploy`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add Justfile
-git commit -m "feat(bfts): add just bfts-smoke recipe for Phase 0 verification"
+git commit -m "feat(bfts): add just bfts-platform-smoke recipe for Phase 0 verification"
 ```
 
 ---
@@ -501,7 +468,7 @@ git commit -m "feat(bfts): add just bfts-smoke recipe for Phase 0 verification"
 - [ ] **Step 1: Confirm what's missing**
 
 ```bash
-grep -n "bfts-smoke" README.md || echo "NOT FOUND"
+grep -n "bfts-platform-smoke" README.md || echo "NOT FOUND"
 ```
 
 Expected: `NOT FOUND`.
@@ -513,23 +480,29 @@ Append to `README.md` (after whatever "Smoke test" section exists; if none, afte
 ```markdown
 ## BFTS platform smoke
 
-After `just up` completes, verify the BFTS platform layer (Sandbox CR
-creation + state PVC + workflow durability) end-to-end with:
+After `just up` completes, verify the agent-sandbox controller + api SA
+RBAC + inline `volumeClaimTemplates` mount path used by BFTS with:
 
 ```bash
-just bfts-smoke
+just bfts-platform-smoke
 ```
 
-Expected output: `SMOKE OK (run <uuid>)`. If it fails, see
-`docs/superpowers/plans/2026-05-25-bfts-on-centaur.md` (Phase 0,
-Task 0.3 Step 4 troubleshooting). This recipe is the platform-health
-contract every later BFTS phase depends on.
+Expected output: `PLATFORM SMOKE OK (sandbox bfts-platform-smoke-<epoch>)`.
+The recipe creates a one-off `agents.x-k8s.io/v1alpha1 Sandbox` CRD with
+the same labels and `/workspace` PVC layout the BFTS executor will use,
+execs into the pod, writes/reads a marker file, and tears the CRD down.
+If it fails, see
+`docs/superpowers/plans/2026-05-25-bfts-on-centaur.md` (Phase 0, Task 0.3
+Step 4 troubleshooting). This recipe is the platform-health contract
+every later BFTS phase depends on. The full
+`bfts_executor.create_sandbox → pause → resume → stop` round trip is
+exercised separately at the end of Phase 1 (`just bfts-retention-smoke`).
 ```
 
 - [ ] **Step 3: Verify**
 
 ```bash
-grep -n "bfts-smoke" README.md
+grep -n "bfts-platform-smoke" README.md
 ```
 
 Expected: at least 2 lines (the recipe name appears in the code block and prose).
@@ -538,7 +511,7 @@ Expected: at least 2 lines (the recipe name appears in the code block and prose)
 
 ```bash
 git add README.md
-git commit -m "docs(bfts): document Phase 0 smoke recipe"
+git commit -m "docs(bfts): document Phase 0 platform smoke recipe"
 ```
 
 ---
@@ -853,15 +826,15 @@ async def test_exec_python_writes_runfile_and_invokes_python() -> None:
     assert len(fake.writes) == 1
     sandbox_id, path, content = fake.writes[0]
     assert sandbox_id == "sbx-1"
-    assert path == "/home/agent/state/working/runfile.py"
+    assert path == "/workspace/working/runfile.py"
     assert content == "x = 1"
     # Command runs via python -u in the working dir; SIGINT-then-SIGKILL is
     # the timeout mode (Task 1.4 covers the kill path).
     assert len(fake.commands) == 1
     cmd_sandbox, cmd_str, cmd_timeout = fake.commands[0]
     assert cmd_sandbox == "sbx-1"
-    assert "python -u /home/agent/state/working/runfile.py" in cmd_str
-    assert "cd /home/agent/state/working" in cmd_str
+    assert "python -u /workspace/working/runfile.py" in cmd_str
+    assert "cd /workspace/working" in cmd_str
     assert cmd_timeout == 10.0
 
 
@@ -923,11 +896,15 @@ from typing import Any, Protocol
 
 from models import ExecutionResult
 
-WORKING_DIR = "/home/agent/state/working"
-"""Per-node writable workspace under the Sandbox PVC.
+WORKING_DIR = "/workspace/working"
+"""Per-node writable workspace under the inline workspace PVC.
 
 Matches Sakana's ``os.path.join(os.getcwd(), 'working')`` contract: the
-generated experiment code writes its experiment_data.npy and *.png here.
+bfts-executor image sets ``WORKDIR /workspace`` so ``os.getcwd()`` is
+``/workspace`` and generated experiment code writes its
+``experiment_data.npy`` and ``*.png`` into ``working/``. Spec correction
+#12 — we own the image and the path; the inline ``volumeClaimTemplates``
+(Task 1.6) attaches a per-Sandbox PVC at this mount point.
 """
 
 RUNFILE_NAME = "runfile.py"
@@ -1188,10 +1165,10 @@ class _FakeSandboxAPI:
 @pytest.mark.asyncio
 async def test_collect_artifacts_picks_npy_and_png(tmp_path: Path) -> None:
     files = {
-        "/home/agent/state/working/experiment_data.npy": b"\x93NUMPY...",
-        "/home/agent/state/working/loss_curve.png": b"\x89PNG...",
-        "/home/agent/state/working/accuracy.png": b"\x89PNG_2...",
-        "/home/agent/state/working/notes.txt": b"ignore me",  # not collected
+        "/workspace/working/experiment_data.npy": b"\x93NUMPY...",
+        "/workspace/working/loss_curve.png": b"\x89PNG...",
+        "/workspace/working/accuracy.png": b"\x89PNG_2...",
+        "/workspace/working/notes.txt": b"ignore me",  # not collected
     }
     api = _FakeSandboxAPI(files)
     executor = BFTSExecutor(sandbox_api=api)
@@ -1289,25 +1266,79 @@ git commit -m "feat(bfts): add collect_artifacts to BFTSExecutor"
 
 ---
 
-## Task 1.6: Real Kubernetes-backed `_SandboxAPI`
+## Task 1.6: Real Kubernetes-backed `_SandboxAPI` — CRD lifecycle + WsApiClient exec
 
-**Why:** Tasks 1.3–1.5 used a fake `_SandboxAPI`. For Phase 2 we need the real one, hitting `agents.x-k8s.io/v1alpha1` via `kubernetes_asyncio.client.CustomObjectsApi` (matching Centaur's existing `KubernetesAgentSandboxBackend` pattern — per research 01 §Gaps the integration must wrap, do *not* introduce the `k8s-agent-sandbox` SDK because it would race with the existing backend on the same CRD instances).
+**Why:** Tasks 1.3–1.5 used a fake `_SandboxAPI`. For Phase 2 we need the real one. Per Spec correction #11 the BFTS executor **creates its own `agents.x-k8s.io/v1alpha1 Sandbox` CRDs directly** (mirroring `KubernetesAgentSandboxBackend._create_workload` at `.centaur/services/api/api/sandbox/kubernetes_agent_sandbox.py:109-154`); it does **not** call `ctx.agent_turn(...)` to provision them (that path runs the spawn → message → execute → wait loop in `do_agent_turn` at `.centaur/services/api/api/workflow_engine.py:1124` — out of scope for unscored code-exec). Per Spec correction #12 the per-sandbox PVC is declared **inline** as `spec.volumeClaimTemplates` so the global `KUBERNETES_SANDBOX_STATE_VOLUME_ENABLED` env var stays opt-in. Exec is reproduced from the upstream `WsApiClient` pattern at `.centaur/services/api/api/sandbox/kubernetes.py:1503-1551` so we get a real exit code through `ERROR_CHANNEL` (no `__BFTS_EXIT__` marker hack) and structured stdout/stderr through `STDOUT_CHANNEL`/`STDERR_CHANNEL`.
 
 **Files:**
+- Create: `overlay/Dockerfile.bfts-executor`
+- Modify: `Justfile` (add `bfts-build-executor` recipe)
 - Modify: `overlay/tools/bfts_executor/client.py`
+- Modify: `overlay/tools/bfts_executor/pyproject.toml` (add `aiohttp` dep)
+- Create: `overlay/tools/bfts_executor/tests/test_create_sandbox_body.py`
+- Create: `overlay/tools/bfts_executor/tests/test_sandbox_lifecycle.py`
 - Create: `overlay/tools/bfts_executor/tests/test_kubernetes_api_calls.py`
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Build the executor pod image**
 
-`overlay/tools/bfts_executor/tests/test_kubernetes_api_calls.py`:
+The BFTS executor runs experiment Python code inside a Sandbox pod that we own (overlay-side). It needs Python 3.11, `numpy`, `matplotlib`, `coreutils` (for `timeout(1)`), and `base64`. Create `overlay/Dockerfile.bfts-executor`:
+
+```dockerfile
+# Image used by Sandbox pods that the bfts_executor tool creates.
+# Sleeps forever; the tool drives all work via pods/exec.
+# Mirrors the workspace contract from Sakana's Interpreter.run:
+# WORKDIR /workspace so os.path.join(os.getcwd(), 'working') resolves to
+# /workspace/working — the path Sakana's prompts write to (research 02
+# §Code execution contract).
+FROM python:3.11-slim
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends coreutils \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir \
+        "numpy>=1.26" \
+        "matplotlib>=3.8" \
+        "scikit-learn>=1.4" \
+        "torch>=2.2 ; platform_machine=='x86_64'"
+
+WORKDIR /workspace
+CMD ["sleep", "infinity"]
+```
+
+Append the build recipe to `Justfile` (after the existing `dev` recipe ending around line 143):
+
+```just
+# Build the bfts-executor:latest image used by Sandbox pods the BFTS
+# tool spawns. Docker Desktop's k8s shares the host image cache so
+# pullPolicy: IfNotPresent finds the local tag without a registry.
+# See docs/superpowers/plans/2026-05-25-bfts-on-centaur.md (Phase 1).
+[group('bfts')]
+bfts-build-executor:
+    docker build -f overlay/Dockerfile.bfts-executor -t bfts-executor:latest overlay
+```
+
+Verify:
+
+```bash
+just bfts-build-executor
+docker images bfts-executor:latest
+```
+
+Expected: one line showing the image with a recent `CREATED` timestamp.
+
+- [ ] **Step 2: Write the failing CRD-body shape test**
+
+`overlay/tools/bfts_executor/tests/test_create_sandbox_body.py`:
 
 ```python
-"""Test: _KubernetesSandboxAPI issues the right CustomObjectsApi calls.
+"""Test: BFTSExecutor.create_sandbox emits the right Sandbox CRD body.
 
-Mocks kubernetes_asyncio.client.CustomObjectsApi and asserts:
- - run_command POSTs to /api/v1/namespaces/{ns}/pods/{sandbox_id}/exec
- - write_file uses cp via run_command's exec stream
- - the GVR is correct: agents.x-k8s.io / v1alpha1 / sandboxes
+Asserts the body shape mirrors the upstream pattern in
+.centaur/services/api/api/sandbox/kubernetes_agent_sandbox.py:109-154
+while substituting BFTS-specific labels (centaur.ai/bfts-sandbox=true,
+NOT centaur.ai/managed=true — Spec correction #13 in the plan) and an
+inline volumeClaimTemplates entry mounted at /workspace.
 """
 from __future__ import annotations
 
@@ -1323,45 +1354,333 @@ from client import _KubernetesSandboxAPI
 
 
 @pytest.mark.asyncio
-async def test_run_command_calls_pod_exec(monkeypatch: pytest.MonkeyPatch) -> None:
-    core_api = MagicMock()
-    core_api.connect_get_namespaced_pod_exec = AsyncMock(return_value="hello\n")
-    api = _KubernetesSandboxAPI(core_api=core_api, namespace="centaur-system")
-    result = await api.run_command("sbx-1", "echo hello", timeout_s=10.0)
-    core_api.connect_get_namespaced_pod_exec.assert_awaited_once()
-    call_kwargs = core_api.connect_get_namespaced_pod_exec.await_args.kwargs
-    # Pod name == sandbox name (1:1 mapping per research 01).
-    assert core_api.connect_get_namespaced_pod_exec.await_args.args[0] == "sbx-1"
-    assert call_kwargs["namespace"] == "centaur-system"
-    assert call_kwargs["command"] == ["/bin/sh", "-c", "echo hello"]
-    assert call_kwargs["stdout"] is True
-    assert call_kwargs["stderr"] is True
-    assert result.stdout.startswith("hello") or result.stdout == "hello\n"
+async def test_create_sandbox_emits_expected_body() -> None:
+    custom_api = MagicMock()
+    custom_api.create_namespaced_custom_object = AsyncMock(return_value=None)
+    networking_api = MagicMock()
+    networking_api.create_namespaced_network_policy = AsyncMock(return_value=None)
+    api = _KubernetesSandboxAPI(
+        custom_api=custom_api,
+        networking_api=networking_api,
+        namespace="centaur-system",
+    )
+    await api.create_sandbox(
+        sandbox_id="bfts-run-abc-tree-0",
+        run_id="run-abc",
+        image="bfts-executor:latest",
+        storage_size="10Gi",
+        storage_class=None,
+    )
+    custom_api.create_namespaced_custom_object.assert_awaited_once()
+    args, kwargs = custom_api.create_namespaced_custom_object.call_args
+    group, version, ns, plural, body = args
+    assert group == "agents.x-k8s.io"
+    assert version == "v1alpha1"
+    assert ns == "centaur-system"
+    assert plural == "sandboxes"
+    assert body["apiVersion"] == "agents.x-k8s.io/v1alpha1"
+    assert body["kind"] == "Sandbox"
+    assert body["metadata"]["name"] == "bfts-run-abc-tree-0"
+    labels = body["metadata"]["labels"]
+    assert labels["centaur.ai/bfts-sandbox"] == "true"
+    assert labels["centaur.ai/bfts-run"] == "run-abc"
+    # Critical: do NOT inherit the chart's centaur.ai/managed=true selector
+    # (.centaur/contrib/chart/templates/networkpolicy.yaml:307-327 would
+    # then lock egress to api:8000 only).
+    assert "centaur.ai/managed" not in labels
+    spec = body["spec"]
+    assert spec["replicas"] == 1
+    assert spec["service"] is False
+    assert spec["shutdownPolicy"] == "Retain"
+    # Inline volumeClaimTemplates (Spec correction #12) — do NOT rely on
+    # the global KUBERNETES_SANDBOX_STATE_VOLUME_ENABLED env var.
+    assert len(spec["volumeClaimTemplates"]) == 1
+    pvc = spec["volumeClaimTemplates"][0]
+    assert pvc["metadata"]["name"] == "workspace"
+    assert pvc["spec"]["accessModes"] == ["ReadWriteOnce"]
+    assert pvc["spec"]["resources"]["requests"]["storage"] == "10Gi"
+    assert "storageClassName" not in pvc["spec"]
+    pod_spec = spec["podTemplate"]["spec"]
+    container = pod_spec["containers"][0]
+    assert container["image"] == "bfts-executor:latest"
+    assert container["command"] == ["sleep", "infinity"]
+    assert container["workingDir"] == "/workspace"
+    mounts = container["volumeMounts"]
+    assert any(m["name"] == "workspace" and m["mountPath"] == "/workspace" for m in mounts)
+
+
+@pytest.mark.asyncio
+async def test_create_sandbox_passes_storage_class_when_given() -> None:
+    custom_api = MagicMock()
+    custom_api.create_namespaced_custom_object = AsyncMock(return_value=None)
+    networking_api = MagicMock()
+    networking_api.create_namespaced_network_policy = AsyncMock(return_value=None)
+    api = _KubernetesSandboxAPI(
+        custom_api=custom_api,
+        networking_api=networking_api,
+        namespace="centaur-system",
+    )
+    await api.create_sandbox(
+        sandbox_id="bfts-x",
+        run_id="r1",
+        image="bfts-executor:latest",
+        storage_size="20Gi",
+        storage_class="standard",
+    )
+    body = custom_api.create_namespaced_custom_object.call_args.args[4]
+    pvc = body["spec"]["volumeClaimTemplates"][0]
+    assert pvc["spec"]["storageClassName"] == "standard"
+```
+
+- [ ] **Step 3: Write the failing lifecycle test**
+
+`overlay/tools/bfts_executor/tests/test_sandbox_lifecycle.py`:
+
+```python
+"""Test: pause/resume/stop hit the right CustomObjectsApi calls.
+
+Mirrors KubernetesAgentSandboxBackend.pause_by_id / resume_by_id /
+stop_by_id at .centaur/services/api/api/sandbox/kubernetes_agent_sandbox
+.py:159-217.
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from client import _KubernetesSandboxAPI
+
+
+def _mk_api() -> tuple[_KubernetesSandboxAPI, MagicMock]:
+    custom = MagicMock()
+    custom.patch_namespaced_custom_object = AsyncMock(return_value=None)
+    custom.delete_namespaced_custom_object = AsyncMock(return_value=None)
+    custom.get_namespaced_custom_object = AsyncMock(
+        return_value={"spec": {"replicas": 1}}
+    )
+    core = MagicMock()
+    core.read_namespaced_pod = AsyncMock(return_value=type(
+        "P", (), {"status": type("S", (), {"phase": "Running"})()}
+    )())
+    api = _KubernetesSandboxAPI(
+        custom_api=custom,
+        core_api=core,
+        namespace="centaur-system",
+    )
+    return api, custom
+
+
+@pytest.mark.asyncio
+async def test_pause_patches_replicas_zero() -> None:
+    api, custom = _mk_api()
+    await api.pause_sandbox("sbx-1")
+    custom.patch_namespaced_custom_object.assert_awaited_once()
+    args = custom.patch_namespaced_custom_object.call_args.args
+    assert args[0] == "agents.x-k8s.io"
+    assert args[1] == "v1alpha1"
+    assert args[2] == "centaur-system"
+    assert args[3] == "sandboxes"
+    assert args[4] == "sbx-1"
+    assert args[5] == {"spec": {"replicas": 0}}
+    # Merge-patch content type per upstream (kubernetes_agent_sandbox.py:171).
+    assert custom.patch_namespaced_custom_object.call_args.kwargs == {
+        "_content_type": "application/merge-patch+json",
+    }
+
+
+@pytest.mark.asyncio
+async def test_resume_patches_replicas_one() -> None:
+    api, custom = _mk_api()
+    await api.resume_sandbox("sbx-1")
+    custom.patch_namespaced_custom_object.assert_awaited_once()
+    body = custom.patch_namespaced_custom_object.call_args.args[5]
+    assert body == {"spec": {"replicas": 1}}
+
+
+@pytest.mark.asyncio
+async def test_stop_deletes_crd_and_swallows_404() -> None:
+    api, custom = _mk_api()
+    await api.stop_sandbox("sbx-1")
+    custom.delete_namespaced_custom_object.assert_awaited_once()
+    args = custom.delete_namespaced_custom_object.call_args.args
+    assert args[:4] == ("agents.x-k8s.io", "v1alpha1", "centaur-system", "sandboxes")
+    assert args[4] == "sbx-1"
+
+
+@pytest.mark.asyncio
+async def test_stop_is_idempotent_on_404() -> None:
+    api, custom = _mk_api()
+    exc = type("E", (Exception,), {"status": 404})
+    custom.delete_namespaced_custom_object.side_effect = exc()
+    # Must not raise.
+    await api.stop_sandbox("sbx-1")
+```
+
+- [ ] **Step 4: Write the failing exec test**
+
+`overlay/tools/bfts_executor/tests/test_kubernetes_api_calls.py`:
+
+```python
+"""Test: run_command drives the WsApiClient exec pattern correctly.
+
+We mock the websocket loop so the test exercises every channel branch
+(STDOUT_CHANNEL, STDERR_CHANNEL, ERROR_CHANNEL) and the exit-code
+parse via parse_error_data. Mirrors .centaur/services/api/api/sandbox/
+kubernetes.py:1525-1551.
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from client import _KubernetesSandboxAPI
+
+
+class _FakeMsg:
+    def __init__(self, type_: int, data: bytes) -> None:
+        self.type = type_
+        self.data = data
+
+
+class _FakeWS:
+    def __init__(self, frames: list[_FakeMsg]) -> None:
+        self._frames = list(frames)
+
+    async def __aenter__(self) -> "_FakeWS":
+        return self
+
+    async def __aexit__(self, *a) -> None:
+        return None
+
+    async def receive(self) -> _FakeMsg:
+        if not self._frames:
+            from aiohttp import WSMsgType
+            return _FakeMsg(WSMsgType.CLOSED, b"")
+        return self._frames.pop(0)
+
+
+@pytest.mark.asyncio
+async def test_run_command_aggregates_stdout_and_returns_exit_zero() -> None:
+    from aiohttp import WSMsgType
+    from kubernetes_asyncio.stream.ws_client import STDOUT_CHANNEL
+
+    ws_core = MagicMock()
+
+    async def _connect(*args, **kwargs):
+        return _FakeWS([
+            _FakeMsg(WSMsgType.BINARY, bytes([STDOUT_CHANNEL]) + b"hello\n"),
+        ])
+
+    ws_core.connect_get_namespaced_pod_exec = _connect
+    ws_api = MagicMock()
+    ws_api.parse_error_data = MagicMock(return_value=0)
+    api = _KubernetesSandboxAPI(
+        ws_core_api=ws_core,
+        ws_api_client=ws_api,
+        namespace="centaur-system",
+    )
+    res = await api.run_command("sbx-1", "echo hello", timeout_s=10.0)
+    assert res.stdout == "hello\n"
+    assert res.stderr == ""
+    assert res.exit_code == 0
+
+
+@pytest.mark.asyncio
+async def test_run_command_captures_stderr_channel() -> None:
+    from aiohttp import WSMsgType
+    from kubernetes_asyncio.stream.ws_client import STDERR_CHANNEL
+
+    ws_core = MagicMock()
+
+    async def _connect(*args, **kwargs):
+        return _FakeWS([
+            _FakeMsg(WSMsgType.BINARY, bytes([STDERR_CHANNEL]) + b"boom\n"),
+        ])
+
+    ws_core.connect_get_namespaced_pod_exec = _connect
+    ws_api = MagicMock()
+    ws_api.parse_error_data = MagicMock(return_value=0)
+    api = _KubernetesSandboxAPI(
+        ws_core_api=ws_core,
+        ws_api_client=ws_api,
+        namespace="centaur-system",
+    )
+    res = await api.run_command("sbx-1", "false", timeout_s=10.0)
+    assert res.stderr == "boom\n"
+
+
+@pytest.mark.asyncio
+async def test_run_command_extracts_exit_code_from_error_channel() -> None:
+    from aiohttp import WSMsgType
+    from kubernetes_asyncio.stream.ws_client import ERROR_CHANNEL
+
+    ws_core = MagicMock()
+    payload = b'{"status":"Failure","reason":"NonZeroExitCode","details":{"causes":[{"reason":"ExitCode","message":"42"}]}}'
+
+    async def _connect(*args, **kwargs):
+        return _FakeWS([
+            _FakeMsg(WSMsgType.BINARY, bytes([ERROR_CHANNEL]) + payload),
+        ])
+
+    ws_core.connect_get_namespaced_pod_exec = _connect
+    ws_api = MagicMock()
+    ws_api.parse_error_data = MagicMock(return_value=42)
+    api = _KubernetesSandboxAPI(
+        ws_core_api=ws_core,
+        ws_api_client=ws_api,
+        namespace="centaur-system",
+    )
+    res = await api.run_command("sbx-1", "exit 42", timeout_s=10.0)
+    assert res.exit_code == 42
+    ws_api.parse_error_data.assert_called_once()
 
 
 @pytest.mark.asyncio
 async def test_namespace_defaults_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KUBERNETES_NAMESPACE", "centaur-test")
-    api = _KubernetesSandboxAPI(core_api=MagicMock())
+    api = _KubernetesSandboxAPI()
     assert api.namespace == "centaur-test"
 ```
 
-- [ ] **Step 2: Run the test to confirm it fails**
+- [ ] **Step 5: Run the tests to confirm they fail**
+
+Update `overlay/tools/bfts_executor/pyproject.toml`: add `aiohttp` to the dependencies list (the dependency block already declared in Task 1.1):
+
+```toml
+dependencies = [
+    "kubernetes-asyncio>=29.0.0",
+    "aiohttp>=3.9.0",
+    "dataclasses-json>=0.6.0",
+]
+```
+
+Then:
 
 ```bash
-cd overlay/tools/bfts_executor && uv run --python 3.11 --with pytest --with pytest-asyncio --with dataclasses-json --with kubernetes-asyncio pytest tests/test_kubernetes_api_calls.py -v
+cd overlay/tools/bfts_executor && uv run --python 3.11 --with pytest --with pytest-asyncio --with dataclasses-json --with kubernetes-asyncio --with aiohttp pytest tests/test_create_sandbox_body.py tests/test_sandbox_lifecycle.py tests/test_kubernetes_api_calls.py -v
 ```
 
 Expected: FAIL with `ImportError: cannot import name '_KubernetesSandboxAPI' from 'client'`.
 
-- [ ] **Step 3: Implement `_KubernetesSandboxAPI`**
+- [ ] **Step 6: Implement `_KubernetesSandboxAPI`**
 
-Append to `overlay/tools/bfts_executor/client.py`:
+Replace (do not append — fully replace any prior simple-exec implementation) the bottom of `overlay/tools/bfts_executor/client.py` with the following block. Lifted-from-upstream structures are flagged in comment headers so reviewers know what to compare against.
 
 ```python
 import os
 import time
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass
@@ -1372,33 +1691,252 @@ class _RealPodExecResult:
     duration_s: float
 
 
-class _KubernetesSandboxAPI:
-    """Drive a Sandbox CR's underlying pod via CoreV1Api.exec.
+# Constants for the BFTS Sandbox CRD body. Pinned to v1alpha1 to match the
+# upstream constant at .centaur/services/api/api/sandbox/
+# kubernetes_agent_sandbox.py:15-17. When upstream graduates v1beta1 (see
+# the deferred section of the plan) bump both in lockstep.
+_AGENT_SANDBOX_GROUP = "agents.x-k8s.io"
+_AGENT_SANDBOX_VERSION = "v1alpha1"
+_AGENT_SANDBOX_PLURAL = "sandboxes"
+_DEFAULT_EXECUTOR_IMAGE = "bfts-executor:latest"
+_DEFAULT_STORAGE_SIZE = "10Gi"
+_WORKSPACE_MOUNT_PATH = "/workspace"
+_WORKSPACE_VOLUME_NAME = "workspace"
 
-    Sandbox CR creation is owned by Centaur's existing
-    KubernetesAgentSandboxBackend (.centaur/services/api/api/sandbox/
-    kubernetes_agent_sandbox.py); this class is a *peer*, used only for
-    file write + command exec after the Sandbox is already up. The
-    sandbox_id == pod name in agent-sandbox v0.4.6 (research 01 §CRD
-    reference: 1:1 mapping is roadmap-but-effectively-stable).
+
+def _parse_ws_frame(data: bytes | str) -> tuple[int, str]:
+    # Lifted verbatim from .centaur/services/api/api/sandbox/kubernetes.py:393-396.
+    if isinstance(data, bytes):
+        return data[0], data[1:].decode("utf-8", errors="replace")
+    return ord(data[0]), data[1:]
+
+
+def _is_not_found(exc: BaseException) -> bool:
+    # Mirrors KubernetesExecutorBackend._is_not_found at kubernetes.py:490-492.
+    return getattr(exc, "status", None) == 404
+
+
+class _KubernetesSandboxAPI:
+    """Drive an `agents.x-k8s.io/v1alpha1` Sandbox CR end-to-end.
+
+    Owns CRD lifecycle (create / pause / resume / stop) AND pod exec; the
+    BFTS workflow's sandbox identity is independent of Centaur's
+    sandbox_sessions table — see Spec correction #11 (we do NOT call
+    `ctx.agent_turn` to provision sandboxes; that path drags in the
+    spawn → message → execute loop from `do_agent_turn` at
+    .centaur/services/api/api/workflow_engine.py:1124).
+
+    Constructor accepts pre-built API clients (for tests) or lazily loads
+    them at first use (production). Lazy init pattern mirrors
+    KubernetesExecutorBackend._ensure_clients at kubernetes.py:424-463.
     """
 
-    def __init__(self, core_api: Any | None = None, namespace: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        core_api: Any | None = None,
+        custom_api: Any | None = None,
+        networking_api: Any | None = None,
+        ws_core_api: Any | None = None,
+        ws_api_client: Any | None = None,
+        namespace: str | None = None,
+    ) -> None:
         self.core_api = core_api
+        self.custom_api = custom_api
+        self.networking_api = networking_api
+        self.ws_core_api = ws_core_api
+        self.ws_api_client = ws_api_client
         self.namespace = namespace or os.getenv("KUBERNETES_NAMESPACE", "centaur-system")
 
-    async def _ensure_core(self) -> Any:
-        if self.core_api is not None:
-            return self.core_api
-        # Lazy import so the module is testable without kube_config available.
+    async def _ensure_clients(self) -> None:
+        if (
+            self.core_api is not None
+            and self.custom_api is not None
+            and self.networking_api is not None
+            and self.ws_core_api is not None
+            and self.ws_api_client is not None
+        ):
+            return
+        # Lazy import so the module is testable without a kube_config.
         from kubernetes_asyncio import client, config
+        from kubernetes_asyncio.config.config_exception import ConfigException
+        from kubernetes_asyncio.stream import WsApiClient
 
         try:
             config.load_incluster_config()
-        except config.ConfigException:
+        except ConfigException:
             await config.load_kube_config()
-        self.core_api = client.CoreV1Api()
-        return self.core_api
+        core_api_client = client.ApiClient(
+            configuration=client.Configuration.get_default_copy()
+        )
+        if self.core_api is None:
+            self.core_api = client.CoreV1Api(api_client=core_api_client)
+        if self.custom_api is None:
+            self.custom_api = client.CustomObjectsApi(api_client=core_api_client)
+        if self.networking_api is None:
+            self.networking_api = client.NetworkingV1Api(api_client=core_api_client)
+        if self.ws_api_client is None:
+            self.ws_api_client = WsApiClient(
+                configuration=client.Configuration.get_default_copy(),
+                heartbeat=30,
+            )
+        if self.ws_core_api is None:
+            self.ws_core_api = client.CoreV1Api(api_client=self.ws_api_client)
+
+    # ----- CRD lifecycle (mirrors kubernetes_agent_sandbox.py:109-217) -----
+
+    async def create_sandbox(
+        self,
+        sandbox_id: str,
+        *,
+        run_id: str,
+        image: str = _DEFAULT_EXECUTOR_IMAGE,
+        storage_size: str = _DEFAULT_STORAGE_SIZE,
+        storage_class: str | None = None,
+    ) -> None:
+        """Create a BFTS Sandbox CRD with inline volumeClaimTemplates.
+
+        Body shape mirrors KubernetesAgentSandboxBackend._create_workload
+        at .centaur/services/api/api/sandbox/kubernetes_agent_sandbox.py:
+        109-154 — same spec.replicas/service/shutdownPolicy defaults, same
+        volumeClaimTemplates layout. Differences:
+          * labels select on `centaur.ai/bfts-sandbox`, NOT
+            `centaur.ai/managed`, so the chart's -sandbox NetworkPolicy
+            (.centaur/contrib/chart/templates/networkpolicy.yaml:307-327)
+            does not lock our egress to api:8000 only.
+          * volumeClaimTemplates is set unconditionally (we do not read the
+            global KUBERNETES_SANDBOX_STATE_VOLUME_ENABLED env var; Spec
+            correction #12).
+          * podTemplate.spec.containers uses the overlay-owned
+            bfts-executor image and a `sleep infinity` CMD — no harness.
+        """
+        await self._ensure_clients()
+        labels = {
+            "centaur.ai/bfts-sandbox": "true",
+            "centaur.ai/bfts-run": run_id,
+        }
+        pvc_spec: dict[str, Any] = {
+            "accessModes": ["ReadWriteOnce"],
+            "resources": {"requests": {"storage": storage_size}},
+        }
+        if storage_class:
+            pvc_spec["storageClassName"] = storage_class
+        body: dict[str, Any] = {
+            "apiVersion": f"{_AGENT_SANDBOX_GROUP}/{_AGENT_SANDBOX_VERSION}",
+            "kind": "Sandbox",
+            "metadata": {"name": sandbox_id, "labels": labels},
+            "spec": {
+                "replicas": 1,
+                "service": False,
+                "shutdownPolicy": "Retain",
+                "volumeClaimTemplates": [
+                    {"metadata": {"name": _WORKSPACE_VOLUME_NAME}, "spec": pvc_spec},
+                ],
+                "podTemplate": {
+                    "metadata": {"labels": labels},
+                    "spec": {
+                        "containers": [
+                            {
+                                "name": "sandbox",
+                                "image": image,
+                                "imagePullPolicy": "IfNotPresent",
+                                "command": ["sleep", "infinity"],
+                                "workingDir": _WORKSPACE_MOUNT_PATH,
+                                "volumeMounts": [
+                                    {
+                                        "name": _WORKSPACE_VOLUME_NAME,
+                                        "mountPath": _WORKSPACE_MOUNT_PATH,
+                                    },
+                                ],
+                            }
+                        ],
+                    },
+                },
+            },
+        }
+        await self.custom_api.create_namespaced_custom_object(
+            _AGENT_SANDBOX_GROUP,
+            _AGENT_SANDBOX_VERSION,
+            self.namespace,
+            _AGENT_SANDBOX_PLURAL,
+            body,
+        )
+
+    async def pause_sandbox(self, sandbox_id: str) -> None:
+        """Patch the Sandbox to replicas=0; the controller deletes the pod.
+
+        Mirrors kubernetes_agent_sandbox.py:159-172.
+        """
+        await self._ensure_clients()
+        await self.custom_api.patch_namespaced_custom_object(
+            _AGENT_SANDBOX_GROUP,
+            _AGENT_SANDBOX_VERSION,
+            self.namespace,
+            _AGENT_SANDBOX_PLURAL,
+            sandbox_id,
+            {"spec": {"replicas": 0}},
+            _content_type="application/merge-patch+json",
+        )
+
+    async def resume_sandbox(
+        self, sandbox_id: str, *, ready_timeout_s: float = 120.0
+    ) -> None:
+        """Patch the Sandbox to replicas=1, then wait for the pod to be Ready.
+
+        Mirrors kubernetes_agent_sandbox.py:174-185.
+        """
+        await self._ensure_clients()
+        await self.custom_api.patch_namespaced_custom_object(
+            _AGENT_SANDBOX_GROUP,
+            _AGENT_SANDBOX_VERSION,
+            self.namespace,
+            _AGENT_SANDBOX_PLURAL,
+            sandbox_id,
+            {"spec": {"replicas": 1}},
+            _content_type="application/merge-patch+json",
+        )
+        await self._wait_pod_ready(sandbox_id, timeout_s=ready_timeout_s)
+
+    async def stop_sandbox(self, sandbox_id: str) -> None:
+        """Delete the Sandbox CRD; PVC follows via owner refs.
+
+        Mirrors kubernetes_agent_sandbox.py:74-85 + 212-217. 404 is OK
+        (idempotent stop).
+        """
+        await self._ensure_clients()
+        try:
+            await self.custom_api.delete_namespaced_custom_object(
+                _AGENT_SANDBOX_GROUP,
+                _AGENT_SANDBOX_VERSION,
+                self.namespace,
+                _AGENT_SANDBOX_PLURAL,
+                sandbox_id,
+            )
+        except Exception as exc:
+            if not _is_not_found(exc):
+                raise
+
+    async def _wait_pod_ready(self, sandbox_id: str, *, timeout_s: float) -> None:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            try:
+                pod = await self.core_api.read_namespaced_pod(
+                    sandbox_id, self.namespace
+                )
+            except Exception as exc:
+                if _is_not_found(exc):
+                    await _sleep(0.5)
+                    continue
+                raise
+            phase = (getattr(getattr(pod, "status", None), "phase", "") or "").lower()
+            if phase == "running":
+                return
+            await _sleep(0.5)
+        raise TimeoutError(
+            f"sandbox readiness timed out after {timeout_s:.0f}s: {sandbox_id}"
+        )
+
+    # ----- pod exec via WsApiClient (mirrors kubernetes.py:1503-1551) -----
 
     async def run_command(
         self,
@@ -1407,100 +1945,482 @@ class _KubernetesSandboxAPI:
         *,
         timeout_s: float,
     ) -> _RealPodExecResult:
-        api = await self._ensure_core()
+        await self._ensure_clients()
+        from aiohttp import WSMsgType
+        from kubernetes_asyncio.stream.ws_client import (
+            ERROR_CHANNEL,
+            STDERR_CHANNEL,
+            STDOUT_CHANNEL,
+        )
+
         start = time.perf_counter()
-        resp = await api.connect_get_namespaced_pod_exec(
+        websocket_ctx = await self.ws_core_api.connect_get_namespaced_pod_exec(
             sandbox_id,
-            namespace=self.namespace,
+            self.namespace,
             command=["/bin/sh", "-c", command],
-            stdout=True,
+            container="sandbox",
             stderr=True,
             stdin=False,
+            stdout=True,
             tty=False,
+            _preload_content=False,
         )
-        # connect_get_namespaced_pod_exec returns a string (combined stdout
-        # of /bin/sh -c <cmd>); the exit code is not exposed by the upgrade
-        # protocol used here. We rely on the in-sandbox command itself
-        # appending an `; echo "__EXIT__$?"` marker for exit-code capture.
-        # See Task 1.7 for the marker-extraction helper.
+        stdout_parts: list[str] = []
+        stderr_parts: list[str] = []
+        error_data = ""
+        async with websocket_ctx as websocket:
+            while True:
+                msg = await websocket.receive()
+                if msg.type in {WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED}:
+                    break
+                if msg.type not in {WSMsgType.BINARY, WSMsgType.TEXT}:
+                    continue
+                channel, payload = _parse_ws_frame(msg.data)
+                if channel == STDOUT_CHANNEL:
+                    stdout_parts.append(payload)
+                elif channel == STDERR_CHANNEL:
+                    stderr_parts.append(payload)
+                elif channel == ERROR_CHANNEL:
+                    error_data += payload
+        exit_code = (
+            self.ws_api_client.parse_error_data(error_data) if error_data else 0
+        )
         duration = time.perf_counter() - start
-        stdout, stderr, exit_code = _split_exec_response(resp)
         return _RealPodExecResult(
-            stdout=stdout, stderr=stderr, exit_code=exit_code, duration_s=duration
+            stdout="".join(stdout_parts),
+            stderr="".join(stderr_parts),
+            exit_code=exit_code,
+            duration_s=duration,
         )
 
     async def write_file(self, sandbox_id: str, path: str, content: str) -> None:
-        # Centaur's agent image has /bin/sh; we tar-stream the file in via
-        # exec with stdin. Simpler alternative: heredoc the bytes — works
-        # for code (text). We use the heredoc path because BFTS code is
-        # always UTF-8 text.
+        # Heredoc-stream the file via /bin/sh. UTF-8 text only (BFTS code).
         encoded = content.replace("'", "'\\''")
-        cmd = f"mkdir -p $(dirname '{path}') && cat > '{path}' << '__BFTS_EOF__'\n{encoded}\n__BFTS_EOF__"
+        cmd = (
+            f"mkdir -p $(dirname '{path}') && cat > '{path}' << '__BFTS_EOF__'\n"
+            f"{encoded}\n__BFTS_EOF__"
+        )
         await self.run_command(sandbox_id, cmd, timeout_s=30.0)
 
     async def list_dir(self, sandbox_id: str, path: str) -> list[str]:
         result = await self.run_command(
             sandbox_id, f"ls -1 '{path}' 2>/dev/null || true", timeout_s=10.0
         )
-        # Stdout is one filename per line under <path>; we return absolute paths.
         return [f"{path}/{n}" for n in result.stdout.splitlines() if n.strip()]
 
     async def read_file_bytes(self, sandbox_id: str, path: str) -> bytes:
-        # base64 round-trip keeps binary safe through the exec text channel.
+        import base64
+
         result = await self.run_command(
             sandbox_id, f"base64 -w0 '{path}'", timeout_s=60.0
         )
-        import base64
         return base64.b64decode(result.stdout.strip())
 
 
-def _split_exec_response(resp: str) -> tuple[str, str, int]:
-    """Parse Centaur's __EXIT__ marker out of the combined stdout."""
-    if "__BFTS_EXIT__" not in resp:
-        # No marker = the upstream caller didn't append one (e.g. write_file
-        # heredoc); treat success.
-        return resp, "", 0
-    body, _, tail = resp.rpartition("__BFTS_EXIT__")
-    exit_code = int(tail.strip() or "0")
-    return body, "", exit_code
+async def _sleep(seconds: float) -> None:
+    # Local helper so tests can monkeypatch sleep if they want to.
+    import asyncio
+
+    await asyncio.sleep(seconds)
 ```
 
-Note the `__BFTS_EXIT__` marker scheme: Kubernetes's `pod/exec` endpoint over the v1 API doesn't expose the exit code on the SPDY upgrade we use here. We wrap every command with `<cmd>; printf "\n__BFTS_EXIT__%s\n" "$?"` so the exit code rides back in stdout. Update `exec_python` to wrap the timeout command:
+Also extend `BFTSExecutor` (defined in Task 1.3) so workflow code can call `executor.create_sandbox(...)` / `pause_sandbox(...)` / `resume_sandbox(...)` / `stop_sandbox(...)` directly. Add these methods inside `BFTSExecutor` after `exec_python`:
 
 ```python
-        command = (
-            f"mkdir -p {WORKING_DIR} && cd {WORKING_DIR} && "
-            f"timeout --signal=INT --kill-after=60 {int(timeout_s)} "
-            f"python -u {runfile_path}"
-            f"; printf '\\n__BFTS_EXIT__%s\\n' \"$?\""
+    async def create_sandbox(
+        self,
+        sandbox_id: str,
+        *,
+        run_id: str,
+        image: str = "bfts-executor:latest",
+        storage_size: str = "10Gi",
+        storage_class: str | None = None,
+    ) -> str:
+        api = self._require_api()
+        await api.create_sandbox(
+            sandbox_id,
+            run_id=run_id,
+            image=image,
+            storage_size=storage_size,
+            storage_class=storage_class,
         )
+        # Block until the pod is Ready so the workflow can immediately exec
+        # without an extra wait step.
+        await api._wait_pod_ready(sandbox_id, timeout_s=180.0)  # type: ignore[attr-defined]
+        return sandbox_id
+
+    async def pause_sandbox(self, sandbox_id: str) -> None:
+        await self._require_api().pause_sandbox(sandbox_id)
+
+    async def resume_sandbox(self, sandbox_id: str) -> None:
+        await self._require_api().resume_sandbox(sandbox_id)
+
+    async def stop_sandbox(self, sandbox_id: str) -> None:
+        await self._require_api().stop_sandbox(sandbox_id)
 ```
 
-(Edit `exec_python` in place: insert the `; printf '\\n__BFTS_EXIT__%s\\n' "$?"` suffix at the end of the existing `command = ...` block from Task 1.3.)
+Update the `_SandboxAPI` Protocol at the top of `client.py` to include the new methods (otherwise type checkers complain when the workflow calls `executor.create_sandbox`). Replace the existing Protocol block:
 
-- [ ] **Step 4: Re-run all `bfts_executor` tests**
+```python
+class _SandboxAPI(Protocol):
+    async def create_sandbox(
+        self,
+        sandbox_id: str,
+        *,
+        run_id: str,
+        image: str = ...,
+        storage_size: str = ...,
+        storage_class: str | None = ...,
+    ) -> None: ...
 
-The Task 1.3/1.4/1.5 tests use a fake `_SandboxAPI` and don't see the `__BFTS_EXIT__` marker — but Task 1.3's fakes don't *capture* the suffix either, so the assertions don't break (the suffix is just an extra substring at the end of the command). Verify:
+    async def pause_sandbox(self, sandbox_id: str) -> None: ...
 
-```bash
-cd overlay/tools/bfts_executor && uv run --python 3.11 --with pytest --with pytest-asyncio --with dataclasses-json --with kubernetes-asyncio pytest tests/ -v
+    async def resume_sandbox(self, sandbox_id: str) -> None: ...
+
+    async def stop_sandbox(self, sandbox_id: str) -> None: ...
+
+    async def write_file(self, sandbox_id: str, path: str, content: str) -> None: ...
+
+    async def run_command(
+        self, sandbox_id: str, command: str, *, timeout_s: float
+    ) -> _PodExecResult: ...
+
+    async def list_dir(self, sandbox_id: str, path: str) -> list[str]: ...
+
+    async def read_file_bytes(self, sandbox_id: str, path: str) -> bytes: ...
 ```
 
-Expected: all tests pass (the Task 1.3 `test_exec_python_writes_runfile_and_invokes_python` assertion uses `in` substring matching for `"python -u /home/agent/state/working/runfile.py"`, which is still in the command — the new exit-marker suffix doesn't break that match).
-
-- [ ] **Step 5: Commit**
+Confirm the Task 1.3 `WORKING_DIR` constant at the top of `client.py` is already `"/workspace/working"` (set in Task 1.3 — the bfts-executor image's `WORKDIR /workspace` makes Sakana's `os.path.join(os.getcwd(), 'working')` resolve here). Then re-run the Task 1.3/1.5 tests as a regression check:
 
 ```bash
-git add overlay/tools/bfts_executor/client.py \
-        overlay/tools/bfts_executor/tests/test_kubernetes_api_calls.py
-git commit -m "feat(bfts): add Kubernetes-backed sandbox API + exit-code marker"
+cd overlay/tools/bfts_executor && uv run --python 3.11 --with pytest --with pytest-asyncio --with dataclasses-json pytest tests/test_exec_python_happy.py tests/test_collect_artifacts.py -v
+```
+
+Expected: still 3 + 1 passing.
+
+- [ ] **Step 7: Run the new tests to verify they pass**
+
+```bash
+cd overlay/tools/bfts_executor && uv run --python 3.11 --with pytest --with pytest-asyncio --with dataclasses-json --with kubernetes-asyncio --with aiohttp pytest tests/ -v
+```
+
+Expected: every test in the tool's `tests/` directory passes — `test_create_sandbox_body.py` (2), `test_sandbox_lifecycle.py` (4), `test_kubernetes_api_calls.py` (4), `test_execution_result_shape.py` (3), `test_exec_python_happy.py` (3), `test_exec_python_timeout.py` (2), `test_collect_artifacts.py` (1).
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add overlay/Dockerfile.bfts-executor Justfile \
+        overlay/tools/bfts_executor/client.py \
+        overlay/tools/bfts_executor/pyproject.toml \
+        overlay/tools/bfts_executor/tests/test_create_sandbox_body.py \
+        overlay/tools/bfts_executor/tests/test_sandbox_lifecycle.py \
+        overlay/tools/bfts_executor/tests/test_kubernetes_api_calls.py \
+        overlay/tools/bfts_executor/tests/test_exec_python_happy.py \
+        overlay/tools/bfts_executor/tests/test_collect_artifacts.py
+git commit -m "feat(bfts): real Kubernetes-backed sandbox API — CRD lifecycle + WsApiClient exec"
 ```
 
 ---
 
-## Task 1.7: Wire `BFTSExecutor` as a real Centaur tool
+## Task 1.7: Idempotent `bfts-sandbox-egress` NetworkPolicy
 
-**Why:** Tasks 1.1–1.6 produced a Python class with tests; for the workflow to call it as `await ctx.tools.bfts_executor.exec_python(...)`, we need the module-level `_client()` factory that Centaur's tool loader expects (research 03 §Tool programming model). This is a 3-line glue addition.
+**Why:** Spec correction #13 — BFTS pods need additive egress allow rules (TCP/8000 to api for status callbacks; TCP/443 to internet for datasets + PyPI) layered onto the chart's existing default-deny (`.centaur/contrib/chart/templates/networkpolicy.yaml:9-13`) and `-allow-dns` (L15-34). K8s NetworkPolicy is union-based, so a single namespace-scoped `Egress`-only rule selecting `centaur.ai/bfts-sandbox: "true"` is sufficient and additive. We deliberately do NOT add `centaur.ai/managed: "true"` to BFTS pods because that label is the podSelector for the chart's `-sandbox` policy at L307-327 which locks egress to api:8000 only. Idempotency via 409-catch follows the same pattern Centaur uses elsewhere (`.centaur/services/api/api/sandbox/kubernetes.py` proxy NetworkPolicy creation at L696-816 uses delete-then-create; we use try-create-catch-409 because BFTS is single-namespace and many concurrent runs will try to create the same policy).
+
+**Files:**
+- Create: `overlay/tools/bfts_executor/network_policy.py`
+- Create: `overlay/tools/bfts_executor/tests/test_network_policy.py`
+- Modify: `overlay/tools/bfts_executor/client.py` (call `ensure_sandbox_egress_policy` from `create_sandbox`)
+
+- [ ] **Step 1: Write the failing test**
+
+`overlay/tools/bfts_executor/tests/test_network_policy.py`:
+
+```python
+"""Test: ensure_sandbox_egress_policy is idempotent + carries correct rules."""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from network_policy import (
+    POLICY_NAME,
+    ensure_sandbox_egress_policy,
+)
+
+
+@pytest.mark.asyncio
+async def test_creates_policy_with_bfts_selector_and_additive_egress() -> None:
+    api = MagicMock()
+    api.create_namespaced_network_policy = AsyncMock(return_value=None)
+    await ensure_sandbox_egress_policy(api, namespace="centaur-system")
+    api.create_namespaced_network_policy.assert_awaited_once()
+    args = api.create_namespaced_network_policy.call_args.args
+    assert args[0] == "centaur-system"
+    body = args[1]
+    assert body["apiVersion"] == "networking.k8s.io/v1"
+    assert body["kind"] == "NetworkPolicy"
+    assert body["metadata"]["name"] == POLICY_NAME == "bfts-sandbox-egress"
+    spec = body["spec"]
+    assert spec["podSelector"]["matchLabels"] == {"centaur.ai/bfts-sandbox": "true"}
+    # Egress-only — Ingress + DNS are covered by the chart's default-deny
+    # + -allow-dns policies (.centaur/contrib/chart/templates/
+    # networkpolicy.yaml:9-34).
+    assert spec["policyTypes"] == ["Egress"]
+    # Two rules: api:8000 + internet:443.
+    rules = spec["egress"]
+    assert len(rules) == 2
+    api_rule = rules[0]
+    assert api_rule["ports"] == [{"protocol": "TCP", "port": 8000}]
+    assert any(
+        peer.get("podSelector", {}).get("matchLabels", {}).get(
+            "app.kubernetes.io/component"
+        )
+        == "api"
+        for peer in api_rule["to"]
+    )
+    internet_rule = rules[1]
+    assert internet_rule["ports"] == [{"protocol": "TCP", "port": 443}]
+    assert "to" not in internet_rule or internet_rule["to"] == []
+
+
+@pytest.mark.asyncio
+async def test_409_conflict_is_silent_idempotent() -> None:
+    api = MagicMock()
+    conflict = type("E", (Exception,), {"status": 409})()
+    api.create_namespaced_network_policy = AsyncMock(side_effect=conflict)
+    # Must not raise.
+    await ensure_sandbox_egress_policy(api, namespace="centaur-system")
+
+
+@pytest.mark.asyncio
+async def test_other_status_codes_propagate() -> None:
+    api = MagicMock()
+    err = type("E", (Exception,), {"status": 500})()
+    api.create_namespaced_network_policy = AsyncMock(side_effect=err)
+    with pytest.raises(Exception):
+        await ensure_sandbox_egress_policy(api, namespace="centaur-system")
+```
+
+- [ ] **Step 2: Run to confirm failure**
+
+```bash
+cd overlay/tools/bfts_executor && uv run --python 3.11 --with pytest --with pytest-asyncio --with kubernetes-asyncio --with aiohttp pytest tests/test_network_policy.py -v
+```
+
+Expected: FAIL with `ModuleNotFoundError: No module named 'network_policy'`.
+
+- [ ] **Step 3: Implement `network_policy.py`**
+
+`overlay/tools/bfts_executor/network_policy.py`:
+
+```python
+"""Idempotent `bfts-sandbox-egress` NetworkPolicy.
+
+The chart-shipped default-deny (.centaur/contrib/chart/templates/
+networkpolicy.yaml:9-13) blocks all traffic, and `-allow-dns` (L15-34)
+re-allows kube-dns. K8s NetworkPolicies are union-based, so adding this
+namespace-scoped Egress-only rule on top is additive: pods labeled
+`centaur.ai/bfts-sandbox: "true"` get api:8000 + internet:443 in
+addition to DNS, while ingress remains denied.
+
+We deliberately do NOT add `centaur.ai/managed: "true"` to BFTS pods —
+that label is the podSelector for the chart's `-sandbox` policy at L307-
+327 which restricts egress to api:8000 only and would block PyPI /
+dataset fetches.
+
+RBAC: `.centaur/contrib/chart/templates/rbac.yaml:39-41` already grants
+the api service account create/delete/get/list/watch on
+networking.k8s.io/networkpolicies.
+"""
+from __future__ import annotations
+
+from typing import Any
+
+POLICY_NAME = "bfts-sandbox-egress"
+
+
+def _is_conflict(exc: BaseException) -> bool:
+    return getattr(exc, "status", None) == 409
+
+
+def _build_body() -> dict[str, Any]:
+    return {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "metadata": {
+            "name": POLICY_NAME,
+            "labels": {"centaur.ai/bfts": "true"},
+        },
+        "spec": {
+            "podSelector": {"matchLabels": {"centaur.ai/bfts-sandbox": "true"}},
+            "policyTypes": ["Egress"],
+            "egress": [
+                {
+                    "to": [
+                        {
+                            "podSelector": {
+                                "matchLabels": {
+                                    "app.kubernetes.io/component": "api",
+                                }
+                            }
+                        }
+                    ],
+                    "ports": [{"protocol": "TCP", "port": 8000}],
+                },
+                {
+                    "ports": [{"protocol": "TCP", "port": 443}],
+                },
+            ],
+        },
+    }
+
+
+async def ensure_sandbox_egress_policy(
+    networking_api: Any, *, namespace: str
+) -> None:
+    """Create the policy if missing; swallow 409 if it already exists."""
+    try:
+        await networking_api.create_namespaced_network_policy(namespace, _build_body())
+    except Exception as exc:
+        if not _is_conflict(exc):
+            raise
+```
+
+Wire it into `create_sandbox` (modify `overlay/tools/bfts_executor/client.py`). Inside `_KubernetesSandboxAPI.create_sandbox`, **immediately after** the `await self._ensure_clients()` call, insert:
+
+```python
+        from network_policy import ensure_sandbox_egress_policy
+
+        await ensure_sandbox_egress_policy(
+            self.networking_api, namespace=self.namespace
+        )
+```
+
+- [ ] **Step 4: Run the test to verify it passes**
+
+```bash
+cd overlay/tools/bfts_executor && uv run --python 3.11 --with pytest --with pytest-asyncio --with kubernetes-asyncio --with aiohttp pytest tests/test_network_policy.py tests/test_create_sandbox_body.py -v
+```
+
+Expected: 3 + 2 = 5 passed.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add overlay/tools/bfts_executor/network_policy.py \
+        overlay/tools/bfts_executor/tests/test_network_policy.py \
+        overlay/tools/bfts_executor/client.py
+git commit -m "feat(bfts): idempotent bfts-sandbox-egress NetworkPolicy"
+```
+
+---
+
+## Task 1.8: Pause/resume retention round-trip smoke
+
+**Why:** Spec correction #12 says PVC retention across pause/resume is shipped already (`shutdownPolicy: "Retain"` + `replicas: 0|1` patch — `.centaur/services/api/api/sandbox/kubernetes_agent_sandbox.py:114, 159-185`); this task PROVES it end-to-end against the real cluster with the BFTS executor we just built. Without this smoke we have unit tests of the CRD body but no evidence that BFTS state actually survives a pause cycle, which is the entire reason we use the agent-sandbox controller.
+
+**Files:**
+- Modify: `Justfile` (add `bfts-retention-smoke` recipe)
+
+- [ ] **Step 1: Define the verification command**
+
+The recipe should, from inside the api pod where `BFTSExecutor` and its `_KubernetesSandboxAPI` already have a kubeconfig:
+1. Create a Sandbox via `await ctx.tools.bfts_executor.create_sandbox(...)` — but the workflow doesn't exist yet, so we run the script directly via `kubectl exec deploy/<api> -- python -c '<script>'` to drive the tool out-of-band.
+2. Write `RETENTION_OK` to `/workspace/sentinel.txt`.
+3. Pause the sandbox (`replicas: 0`).
+4. Resume the sandbox (`replicas: 1` + wait-ready).
+5. Read `/workspace/sentinel.txt` back and assert it still says `RETENTION_OK`.
+6. Stop the sandbox (delete CRD, PVC reaped via owner refs).
+
+Verification: `just bfts-retention-smoke` exits 0 and prints `RETENTION SMOKE OK`.
+
+- [ ] **Step 2: Run before the edit to confirm it fails**
+
+```bash
+just bfts-retention-smoke
+```
+
+Expected: `error: Justfile does not contain recipe 'bfts-retention-smoke'`.
+
+- [ ] **Step 3: Add the recipe**
+
+Append to `Justfile`:
+
+```just
+# Phase 1 end-to-end: prove that BFTS sandbox PVC retention works
+# across pause/resume. Drives BFTSExecutor (already deployed in the
+# overlay image) from inside the api pod via `kubectl exec`. See
+# docs/superpowers/plans/2026-05-25-bfts-on-centaur.md (Phase 1 Task 1.8).
+[group('bfts')]
+bfts-retention-smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    api_deploy="deploy/${CENTAUR_RELEASE}-centaur-api"
+    sandbox_id="bfts-retention-smoke-$(date +%s)"
+    py="$(cat <<'PY'
+    import asyncio, os, sys
+    sys.path.insert(0, "/app/overlay/org/tools/bfts_executor")
+    from client import BFTSExecutor, _KubernetesSandboxAPI
+
+    async def main(sandbox_id: str) -> None:
+        api = _KubernetesSandboxAPI()
+        executor = BFTSExecutor(sandbox_api=api)
+        try:
+            await executor.create_sandbox(
+                sandbox_id, run_id="retention-smoke"
+            )
+            await api.write_file(
+                sandbox_id, "/workspace/sentinel.txt", "RETENTION_OK"
+            )
+            await executor.pause_sandbox(sandbox_id)
+            await executor.resume_sandbox(sandbox_id)
+            res = await api.run_command(
+                sandbox_id, "cat /workspace/sentinel.txt", timeout_s=10.0
+            )
+            if res.stdout.strip() != "RETENTION_OK":
+                raise SystemExit(
+                    f"sentinel mismatch: '{res.stdout!r}' exit={res.exit_code}"
+                )
+            print("RETENTION SMOKE OK")
+        finally:
+            await executor.stop_sandbox(sandbox_id)
+
+    asyncio.run(main(os.environ["SANDBOX_ID"]))
+    PY
+    )"
+    kubectl -n $CENTAUR_NAMESPACE exec "$api_deploy" -c api \
+        -- env SANDBOX_ID="$sandbox_id" python -c "$py"
+```
+
+- [ ] **Step 4: Build + deploy + run the smoke**
+
+```bash
+just bfts-build-executor
+just overlay::build
+just deploy
+kubectl rollout status -n centaur-system deploy/centaur-centaur-api --timeout=120s
+just bfts-retention-smoke
+```
+
+Expected output (final line): `RETENTION SMOKE OK`. If pause/resume hangs, check `kubectl -n $CENTAUR_NAMESPACE get sandbox.agents.x-k8s.io -l centaur.ai/bfts-sandbox=true -o yaml | grep -A2 replicas` to see what state the CR is in.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add Justfile
+git commit -m "feat(bfts): add bfts-retention-smoke recipe (pause/resume round-trip)"
+```
+
+---
+
+## Task 1.9: Wire `BFTSExecutor` as a real Centaur tool
+
+**Why:** Tasks 1.1–1.8 produced a Python class with unit tests and a passing pause/resume retention smoke; for the workflow to call it as `await ctx.tools.bfts_executor.create_sandbox(...)` / `exec_python(...)` / etc., we need the module-level `_client()` factory that Centaur's tool loader expects (research 03 §Tool programming model). This is a 3-line glue addition.
 
 **Files:**
 - Modify: `overlay/tools/bfts_executor/client.py`
@@ -3617,7 +4537,7 @@ git commit -m "feat(bfts): add bfts_tree controller workflow (Stage 1)"
 
 ## Task 2.9: Root workflow `bfts_root.py`
 
-**Why:** Spawns `num_drafts` independent `bfts_tree` child workflows and waits for all (research 03 §Child workflow / fan-out). Pre-provisions one Sandbox per tree (we use a single sandbox per *tree*, not per *node*, for MVP — sandbox persistence via PVC means working state survives across expansions inside one tree; per research 01 §Hibernation = `replicas:0↔1`).
+**Why:** Spawns `num_drafts` independent `bfts_tree` child workflows and waits for all (research 03 §Child workflow / fan-out). Pre-provisions one Sandbox per tree (one Sandbox = one tree; working state lives on the Sandbox PVC and persists across pause/resume, research 01 §Hibernation correction). Per Spec correction #11 we **do not** call `ctx.agent_turn(...)` to provision the Sandbox — that path runs the spawn → message → execute → wait-for-terminal loop in `do_agent_turn` (`.centaur/services/api/api/workflow_engine.py:1124`) and drags in `spawn_assignment`, slackbot session opening, and agent-execution event rows. Instead, the workflow generates a deterministic `sandbox_id = f"bfts-{ctx.run_id}-tree-{i}"` and calls `bfts_executor.create_sandbox` via `ctx.step` (Task 1.6 implementation).
 
 **Files:**
 - Create: `overlay/workflows/bfts_root.py`
@@ -3628,7 +4548,7 @@ git commit -m "feat(bfts): add bfts_tree controller workflow (Stage 1)"
 `overlay/workflows/tests/test_bfts_root_handler.py`:
 
 ```python
-"""Test: bfts_root handler input parsing."""
+"""Test: bfts_root handler input parsing + deterministic sandbox_id format."""
 from __future__ import annotations
 
 import sys
@@ -3636,7 +4556,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from bfts_root import Input, WORKFLOW_NAME
+from bfts_root import Input, WORKFLOW_NAME, _sandbox_id
 
 
 def test_workflow_name() -> None:
@@ -3648,9 +4568,20 @@ def test_input_required_idea() -> None:
     assert inp.idea["name"] == "test"
     assert inp.num_drafts == 3
     assert inp.max_iters == 20
+
+
+def test_sandbox_id_is_deterministic_and_run_scoped() -> None:
+    assert _sandbox_id(run_id="run-abc", tree_idx=0) == "bfts-run-abc-tree-0"
+    assert _sandbox_id(run_id="run-abc", tree_idx=2) == "bfts-run-abc-tree-2"
+    # Different run -> different sandbox_id.
+    assert _sandbox_id(run_id="run-def", tree_idx=0) == "bfts-run-def-tree-0"
 ```
 
 - [ ] **Step 2: Run to confirm failure**
+
+```bash
+cd overlay/workflows && uv run --python 3.11 --with pytest --with pytest-asyncio pytest tests/test_bfts_root_handler.py -v
+```
 
 Expected: module not found.
 
@@ -3661,16 +4592,19 @@ Expected: module not found.
 ```python
 """Workflow: BFTS root — fans out num_drafts independent bfts_tree children.
 
-Each child gets a unique Sandbox pre-provisioned (one Sandbox = one tree;
-working state lives on the Sandbox PVC and persists across pause/resume,
-research 01 §Hibernation correction).
+Each child gets a Sandbox provisioned by `bfts_executor.create_sandbox`
+(Task 1.6 / 1.9 in plan Phase 1). We do NOT call `ctx.agent_turn` to
+provision — Spec correction #11: do_agent_turn (.centaur/services/api/api
+/workflow_engine.py:1124) is for spawn→message→execute→wait-for-terminal
+agent runs and drags in spawn_assignment, slackbot session opening, and
+agent-execution event rows that BFTS does not need (BFTS sandboxes have
+no harness; the executor's CMD is `sleep infinity`).
 
 See docs/superpowers/plans/2026-05-25-bfts-on-centaur.md (Phase 2).
 """
 from __future__ import annotations
 
 import sys
-import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -3694,22 +4628,28 @@ class Input:
     seed_base: int = 0
 
 
+def _sandbox_id(*, run_id: str, tree_idx: int) -> str:
+    """Deterministic per-tree sandbox id.
+
+    Format chosen so the BFTS executor's Sandbox CRDs are easy to scope
+    by run_id (label `centaur.ai/bfts-run`) and easy to clean up by
+    prefix. Stable across workflow restarts because `ctx.run_id` is
+    durable.
+    """
+    return f"bfts-{run_id}-tree-{tree_idx}"
+
+
 async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
-    # Pre-provision one sandbox per tree. For MVP we use the agent_turn
-    # path's existing sandbox factory by spawning a single "warmup" agent
-    # turn per tree — this triggers KubernetesAgentSandboxBackend to
-    # create the Sandbox CR + state PVC. We capture the resulting
-    # sandbox_id from the agent_turn result for the child workflow.
     children: list[dict[str, Any]] = []
     for i in range(inp.num_drafts):
-        warmup = await ctx.step(
-            f"warmup_{i}",
-            lambda j=i: ctx.agent_turn(
-                "Initialize sandbox: `mkdir -p /home/agent/state/working` then reply OK.",
-                thread_key=f"bfts:{ctx.run_id}:tree:{j}",
+        sandbox_id = _sandbox_id(run_id=ctx.run_id, tree_idx=i)
+        await ctx.step(
+            f"create_sandbox_{i}",
+            lambda sid=sandbox_id: ctx.tools.bfts_executor.create_sandbox(
+                sandbox_id=sid,
+                run_id=ctx.run_id,
             ),
         )
-        sandbox_id = (warmup.get("metadata") or {}).get("sandbox_id") or warmup.get("sandbox_id") or ""
         child_run_id = f"{ctx.run_id}:tree:{i}"
         child = await ctx.start_workflow(
             f"start_tree_{i}",
@@ -3729,7 +4669,9 @@ async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
             trigger_key=child_run_id,
             eager_start=True,
         )
-        children.append({"run_id": child["run_id"], "tree_index": i, "sandbox_id": sandbox_id})
+        children.append(
+            {"run_id": child["run_id"], "tree_index": i, "sandbox_id": sandbox_id}
+        )
 
     results: list[dict[str, Any]] = []
     for child in children:
@@ -3737,6 +4679,17 @@ async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
             f"wait_tree_{child['tree_index']}", run_id=child["run_id"]
         )
         results.append(res)
+
+    # Tear down each per-tree Sandbox now that all children are terminal.
+    # PVC follows owner refs (Spec correction #12 + agent-sandbox
+    # `shutdownPolicy: "Retain"` is overridden by an explicit delete).
+    for child in children:
+        await ctx.step(
+            f"stop_sandbox_{child['tree_index']}",
+            lambda sid=child["sandbox_id"]: ctx.tools.bfts_executor.stop_sandbox(
+                sandbox_id=sid
+            ),
+        )
 
     return {"trees": children, "results": results}
 ```
@@ -3747,13 +4700,13 @@ async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
 cd overlay/workflows && uv run --python 3.11 --with pytest --with pytest-asyncio pytest tests/test_bfts_root_handler.py -v
 ```
 
-Expected: 2 passed.
+Expected: 3 passed.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add overlay/workflows/bfts_root.py overlay/workflows/tests/test_bfts_root_handler.py
-git commit -m "feat(bfts): add bfts_root workflow (fans out num_drafts trees)"
+git commit -m "feat(bfts): add bfts_root workflow (deterministic sandbox_id, no agent_turn warmup)"
 ```
 
 ---
@@ -4623,16 +5576,27 @@ New workflow `overlay/workflows/bfts_reflection_nightly.py` with `SCHEDULE = {"c
 
 These cannot be done in this repo per the workspace AGENTS.md "never edit `.centaur/`" rule:
 
-1. **`.centaur/services/iron-proxy/iron-proxy.yaml`**: change `domains: ["*"]` to be Helm-configurable via a new `ironProxy.egressAllowlist` value. Until this lands upstream, the BFTS NetworkPolicy posture is "open egress through iron-proxy" — document this in `README.md` security section as a known gap.
-2. **`.centaur/services/api/api/sandbox/kubernetes_agent_sandbox.py:16`**: `_AGENT_SANDBOX_VERSION = "v1alpha1"` is hardcoded. When upstream agent-sandbox graduates v1alpha1 → v1beta1 (research 01 §Open questions #6), this constant breaks. Open a PR that reads the version from an env var.
-3. **`.centaur/services/api/api/sandbox/kubernetes_agent_sandbox.py:113`**: `service: False` is hardcoded. BFTS doesn't need stable DNS (we use pod-name = sandbox-name for exec), so this isn't blocking — but worth flagging if a future BFTS phase wants DNS-resolved sandbox identity.
+1. **`.centaur/services/api/api/sandbox/kubernetes_agent_sandbox.py:16`**: `_AGENT_SANDBOX_VERSION = "v1alpha1"` is hardcoded. When upstream agent-sandbox graduates v1alpha1 → v1beta1 (research 01 §Open questions #6), this constant breaks. Open a PR that reads the version from an env var. BFTS would bump the matching `_AGENT_SANDBOX_VERSION` constant at `overlay/tools/bfts_executor/client.py` in lockstep.
+2. **`.centaur/services/api/api/sandbox/kubernetes_agent_sandbox.py:113`**: `service: False` is hardcoded. BFTS doesn't need stable DNS (we use pod-name = sandbox-name for exec), so this isn't blocking — but worth flagging if a future BFTS phase wants DNS-resolved sandbox identity.
+
+**Explicitly out of scope:** iron-proxy's `domains: ["*"]` posture (`.centaur/services/iron-proxy/iron-proxy.yaml`) is **not** on this list. iron-proxy is not on the BFTS data path (Spec correction #10 + #13) — BFTS pods make no outbound LLM calls; the workflow controller calls model providers from inside the api pod via its own egress path. BFTS pod egress is scoped by the `bfts-sandbox-egress` NetworkPolicy created by Task 1.7, not by iron-proxy. No iron-proxy PR is required for BFTS.
 
 ## Phase 4g: Known fixes (deferred from MVP)
 
 - **MetricValue mean-collapse + first-metric direction footgun** (research 02 §Gotcha #7). The current `_bfts_metric.mean()` matches Sakana 1:1 to preserve behavior. Phase 4 fix: expose a Centaur-config reducer (`min`, `weighted_mean`, `lexicographic`) on `bfts_root.Input`.
 - **Plot selection when N > 10** (research 02 §VLM review). MVP truncates the first 10 plots; Sakana calls a feedback model to pick the 10 most informative.
 - **Journal-wide LLM summary** regenerated each step (research 02 §Gotcha #8) — extra cost per step. MVP skips it entirely.
-- **`_BFTS_EXIT__` marker collision**: agent code that prints the literal string `__BFTS_EXIT__` breaks exit-code parsing. Phase 4 fix: tar-stream the exit code through a side channel.
+- **(Resolved during planning — was: `__BFTS_EXIT__` marker collision.)** Task 1.6's real `_KubernetesSandboxAPI.run_command` reads the exit code from the upstream `WsApiClient` `ERROR_CHANNEL` JSON frame (mirroring `.centaur/services/api/api/sandbox/kubernetes.py:1503-1551`), so there is no in-band exit marker for agent code to collide with. Leaving the entry here to record the resolution.
+
+---
+
+## Closed during planning
+
+Three architectural questions were resolved during plan review and bound to concrete tasks above. Recorded here so future readers don't re-open them.
+
+- **Open Q-1 — Executor architecture (Architecture B):** "Should the BFTS executor warm up sandboxes through `ctx.agent_turn(...)` and pull `sandbox_id` from its return dict?" → **No.** `do_agent_turn` (`.centaur/services/api/api/workflow_engine.py:1124`) is "spawn → message → execute → wait-for-agent-terminal-result" and drags in `spawn_assignment`, slackbot session opening, agent-execution event rows, and a running harness. BFTS sandboxes have no harness; they're code-exec workers. The executor creates `agents.x-k8s.io/v1alpha1 Sandbox` CRDs directly via `kubernetes_asyncio.client.CustomObjectsApi` (mirroring `KubernetesAgentSandboxBackend._create_workload` at `.centaur/services/api/api/sandbox/kubernetes_agent_sandbox.py:109-154`) with workflow-generated `sandbox_id = f"bfts-{ctx.run_id}-tree-{i}"`. **Implementation:** Phase 1 Task 1.6 (CRD body + lifecycle), Phase 2 Task 2.9 (workflow side).
+- **Open Q-2 — State volume mechanism (inline `volumeClaimTemplates`):** "Should Phase 0 set `KUBERNETES_SANDBOX_STATE_VOLUME_ENABLED=1` in `values.local.yaml` to get a per-sandbox PVC?" → **No.** That env var is read globally by both `.centaur/services/api/api/sandbox/kubernetes_agent_sandbox.py:21` and `.centaur/services/api/api/sandbox/kubernetes.py:102`; flipping it on attaches a PVC to every Centaur sandbox spawned for any reason. Instead the BFTS executor sets `spec.volumeClaimTemplates` directly inside the BFTS Sandbox CRD body it creates (10Gi `ReadWriteOnce`, cluster default storage class), mounted at `/workspace` on the executor pod (whose `WORKDIR` is `/workspace`, so Sakana's `os.path.join(os.getcwd(), 'working')` resolves correctly). Retention across pause/resume is shipped by the controller already (`shutdownPolicy: "Retain"` + `replicas: 0|1` patch — `.centaur/services/api/api/sandbox/kubernetes_agent_sandbox.py:114, 159-185`). **Implementation:** Phase 1 Task 1.6 (inline `volumeClaimTemplates`), Task 1.8 (write-sentinel → pause → resume → read-sentinel retention smoke).
+- **Open Q-3 — Egress scoping (dedicated NetworkPolicy):** "Should we file an upstream PR against iron-proxy to make its `domains: ["*"]` allowlist Helm-configurable?" → **No** for BFTS. BFTS pods make no outbound LLM calls (the workflow controller calls model providers from inside the api pod via its own egress path); iron-proxy is not on the BFTS data path. Egress is scoped at the K8s NetworkPolicy layer: the BFTS executor creates a single namespace-scoped `bfts-sandbox-egress` policy that selects pods labeled `centaur.ai/bfts-sandbox: "true"` and adds `Egress` rules for TCP/8000 to the api pod + TCP/443 to the public internet (Kubernetes NetworkPolicy is union-based, so this layers cleanly on top of the chart's default-deny at `.centaur/contrib/chart/templates/networkpolicy.yaml:9-13` and `-allow-dns` at L15-34). We do NOT add the `centaur.ai/managed: "true"` label to BFTS pods — that label is the podSelector for the chart's `-sandbox` policy at L307-327 which locks egress to api:8000 only and would block PyPI/dataset fetches. RBAC already permits namespaced NetworkPolicy creation (`.centaur/contrib/chart/templates/rbac.yaml:39-41`). **Implementation:** Phase 1 Task 1.7.
 
 ---
 
@@ -4640,8 +5604,8 @@ These cannot be done in this repo per the workspace AGENTS.md "never edit `.cent
 
 **Spec coverage:**
 - Tree controller as durable workflow → Phase 2 (Tasks 2.7–2.9). ✓
-- Per-node Sandbox isolation → Phase 1 (`bfts_executor`) + Phase 0 (state PVC). ✓
-- Hibernate/resume → spec correction #2: pod stop/start via existing `KubernetesAgentSandboxBackend.pause_by_id/resume_by_id`. Plan documents this; the controller in Phase 2 holds one sandbox per *tree* (not per node) so working state persists across expansions inside the tree. Per-node pause/resume is a Phase 4e refinement.
+- Per-node Sandbox isolation → Phase 1 `bfts_executor` (Task 1.6 CRD body + inline `volumeClaimTemplates`; Phase 0 only proves the platform via pure-`kubectl`, not the BFTS tool). ✓
+- Hibernate/resume → spec correction #2: pod stop/start with PVC reattach. The Phase 1 `_KubernetesSandboxAPI.pause_sandbox/resume_sandbox` methods (Task 1.6) mirror `KubernetesAgentSandboxBackend.pause_by_id/resume_by_id` at `.centaur/services/api/api/sandbox/kubernetes_agent_sandbox.py:159-185`; retention is proven end-to-end by Task 1.8's `bfts-retention-smoke` recipe. The controller in Phase 2 holds one sandbox per *tree* (not per node) so working state persists across expansions inside the tree. Per-node pause/resume is a Phase 4e refinement.
 - `num_drafts` parallelism → Phase 2 Task 2.9 fans out N child `bfts_tree` workflows.
 - `max_debug_depth`/`debug_prob` → Phase 2 Task 2.3 selector + Task 2.7 expand_node branch routing.
 - CPU-bound work in-sandbox → Phase 1 `exec_python`.
@@ -4650,7 +5614,7 @@ These cannot be done in this repo per the workspace AGENTS.md "never edit `.cent
 - VLM tool call → Phase 3 Task 3.2 + 3.3.
 - Roles as persona+skill per turn → not in MVP; the spec's "roles" framing is a Phase 4e concern when `SandboxTemplate` per-role lands.
 - Outer loop nightly reflection → deferred to Phase 4c, reformulated as `bfts_hyperparams` table (per Spec correction #5).
-- Security bounds (NetworkPolicy egress + GitHub token scoping) → flagged in Phase 4f as upstream-PR work; MVP runs with default open egress through iron-proxy.
+- Security bounds (NetworkPolicy egress + GitHub token scoping) → BFTS pod egress is scoped by Phase 1 Task 1.7's namespace-scoped `bfts-sandbox-egress` NetworkPolicy (api:8000 + internet:443 only, on top of chart default-deny). iron-proxy is not on the BFTS data path and stays out of scope (Spec correction #10 + #13).
 
 **Placeholder scan:** searched the plan for `TBD`, `TODO`, `implement later`, `fill in details`, `add appropriate`, `similar to`. None found in any task body. All code blocks contain real code with concrete identifiers tied to imports.
 
