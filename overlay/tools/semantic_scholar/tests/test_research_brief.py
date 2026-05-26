@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 from semanticscholar.Paper import Paper
 
-from semantic_scholar.client import SemanticScholarClient
+from tools.semantic_scholar.client import SemanticScholarClient
 
 
 def _run_brief(client: SemanticScholarClient, *args: Any, **kwargs: Any) -> dict[str, Any]:

@@ -36,10 +36,11 @@ from typing import TYPE_CHECKING, Any, Literal
 if TYPE_CHECKING:
     from api.workflow_engine import WorkflowContext
 
-from semantic_scholar.client import SemanticScholarClient
-from semantic_scholar.projections.brief import build_brief_document, render_brief
-from semantic_scholar.projections.paper import build_paper_document
 from semanticscholar.Paper import Paper
+
+from tools.semantic_scholar.client import SemanticScholarClient
+from tools.semantic_scholar.projections.brief import build_brief_document, render_brief
+from tools.semantic_scholar.projections.paper import build_paper_document
 
 try:
     from api.vm_metrics import (

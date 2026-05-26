@@ -20,7 +20,7 @@ from __future__ import annotations
 import pytest
 from semanticscholar.Paper import Paper
 
-from semantic_scholar.client import SemanticScholarClient
+from tools.semantic_scholar.client import SemanticScholarClient
 
 
 def _paper(paper_id: str) -> Paper:

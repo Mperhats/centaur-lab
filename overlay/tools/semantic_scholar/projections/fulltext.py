@@ -17,10 +17,10 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any, Final
 
-from pdf.utils import truncate_utf8
 from semanticscholar.Paper import Paper
 
-from semantic_scholar.utils import content_hash
+from tools.pdf.utils import truncate_utf8
+from tools.semantic_scholar.utils import content_hash
 
 FULLTEXT_BODY_MAX_BYTES: Final[int] = 1 * 1024 * 1024  # 1 MiB cap on indexed body bytes.
 

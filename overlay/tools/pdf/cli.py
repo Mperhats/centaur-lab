@@ -19,12 +19,14 @@ import typer
 from dotenv import find_dotenv, load_dotenv
 from rich.console import Console
 
-# Allow running both `uv run python cli.py ...` and
-# `python -m pdf.cli ...` from sibling directories. The tool itself has
-# no centaur_sdk dependency, so the bootstrap is intentionally narrow.
+# Put ``overlay/`` on sys.path so ``tools.pdf`` resolves as a
+# namespace-package import — byte-identical to how the API pod sets up
+# the ``tools.*`` namespace at startup. The tool itself has no
+# centaur_sdk dependency, so the bootstrap is intentionally narrow.
 _THIS_DIR = Path(__file__).resolve().parent
-if str(_THIS_DIR.parent) not in sys.path:
-    sys.path.insert(0, str(_THIS_DIR.parent))
+_OVERLAY_DIR = _THIS_DIR.parents[1]
+if str(_OVERLAY_DIR) not in sys.path:
+    sys.path.insert(0, str(_OVERLAY_DIR))
 
 load_dotenv(find_dotenv(usecwd=True))
 
@@ -42,8 +44,8 @@ def fetch(
     max_mb: int = typer.Option(50, "--max-mb", help="Reject responses larger than this."),
 ) -> None:
     """Stream a PDF to disk."""
-    from pdf.fetch.http import PdfFetchError, download_pdf
-    from pdf.utils import derive_filename_from_url
+    from tools.pdf.fetch.http import PdfFetchError, download_pdf
+    from tools.pdf.utils import derive_filename_from_url
 
     try:
         data, mime = download_pdf(
@@ -70,7 +72,7 @@ def parse(
     ),
 ) -> None:
     """Parse a local PDF file to Markdown on stdout."""
-    from pdf.parse.markdown import PdfParseError, parse_pdf
+    from tools.pdf.parse.markdown import PdfParseError, parse_pdf
 
     pdf_path = Path(path)
     if not pdf_path.is_file():
@@ -98,7 +100,7 @@ def fetch_and_parse_cmd(
     min_size: int = typer.Option(100, "--min-size", help="Min chars to accept a parser stage."),
 ) -> None:
     """Download a PDF and parse it to Markdown in one call."""
-    from pdf.client import PdfClient
+    from tools.pdf.client import PdfClient
 
     result = PdfClient().fetch_and_parse(
         url,

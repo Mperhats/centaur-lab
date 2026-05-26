@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 from semanticscholar.Paper import Paper
 
-from semantic_scholar.client import SemanticScholarClient
+from tools.semantic_scholar.client import SemanticScholarClient
 
 
 def _live_paper_dict(paper_id: str, *, year: int = 2024) -> dict[str, Any]:

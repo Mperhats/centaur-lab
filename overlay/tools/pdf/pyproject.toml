@@ -25,5 +25,14 @@ dev = [
     "pytest>=8.0.0",
 ]
 
+[tool.pytest.ini_options]
+# ``../..`` is the ``overlay/`` root: it puts the ``tools.*`` namespace
+# package on sys.path so test imports look like ``from tools.pdf.utils
+# import ...`` — byte-identical to how the API pod resolves tools at
+# runtime via the ``tools.*`` namespace bootstrap in
+# ``.centaur/services/api/api/app.py``.
+pythonpath = ["../.."]
+
+
 [tool.centaur]
 module = "client.py"

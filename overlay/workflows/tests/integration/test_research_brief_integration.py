@@ -20,10 +20,10 @@ from typing import Any
 
 import pytest
 import research_brief
-from semantic_scholar.client import SemanticScholarClient
 from semanticscholar.Paper import Paper
 
 from tests._helpers import MockContext
+from tools.semantic_scholar.client import SemanticScholarClient
 
 
 def _paper(paper_id: str, *, title: str | None = None) -> Paper:

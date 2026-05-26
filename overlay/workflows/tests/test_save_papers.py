@@ -21,10 +21,10 @@ from unittest.mock import patch
 
 import pytest
 import save_papers
-from semantic_scholar.projections.paper import build_paper_document
 from semanticscholar.Paper import Paper
 
 from tests._helpers import MockContext, MockPool
+from tools.semantic_scholar.projections.paper import build_paper_document
 
 
 class MetricsRecorder:

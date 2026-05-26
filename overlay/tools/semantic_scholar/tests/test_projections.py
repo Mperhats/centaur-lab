@@ -15,18 +15,18 @@ from typing import Any
 import pytest
 from semanticscholar.Paper import Paper
 
-from semantic_scholar.projections.archive import build_paper_archive_row
-from semantic_scholar.projections.brief import (
+from tools.semantic_scholar.projections.archive import build_paper_archive_row
+from tools.semantic_scholar.projections.brief import (
     brief_id_for,
     build_brief_document,
     render_brief,
 )
-from semantic_scholar.projections.fulltext import (
+from tools.semantic_scholar.projections.fulltext import (
     FULLTEXT_BODY_MAX_BYTES,
     build_fulltext_document,
 )
-from semantic_scholar.projections.paper import build_paper_document
-from semantic_scholar.utils import content_hash
+from tools.semantic_scholar.projections.paper import build_paper_document
+from tools.semantic_scholar.utils import content_hash
 
 _RECENCY_TOLERANCE = timedelta(seconds=30)
 

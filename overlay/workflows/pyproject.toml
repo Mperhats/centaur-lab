@@ -22,14 +22,18 @@ package = false
 [tool.pytest.ini_options]
 asyncio_mode = "strict"
 # ``.`` makes workflow modules importable by their bare name (``import
-# save_papers``) so tests track how the API pod loads them via
-# WORKFLOW_DIRS. ``../tools`` puts the tool packages (``pdf``,
-# ``semantic_scholar``) on the path as top-level imports, matching the
-# tool test suites and how the API pod resolves the tool loader's
-# bootstrap. ``../../.centaur`` exposes ``centaur_sdk`` for the few
-# helpers that import it directly.
+# save_papers``), matching how the API pod's ``discover_workflow_handlers``
+# loads them via ``WORKFLOW_DIRS``. ``..`` is the ``overlay/`` root,
+# which puts the ``tools.*`` namespace package on sys.path so workflow
+# imports look like ``from tools.semantic_scholar.client import ...``
+# — byte-identical to how the API pod resolves tools at runtime.
+# ``../../.centaur`` exposes ``centaur_sdk``.
+#
+# Do NOT add ``../tools`` here; that would expose ``semantic_scholar``
+# and ``pdf`` as bare top-level packages, which is a runtime-vs-test
+# divergence the API pod does not honour.
 pythonpath = [
     ".",
-    "../tools",
+    "..",
     "../../.centaur",
 ]

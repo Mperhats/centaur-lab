@@ -13,17 +13,17 @@ import asyncio
 from typing import Any
 
 import pytest
-from pdf.fetch.http import (
+from semanticscholar.Paper import Paper
+
+import tools.semantic_scholar.client as client_module
+from tools.pdf.fetch.http import (
     PdfHttpError,
     PdfNetworkError,
     PdfNotPdfError,
     PdfTooLargeError,
 )
-from pdf.parse.markdown import PdfInsufficientTextError, PdfParseError
-from semanticscholar.Paper import Paper
-
-import semantic_scholar.client as client_module
-from semantic_scholar.client import SemanticScholarClient
+from tools.pdf.parse.markdown import PdfInsufficientTextError, PdfParseError
+from tools.semantic_scholar.client import SemanticScholarClient
 
 
 def _paper(

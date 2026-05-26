@@ -12,7 +12,7 @@ import hashlib
 
 import pytest
 
-from pdf.utils import compute_pdf_sha256, truncate_utf8
+from tools.pdf.utils import compute_pdf_sha256, truncate_utf8
 
 
 def test_compute_pdf_sha256_matches_hashlib_reference() -> None:

@@ -24,8 +24,8 @@ from typing import Any
 
 import pytest
 
-from semantic_scholar import client as s2_client
-from semantic_scholar.client import SemanticScholarClient
+from tools.semantic_scholar import client as s2_client
+from tools.semantic_scholar.client import SemanticScholarClient
 
 
 @pytest.fixture(autouse=True)

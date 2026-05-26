@@ -16,7 +16,7 @@ import json
 import pytest
 from semanticscholar.Paper import Paper
 
-from semantic_scholar.utils import canonical_json, content_hash, derive_pdf_url
+from tools.semantic_scholar.utils import canonical_json, content_hash, derive_pdf_url
 
 
 def _paper(

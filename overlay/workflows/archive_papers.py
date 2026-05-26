@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Any, Literal
 if TYPE_CHECKING:
     from api.workflow_engine import WorkflowContext
 
-from semantic_scholar.client import SemanticScholarClient
+from tools.semantic_scholar.client import SemanticScholarClient
 
 # Inlined metrics shim — try the real ``api.vm_metrics`` import (works
 # inside the API pod), fall back to no-op stubs (works in local pytest

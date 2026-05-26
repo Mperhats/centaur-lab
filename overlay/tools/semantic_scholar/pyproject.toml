@@ -11,9 +11,13 @@ dependencies = [
     "typer>=0.12.0",
     "rich>=13.0.0",
     "python-dotenv>=1.0.0",
-    "pymupdf>=1.24.0",
-    "pymupdf4llm>=0.0.17",
-    "pypdf>=4.0.0",
+    # pymupdf / pymupdf4llm / pypdf are deliberately NOT listed here.
+    # The PDF fetch + parse stages live in the sibling ``pdf`` tool;
+    # its pyproject.toml owns those deps, and the API pod's startup
+    # merges every tool's pyproject into one shared venv (see
+    # ``.centaur/services/api/entrypoint.sh``) so the imports inside
+    # ``tools.pdf.parse.markdown`` resolve at runtime without us
+    # duplicating the dep declarations here.
 ]
 
 [build-system]
@@ -33,10 +37,17 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "strict"
-# ``..`` puts sibling tool packages on the path (``pdf`` for the PDF
-# fetch/parse stages); ``../../../.centaur`` exposes ``centaur_sdk``.
+# ``../..`` is the ``overlay/`` root: it puts the ``tools.*`` namespace
+# package on sys.path so test imports look like ``from
+# tools.semantic_scholar.client import ...`` — byte-identical to how
+# the API pod resolves tools at runtime via the ``tools.*`` namespace
+# bootstrap in ``.centaur/services/api/api/app.py``. Do NOT add ``..``
+# here; that would expose ``semantic_scholar`` and ``pdf`` as bare
+# top-level packages, which is a runtime-vs-test divergence the API
+# pod does not honour and which previously masked
+# ``ModuleNotFoundError`` bugs at deploy time.
 pythonpath = [
-    "..",
+    "../..",
     "../../../.centaur",
 ]
 

@@ -28,7 +28,12 @@ import asyncio
 import logging
 from typing import Any, Final
 
-from pdf.fetch.http import (
+from semanticscholar import SemanticScholar
+from semanticscholar.Paper import Paper
+from semanticscholar.SemanticScholarException import SemanticScholarException
+
+from centaur_sdk import secret
+from tools.pdf.fetch.http import (
     PdfFetchError,
     PdfHttpError,
     PdfNetworkError,
@@ -36,22 +41,17 @@ from pdf.fetch.http import (
     PdfTooLargeError,
     download_pdf,
 )
-from pdf.parse.markdown import (
+from tools.pdf.parse.markdown import (
     PdfInsufficientTextError,
     PdfParseError,
     parse_pdf,
 )
-from pdf.utils import compute_pdf_sha256
-from semanticscholar import SemanticScholar
-from semanticscholar.Paper import Paper
-from semanticscholar.SemanticScholarException import SemanticScholarException
-
-from centaur_sdk import secret
-from semantic_scholar.projections.archive import build_paper_archive_row
-from semantic_scholar.projections.brief import build_brief_document, render_brief
-from semantic_scholar.projections.fulltext import build_fulltext_document
-from semantic_scholar.projections.paper import build_paper_document
-from semantic_scholar.utils import derive_pdf_url
+from tools.pdf.utils import compute_pdf_sha256
+from tools.semantic_scholar.projections.archive import build_paper_archive_row
+from tools.semantic_scholar.projections.brief import build_brief_document, render_brief
+from tools.semantic_scholar.projections.fulltext import build_fulltext_document
+from tools.semantic_scholar.projections.paper import build_paper_document
+from tools.semantic_scholar.utils import derive_pdf_url
 
 log = logging.getLogger(__name__)
 

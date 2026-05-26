@@ -19,7 +19,7 @@ from typing import Any
 
 from semanticscholar.Paper import Paper
 
-from semantic_scholar.utils import content_hash
+from tools.semantic_scholar.utils import content_hash
 
 
 def build_paper_document(

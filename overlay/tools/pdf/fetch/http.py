@@ -30,7 +30,7 @@ from typing import ClassVar, Final
 
 import httpx
 
-from pdf.utils import force_pdf_mime
+from tools.pdf.utils import force_pdf_mime
 
 log = logging.getLogger(__name__)
 

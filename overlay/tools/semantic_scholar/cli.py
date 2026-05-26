@@ -29,9 +29,12 @@ _THIS_DIR = Path(__file__).resolve().parent
 _SDK_PARENT = _THIS_DIR.parents[2] / ".centaur"
 if _SDK_PARENT.is_dir() and str(_SDK_PARENT) not in sys.path:
     sys.path.insert(0, str(_SDK_PARENT))
-# Allow both `python cli.py ...` and `python -m semantic_scholar.cli`.
-if str(_THIS_DIR.parent) not in sys.path:
-    sys.path.insert(0, str(_THIS_DIR.parent))
+# Put ``overlay/`` on sys.path so ``tools.semantic_scholar`` and
+# ``tools.pdf`` resolve as namespace-package imports — byte-identical
+# to how the API pod sets up the ``tools.*`` namespace at startup.
+_OVERLAY_DIR = _THIS_DIR.parents[1]
+if str(_OVERLAY_DIR) not in sys.path:
+    sys.path.insert(0, str(_OVERLAY_DIR))
 
 # Walk up from CWD to find a `.env`. The repo convention is one root .env
 # (fed into the k8s Secret by `just bootstrap-secrets`); per-tool `.env`
@@ -46,7 +49,7 @@ console = Console()
 def _make_client():
     # Lazy-imported so the centaur_sdk path bootstrap above is in effect
     # before client.py tries `from centaur_sdk import secret`.
-    from semantic_scholar.client import SemanticScholarClient
+    from tools.semantic_scholar.client import SemanticScholarClient
 
     return SemanticScholarClient()
 

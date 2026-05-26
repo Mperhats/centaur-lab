@@ -24,7 +24,7 @@ from typing import Any, Final
 from semanticscholar.Author import Author
 from semanticscholar.Paper import Paper
 
-from semantic_scholar.utils import canonical_json, content_hash
+from tools.semantic_scholar.utils import canonical_json, content_hash
 
 _BRIEF_ABSTRACT_TRUNCATE: Final[int] = 500
 _BRIEF_TITLE_QUERY_TRUNCATE: Final[int] = 80
