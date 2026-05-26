@@ -225,6 +225,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                 year_from=inp.year_from,
             )
             brief_action = await upsert_document(ctx._pool, brief_doc)
+            emit_document_metrics(brief_doc, brief_action)
             return {
                 "status": "completed",
                 "brief_document_id": brief_doc["document_id"],

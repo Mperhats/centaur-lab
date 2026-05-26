@@ -302,3 +302,25 @@ async def test_handler_emits_vm_metrics_for_brief_and_papers(
     source_types = [doc["source_type"] for doc, _ in recorder.calls]
     assert source_types.count("research_brief") == 1
     assert source_types.count("paper") == 2
+
+
+@pytest.mark.asyncio
+async def test_handler_emits_vm_metrics_on_no_results_brief(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pool = FakePool()
+    ctx = FakeContext(pool)
+    fake = FakeS2Client(results=[])
+    recorder = MetricsRecorder()
+    monkeypatch.setattr(research_brief, "emit_document_metrics", recorder)
+
+    with patch("research_brief.SemanticScholarClient") as mock_cls:
+        mock_cls.return_value = fake
+        await research_brief.handler(
+            research_brief.Input(query="quantum gravity"),
+            ctx,
+        )
+
+    assert len(recorder.calls) == 1
+    assert recorder.calls[0][0]["source_type"] == "research_brief"
+    assert recorder.calls[0][1] == "inserted"
