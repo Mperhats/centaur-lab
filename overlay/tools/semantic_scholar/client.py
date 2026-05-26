@@ -1,4 +1,4 @@
-"""Semantic Scholar Graph API client with hybrid indexed/live search and research-brief generation."""
+"""Semantic Scholar Graph API client with live search and research-brief generation."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import hashlib
 import json
 import logging
 import os
-import re
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -29,8 +28,8 @@ log = logging.getLogger(__name__)
 DEFAULT_PAPER_FIELDS = "title,authors,year,abstract,citationCount,url,openAccessPdf"
 DEFAULT_REFERENCE_FIELDS = "title,authors,year,citationCount,url"
 
-DEFAULT_HYBRID_SEARCH_LIMIT = 10
-MAX_HYBRID_SEARCH_LIMIT = 50
+DEFAULT_SEARCH_LIMIT = 10
+MAX_SEARCH_LIMIT = 50
 
 DEFAULT_RESEARCH_BRIEF_LIMIT = 5
 MAX_RESEARCH_BRIEF_LIMIT = 20
@@ -55,223 +54,9 @@ _BRIEF_ID_HEX_LEN = 16
 _BRIEF_MAX_AUTHORS_INLINE = 3
 
 
-# ---------------------------------------------------------------------------
-# The BM25 query helpers below are copied verbatim from
-# .centaur/tools/productivity/company_context/client.py. Keep in sync — they
-# implement the same paradedb scoring contract that the upstream Slack tool
-# relies on.
-# ---------------------------------------------------------------------------
-
-EXACT_QUERY_TITLE_BOOST = 8
-EXACT_QUERY_BODY_BOOST = 2
-TITLE_MATCH_BOOST = 4
-DEFAULT_PREVIEW_CHARS = 280
-
-_SEARCH_TERM_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/-]*")
-_STOP_WORDS = {
-    "a",
-    "an",
-    "and",
-    "are",
-    "as",
-    "at",
-    "be",
-    "but",
-    "by",
-    "for",
-    "from",
-    "how",
-    "i",
-    "if",
-    "in",
-    "into",
-    "is",
-    "it",
-    "of",
-    "on",
-    "or",
-    "our",
-    "that",
-    "the",
-    "their",
-    "there",
-    "these",
-    "they",
-    "this",
-    "to",
-    "was",
-    "we",
-    "were",
-    "what",
-    "when",
-    "where",
-    "which",
-    "who",
-    "why",
-    "will",
-    "with",
-}
-
-
 def _clamp(value: int, *, minimum: int, maximum: int) -> int:
     """Clamp integer tool inputs to predictable output bounds."""
     return max(minimum, min(int(value), maximum))
-
-
-def _as_dict(value: Any) -> dict[str, Any]:
-    """Decode asyncpg JSON/JSONB values into a dict."""
-    if isinstance(value, dict):
-        return value
-    if isinstance(value, str):
-        try:
-            parsed = json.loads(value)
-            if isinstance(parsed, dict):
-                return parsed
-        except Exception:
-            return {}
-    return {}
-
-
-def _isoformat(value: Any) -> str | None:
-    """Serialize datetimes while leaving absent values explicit."""
-    if isinstance(value, datetime):
-        return value.isoformat()
-    return None
-
-
-def _normalize_text(value: str) -> str:
-    """Collapse whitespace so previews stay compact and readable."""
-    return re.sub(r"\s+", " ", value).strip()
-
-
-def _search_terms(query: str) -> list[str]:
-    """Extract unique content terms, falling back when filtering removes everything."""
-    seen: set[str] = set()
-    all_terms: list[str] = []
-    filtered_terms: list[str] = []
-    for match in _SEARCH_TERM_RE.finditer(query):
-        term = match.group(0).strip()
-        if len(term) < 2:
-            continue
-        key = term.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        all_terms.append(term)
-        if key not in _STOP_WORDS:
-            filtered_terms.append(term)
-    return filtered_terms or all_terms or [query]
-
-
-def _search_where_clause(term_count: int) -> str:
-    """Build a ParadeDB query that boosts exact matches and falls back to OR term matching."""
-    clauses = [
-        "("
-        f"title ||| $1::text::pdb.boost({EXACT_QUERY_TITLE_BOOST}) "
-        f"OR body ||| $1::text::pdb.boost({EXACT_QUERY_BODY_BOOST})"
-        ")"
-    ]
-    for index in range(2, term_count + 2):
-        clauses.append(
-            f"(title ||| ${index}::text::pdb.boost({TITLE_MATCH_BOOST}) OR body ||| ${index})"
-        )
-    return " OR ".join(clauses)
-
-
-def _body_preview(body: str, *, query: str, max_chars: int = DEFAULT_PREVIEW_CHARS) -> str:
-    """Build a compact preview centered on the first query-term hit when possible."""
-    normalized = _normalize_text(body)
-    if not normalized:
-        return ""
-    if len(normalized) <= max_chars:
-        return normalized
-
-    terms = _search_terms(query)
-    start = 0
-    lowered = normalized.lower()
-    for term in terms:
-        index = lowered.find(term.lower())
-        if index >= 0:
-            start = max(0, index - max_chars // 3)
-            break
-
-    end = min(len(normalized), start + max_chars)
-    snippet = normalized[start:end].strip()
-    if start > 0:
-        snippet = f"...{snippet}"
-    if end < len(normalized):
-        snippet = f"{snippet}..."
-    return snippet
-
-
-def _row_value(row: Any, key: str, default: Any = None) -> Any:
-    """Read values from asyncpg rows while tolerating sparse test doubles."""
-    try:
-        value = row[key]
-    except (KeyError, IndexError, TypeError):
-        return default
-    return default if value is None else value
-
-
-def _document_summary(row: Any) -> dict[str, Any]:
-    """Return the common metadata we expose for document records."""
-    return {
-        "document_id": str(_row_value(row, "document_id", "")),
-        "source": str(_row_value(row, "source", "")),
-        "source_type": str(_row_value(row, "source_type", "")),
-        "source_document_id": str(_row_value(row, "source_document_id", "")),
-        "source_chunk_id": str(_row_value(row, "source_chunk_id", "")),
-        "parent_document_id": str(_row_value(row, "parent_document_id", "") or "") or None,
-        "title": str(_row_value(row, "title", "")),
-        "url": str(_row_value(row, "url", "")),
-        "author_name": str(_row_value(row, "author_name", "")),
-        "access_scope": str(_row_value(row, "access_scope", "")),
-        "occurred_at": _isoformat(_row_value(row, "occurred_at")),
-        "source_updated_at": _isoformat(_row_value(row, "source_updated_at")),
-        "metadata": _as_dict(_row_value(row, "metadata", {})),
-    }
-
-
-def _extract_paper_id(summary: dict[str, Any]) -> str:
-    """Pick a paperId out of an indexed-document summary."""
-    metadata_paper_id = summary.get("metadata", {}).get("paperId")
-    if metadata_paper_id:
-        return str(metadata_paper_id)
-    return str(summary.get("source_document_id") or "")
-
-
-def _cutoff_year_from_rows(rows: list[Any]) -> int | None:
-    """Compute the most recent ``metadata.year`` across the indexed rows."""
-    best: int | None = None
-    for row in rows:
-        metadata = _as_dict(_row_value(row, "metadata", {}))
-        raw_year = metadata.get("year")
-        if raw_year is None:
-            continue
-        try:
-            year_int = int(raw_year)
-        except (TypeError, ValueError):
-            continue
-        if best is None or year_int > best:
-            best = year_int
-    return best
-
-
-def _live_paper_result(paper: dict[str, Any]) -> dict[str, Any]:
-    """Project a Semantic Scholar paper dict into the merged search result shape."""
-    return {
-        "paperId": str(paper.get("paperId") or ""),
-        "title": paper.get("title"),
-        "year": paper.get("year"),
-        "authors": paper.get("authors") or [],
-        "abstract": paper.get("abstract"),
-        "url": paper.get("url"),
-        "citationCount": paper.get("citationCount"),
-        "openAccessPdf": paper.get("openAccessPdf"),
-        "lane": "live",
-        "result_type": "paper",
-        "score": None,
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -438,8 +223,6 @@ class SemanticScholarClient:
     anonymously (heavily rate-limited) or with an ``x-api-key`` for
     higher quotas — the header is sent only when the secret is set so
     anonymous calls don't accidentally hit a 401 on a stale placeholder.
-    Exposes a hybrid ``search`` that consults already-indexed papers in
-    ``company_context_documents`` before topping up via the live API.
     """
 
     BASE_URL = "https://api.semanticscholar.org/graph/v1"
@@ -546,14 +329,13 @@ class SemanticScholarClient:
         ``.centaur/tools/research/websearch/client.py``.
 
         The ``AsyncClient`` is created per-call rather than cached on the
-        instance (Option A in the review): the sync entry points
-        (``search`` / ``research_brief``) drive their own ``asyncio.run``
-        loop, and ``httpx.AsyncClient`` binds its internal anyio primitives
-        to the event loop it's instantiated under — so a cached client
-        would crash on the second ``asyncio.run`` with "Future attached to a
-        different loop". Per-call ``async with`` keeps lifecycle trivial
-        (no ``aclose`` to wire through ``__exit__``) and matches upstream
-        websearch's pattern exactly.
+        instance (Option A in the review): ``research_brief`` drives its own
+        ``asyncio.run`` loop, and ``httpx.AsyncClient`` binds its internal
+        anyio primitives to the event loop it's instantiated under — so a
+        cached client would crash on the second ``asyncio.run`` with "Future
+        attached to a different loop". Per-call ``async with`` keeps lifecycle
+        trivial (no ``aclose`` to wire through ``__exit__``) and matches
+        upstream websearch's pattern exactly.
         """
         url = f"{self.BASE_URL}{path}"
         last_exc: Exception | None = None
@@ -635,7 +417,7 @@ class SemanticScholarClient:
         Identical input validation and query-parameter shaping as
         ``search_papers``; delegates to ``_request_async`` so retry backoff
         awaits instead of blocking the event loop. Use this whenever the
-        caller is already running inside a coroutine (e.g. ``_search_async``,
+        caller is already running inside a coroutine (e.g.
         ``_research_brief_async``); call the sync ``search_papers`` from
         sync code paths.
         """
@@ -693,151 +475,62 @@ class SemanticScholarClient:
     def search(
         self,
         query: str,
-        limit: int = DEFAULT_HYBRID_SEARCH_LIMIT,
+        limit: int = DEFAULT_SEARCH_LIMIT,
         year_from: int | None = None,
     ) -> dict:
-        """Hybrid indexed-first, live-after search across saved + live S2 papers.
+        """Search papers via the live Semantic Scholar Graph API.
 
-        BM25-queries ``company_context_documents`` for Semantic Scholar
-        papers already projected into the table, then tops up via the
-        live ``/paper/search`` endpoint with ``year_from`` advanced past
-        the most recent indexed year. Live results whose ``paperId``
-        already appears in the indexed slice are dropped.
+        Agent-facing wrapper around ``search_papers`` that never raises —
+        returns ``{"status": "error", "error": ...}`` on failure. Does not
+        query ``company_context_documents``; use ``save_papers`` or
+        ``research_brief`` to persist results for later retrieval.
 
-        Never raises — returns an ``{"status": "error", "error": ...}``
-        dict on any failure that prevents producing results.
+        Args:
+            query: Free-text search query.
+            limit: Max results, 1..``MAX_SEARCH_LIMIT``.
+            year_from: Optional inclusive lower bound on publication year.
+
+        Returns:
+            On success::
+
+                {
+                    "status": "ok",
+                    "query": "<normalized query>",
+                    "limit": <int>,
+                    "year_from": <int | null>,
+                    "count": <int>,
+                    "results": [<S2 paper dict>, ...],
+                }
+
+            On failure, ``{"status": "error", "error": "<message>"}``.
         """
         normalized_query = query.strip() if query else ""
         if not normalized_query:
             return {"status": "error", "error": "query cannot be empty"}
 
-        if not self._database_url:
-            return {
-                "status": "error",
-                "error": "DATABASE_URL is required for semantic_scholar.search",
-            }
-
         clamped_limit = _clamp(
             limit,
             minimum=1,
-            maximum=MAX_HYBRID_SEARCH_LIMIT,
+            maximum=MAX_SEARCH_LIMIT,
         )
 
         try:
-            return asyncio.run(
-                self._search_async(
-                    query=normalized_query,
-                    limit=clamped_limit,
-                    year_from=year_from,
-                )
+            papers = self.search_papers(
+                normalized_query,
+                limit=clamped_limit,
+                year_from=year_from,
             )
+            return {
+                "status": "ok",
+                "query": normalized_query,
+                "limit": clamped_limit,
+                "year_from": year_from,
+                "count": len(papers),
+                "results": papers,
+            }
         except Exception as exc:
             log.warning("semantic_scholar search failed", exc_info=True)
             return {"status": "error", "error": str(exc)}
-
-    async def _search_async(
-        self,
-        *,
-        query: str,
-        limit: int,
-        year_from: int | None,
-    ) -> dict[str, Any]:
-        conn = await self._connect()
-        try:
-            terms = _search_terms(query)
-            search_terms = [query, *terms]
-            limit_param = len(search_terms) + 1
-            rows = await conn.fetch(
-                f"""
-                SELECT
-                    document_id,
-                    source,
-                    source_type,
-                    source_document_id,
-                    source_chunk_id,
-                    parent_document_id,
-                    title,
-                    url,
-                    author_name,
-                    access_scope,
-                    body,
-                    occurred_at,
-                    source_updated_at,
-                    metadata,
-                    paradedb.score(document_id) AS score
-                FROM company_context_documents
-                WHERE ({_search_where_clause(len(terms))})
-                  AND source = 'semantic_scholar'
-                  AND source_type = 'paper'
-                ORDER BY
-                    paradedb.score(document_id) DESC,
-                    source_updated_at DESC NULLS LAST
-                LIMIT ${limit_param}
-                """,
-                *search_terms,
-                limit,
-            )
-
-            indexed_results: list[dict[str, Any]] = []
-            indexed_paper_ids: set[str] = set()
-            for row in rows:
-                summary = _document_summary(row)
-                summary["score"] = float(_row_value(row, "score", 0.0) or 0.0)
-                summary["preview"] = _body_preview(
-                    str(_row_value(row, "body", "") or ""),
-                    query=query,
-                )
-                summary["lane"] = "indexed"
-                summary["result_type"] = "paper"
-                paper_id = _extract_paper_id(summary)
-                summary["paperId"] = paper_id
-                if paper_id:
-                    indexed_paper_ids.add(paper_id)
-                indexed_results.append(summary)
-
-            cutoff_year = _cutoff_year_from_rows(rows)
-            requested_floor = year_from or 0
-            indexed_floor = (cutoff_year + 1) if cutoff_year is not None else 0
-            effective_year_from_raw = max(requested_floor, indexed_floor)
-            effective_year_from = effective_year_from_raw or None
-
-            live_results: list[dict[str, Any]] = []
-            live_error: str | None = None
-            try:
-                # Async-aware retry: ``search_papers_async`` → ``_request_async``
-                # awaits ``asyncio.sleep`` on backoff instead of blocking the
-                # event loop with ``time.sleep``. See review.md A5.
-                raw_live = await self.search_papers_async(
-                    query,
-                    limit=limit,
-                    year_from=effective_year_from,
-                )
-                for paper in raw_live:
-                    if not isinstance(paper, dict):
-                        continue
-                    paper_id = str(paper.get("paperId") or "")
-                    if paper_id and paper_id in indexed_paper_ids:
-                        continue
-                    live_results.append(_live_paper_result(paper))
-            except Exception as exc:
-                log.warning("semantic_scholar live api error", exc_info=True)
-                live_error = str(exc)
-
-            return {
-                "status": "ok",
-                "query": query,
-                "limit": limit,
-                "year_from": year_from,
-                "indexed_count": len(indexed_results),
-                "live_count": len(live_results),
-                "count": len(indexed_results) + len(live_results),
-                "indexed_cutoff_year": cutoff_year,
-                "live_year_from": effective_year_from,
-                "live_error": live_error,
-                "results": [*indexed_results, *live_results],
-            }
-        finally:
-            await conn.close()
 
     def research_brief(
         self,
@@ -930,10 +623,9 @@ class SemanticScholarClient:
         year_from: int | None,
     ) -> dict[str, Any]:
         # Run the (retry-prone) S2 call and the pure rendering before
-        # opening a DB connection. Unlike hybrid ``search`` — which needs
-        # a ``conn.fetch`` to resolve the cutoff year — the brief has no
-        # data dependency on the DB, so holding a real Postgres
-        # connection idle through httpx retries (up to ~15s) is pure cost.
+        # opening a DB connection. The brief has no data dependency on
+        # the DB before S2 returns, so holding a real Postgres connection
+        # idle through httpx retries (up to ~15s) is pure cost.
         # Postgres ``max_connections`` is finite; we open a fresh
         # connection per call, so concurrent invocations would otherwise
         # pin one connection each for the duration of the S2 round trip.

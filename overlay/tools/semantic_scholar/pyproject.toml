@@ -5,11 +5,10 @@ version = "0.1.0"
 requires-python = ">=3.11"
 # python-dotenv is only used by the standalone CLI entrypoint, but listing it
 # here keeps `uv run python cli.py ...` self-contained without --with flags.
-# asyncpg is required by the hybrid `search` method, which queries
-# `company_context_documents` for cached results before topping up via the
-# live API. The API pod already has asyncpg installed at the platform level
-# (the upstream `company_context` tool uses it), so this entry is primarily
-# for local CLI/test execution.
+# asyncpg is required by ``research_brief``, which upserts brief and paper
+# rows into ``company_context_documents``. The API pod already has asyncpg
+# installed at the platform level (the upstream ``company_context`` tool
+# uses it), so this entry is primarily for local CLI/test execution.
 # centaur-sdk is intentionally NOT listed — its upstream pyproject uses
 # `packages = ["."]` which produces a flat-layout wheel that Python cannot
 # import as `centaur_sdk` from an editable install. The CLI works around

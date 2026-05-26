@@ -10,9 +10,9 @@ papers, preprints, citations, or what a specific researcher has published.
 Prefer it over generic web search for anything that lives in the academic
 literature: arXiv, NeurIPS, biology/chem journals, etc.
 
-**Default flow: search-then-save.** Persistence is on by default — every
-academic-research turn grows the cache so future turns find the same papers
-in the indexed lane without an API call. Skip the `save_papers` follow-up
+**Default flow: search-then-save.** Persistence is on by default — after
+finding papers, call `save_papers` so future turns can retrieve them via
+`company_context` or RAG over saved rows. Skip the `save_papers` follow-up
 ONLY when the user explicitly says "just search", "don't save",
 "exploratory only", or otherwise signals they don't want the result
 remembered.
@@ -24,16 +24,24 @@ remembered.
 - "What does this paper cite?" → `semantic_scholar.get_references`
 - "Build a brief / lit review / writeup on X" → `semantic_scholar.research_brief` (atomic search + render + persist)
 
-## Cache-Aware Search (`semantic_scholar.search`)
+## Paper Search (`semantic_scholar.search`)
 
-The hybrid `search` method returns two ranked lanes in one response:
+`search` queries the Semantic Scholar Graph API live. It does **not**
+read from `company_context_documents` — there is no internal cache lane.
 
-- **`indexed` lane** — papers we already have in `company_context_documents` (saved by prior `save_papers` or `research_brief` runs). BM25-scored against your query, ranked by relevance. Each result has `score`, `preview`, `document_id`, `paperId`, and the full `metadata` row.
-- **`live` lane** — fresh results from the Semantic Scholar Graph API, filtered to `year >= max(year_from, indexed_cutoff_year + 1)` so you only see papers genuinely newer than what's cached. Deduped against the indexed lane by `paperId`.
+The response shape is `{status, query, limit, year_from, count, results}`.
+Each entry in `results` is a standard S2 paper dict (`paperId`, `title`,
+`authors`, `year`, `abstract`, `url`, `citationCount`, ...).
 
-The response shape is `{status, query, limit, year_from, indexed_count, live_count, count, indexed_cutoff_year, live_year_from, live_error, results}`. The `results` array is `[*indexed, *live]` in that order. `live_error` is set (and `live_count: 0`) when the live API call fails — the indexed lane still returns successfully.
+`search` does not auto-persist. After a successful search, call
+`save_papers` on the `paperId`s you want remembered unless the user opted
+out. Use `research_brief` when the user wants a synthesized writeup that
+is persisted atomically (brief row + child paper rows).
 
-Hybrid `search` does not auto-persist — that's intentional so the agent has explicit control of when to grow the cache. **`research_brief` does write** (brief + child papers) — that's its whole point. So the tool/workflow split is no longer "tools find, workflows write"; it's "use whichever surface fits the affordance." When the user asks for a list, `search` + `save_papers`. When they ask for a brief, `research_brief`. The expected agent flow after `search` is still to call `save_papers` on the live-lane `paperId`s so the cache grows over time; saving is the default unless the user opted out. The indexed lane never needs a `save_papers` follow-up — those rows are already in `company_context_documents`.
+`search_papers` is the lower-level sibling — same live API, raises on
+failure instead of returning an error envelope. Prefer `search` for
+agent turns; use `search_papers` only when you need exceptions or are
+calling from code that already handles them.
 
 ## Output Expectations
 
@@ -56,12 +64,13 @@ results.
 - Don't manually concatenate paper summaries into a Slack reply when the
   user asked for a brief / lit review / writeup — use
   `semantic_scholar.research_brief` so the brief is also persisted in
-  `company_context_documents` and BM25-searchable across future turns.
+  `company_context_documents` for future retrieval via `company_context` or
+  RAG. Use `semantic_scholar.research_brief` when the user asked for a
+  brief / lit review / writeup.
 - Don't fall back to `call workflow run` for `research_brief` — the
   workflow handler is now a thin back-compat wrapper around the tool method.
   External `/workflows/runs` callers (Justfile cluster smoke, etc.) still
   work, but in-Slack agent turns should always go through the tool.
-- Don't reach for `search_papers` when `search` will do. The hybrid path is strictly cheaper for any query that overlaps prior research (cached results return without an API call), and it gracefully falls through to live when the cache is empty. Use raw `search_papers` only when you specifically need to bypass the cache.
 
 ## Persisting Research
 
@@ -84,8 +93,7 @@ call workflow run '{"workflow_name":"save_papers","input":{"paper_ids":["173ba8a
 
 Returns `{status, papers_inserted, papers_updated, papers_noop, papers_failed, results}`.
 Pass the original user query in the optional `query` field — it's recorded
-as traceability metadata on each row, so future BM25 retrievals can still
-surface the matched-against question, not just the paper text.
+as traceability metadata on each row.
 
 Idempotency means the save call is cheap to make even when the agent
 isn't sure whether the papers are already cached: re-saving an unchanged

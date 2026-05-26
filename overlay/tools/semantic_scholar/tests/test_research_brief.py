@@ -28,7 +28,7 @@ from semantic_scholar.client import SemanticScholarClient
 class MockAsyncpgConn:
     """Minimal stand-in for ``asyncpg.Connection``.
 
-    Extends the ``test_search_hybrid`` flavor with ``fetchval`` and
+    Extends the basic asyncpg stand-in with ``fetchval`` and
     ``execute`` so ``upsert_document`` can drive a complete
     insert/update/noop cycle without touching a real database.
 

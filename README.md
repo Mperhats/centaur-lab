@@ -179,6 +179,7 @@ kubectl delete namespace centaur-system
 | Smoke fails with `Missing API key` | You're running upstream's `just smoke` (e.g. `cd .centaur && just smoke`). The current chart's API rejects all unauthenticated calls; our root `just smoke` injects `X-Api-Key: $SLACKBOT_API_KEY` to compensate. Always invoke from the repo root. |
 | `helm get values` does not show `defaultHarness` | The pinned base SHA may not expose the key yet — see [open question 2 in the spec](docs/superpowers/specs/2026-05-25-centaur-lab-mvp-design.md#open-questions-for-implementation). Pass `--claude` manually in the smoke prompt as a workaround. |
 | Slack ETL workflows log token errors | `SLACK_ETL_TOKEN` unset or wrong; or its Slack user lacks `conversations.*` / `users.list` scopes. See [`docs/centaur/operate/slack-etl.md`](docs/centaur/operate/slack-etl.md). |
+| Overlay tools/workflows/skills look stale after a code edit | Rebuild + restart: `just overlay::reload`. The overlay image is copied into pods at startup, not bind-mounted from your laptop. `just deploy` alone often leaves old pods when `overlay.image.tag` is `latest`. |
 
 ## Tools (in `overlay/`)
 
@@ -190,12 +191,16 @@ under `overlay/tools/` at startup; sandbox pods receive
 `overlay/.agents/skills/` so Claude Code loads them as workspace skills.
 
 The image is rebuilt as part of `just up` (`just overlay::build` chains in
-front of `just deploy`); rebuilding by itself is `just overlay::build`,
-followed by `just deploy` to pick up the new image.
+front of `just deploy`). After editing overlay code on a running cluster,
+use **`just overlay::reload`** — rebuilds `centaur-overlay:latest` and
+restarts the API pod plus any Slack sandboxes. `just deploy` alone is not
+enough when the tag stays `:latest` (Helm sees no values change, so pods
+keep the old init-container copy). Upstream has no equivalent recipe;
+production deployments bump `overlay.image.tag` via GitOps instead.
 
 | Tool | Purpose |
 |------|---------|
-| [`overlay/tools/semantic_scholar`](overlay/tools/semantic_scholar) | Search papers, fetch metadata, walk the citation graph, and build persisted research briefs via the [Semantic Scholar Graph API](https://api.semanticscholar.org/api-docs/graph). Usable anonymously; set `SEMANTIC_SCHOLAR_API_KEY` in `.env` for higher quota. Discoverable methods include `search_papers` / `get_paper` / `get_references` (live API), `search` (hybrid cached-first across `company_context_documents` then a live top-up), and `research_brief` (one-call S2 search + Markdown lit-review render + upsert of the brief plus each underlying paper as parent/child rows). Companion playbook in `overlay/.agents/skills/academic-research/SKILL.md`. |
+| [`overlay/tools/semantic_scholar`](overlay/tools/semantic_scholar) | Search papers, fetch metadata, walk the citation graph, and build persisted research briefs via the [Semantic Scholar Graph API](https://api.semanticscholar.org/api-docs/graph). Usable anonymously; set `SEMANTIC_SCHOLAR_API_KEY` in `.env` for higher quota. Discoverable methods include `search_papers` / `get_paper` / `get_references` (live API), `search` (agent-facing live search with an error envelope), and `research_brief` (one-call S2 search + Markdown lit-review render + upsert of the brief plus each underlying paper as parent/child rows). Companion playbook in `overlay/.agents/skills/academic-research/SKILL.md`. |
 
 For background on the overlay model (how the image is built, how
 `TOOL_DIRS` is assembled, how to verify discovery from the API pod), see

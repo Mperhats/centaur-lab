@@ -23,6 +23,49 @@ default:
 build:
     docker build -t centaur-overlay:latest .
 
+# Rebuild the overlay image and restart every runtime that copies it.
+#
+# Upstream Centaur has no equivalent Just recipe. Production overlay repos
+# (see centaur-acme-infra) publish a sha-tagged image and let Argo CD roll
+# pods when overlay.image.tag changes. Local dev uses a stable :latest tag,
+# so `just deploy` alone often leaves old pods running: the chart checksum
+# hashes Helm values, not image contents, and the overlay-bootstrap init
+# container only re-copies on pod restart.
+#
+# This recipe is the local-dev loop after editing overlay/tools,
+# overlay/workflows, overlay/.agents/skills, or overlay/centaur_lab:
+#   1. rebuild centaur-overlay:latest
+#   2. restart the API deployment (tools + workflows rediscover on boot)
+#   3. delete Slack sandbox pods (skills copy at sandbox entrypoint)
+#
+# Does NOT rebuild centaur-api / centaur-agent — use `just up` for that.
+# Does NOT replace POST /admin/reload-tools, which only re-imports modules
+# already on disk inside a running pod; it cannot pull in a rebuilt image.
+[group('lifecycle')]
+reload: build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    deploy="{{release}}-centaur-api"
+    echo "Restarting API deployment/${deploy} in {{namespace}} …"
+    kubectl rollout restart "deployment/${deploy}" -n {{namespace}}
+    kubectl rollout status "deployment/${deploy}" -n {{namespace}} --timeout=120s
+    echo "Deleting Slack sandbox pods so the next turn mounts fresh skills …"
+    deleted=0
+    while IFS= read -r pod; do
+      [[ -n "$pod" ]] || continue
+      kubectl delete -n {{namespace}} "$pod" --wait=false
+      deleted=$((deleted + 1))
+    done < <(kubectl get pods -n {{namespace}} -o name 2>/dev/null | grep 'sandbox-slack' || true)
+    if [[ "$deleted" -eq 0 ]]; then
+      echo "No Slack sandbox pods to delete (they spawn on the next @centaur mention)."
+    else
+      echo "Deleted ${deleted} Slack sandbox pod(s)."
+    fi
+    echo ""
+    echo "Verify from the API pod:"
+    echo "  kubectl exec -n {{namespace}} deploy/${deploy} -- sh -c 'ls /app/overlay/org/tools; head -n 3 /app/overlay/org/.agents/skills/academic-research/SKILL.md'"
+    echo "  kubectl logs -n {{namespace}} deploy/${deploy} -c api --tail=50 | grep semantic_scholar"
+
 # Lint every tool and workflow against the same ruff contract upstream uses.
 [group('dev')]
 lint:
@@ -48,9 +91,8 @@ test-workflows:
 
 # Run the org tool test suites locally. Mirrors `test-workflows` — deps are
 # passed via --with rather than relying on dev-group resolution so the recipe
-# stays self-contained. asyncpg is required because the hybrid
-# `semantic_scholar.search` method imports it at module load (the cached-first
-# path queries `company_context_documents` before topping up via the live API).
+# stays self-contained. asyncpg is required because ``research_brief``
+# persists rows into ``company_context_documents``.
 [group('dev')]
 test-tools:
     cd tools/semantic_scholar && uv run --python 3.11 --with pytest --with pytest-asyncio --with asyncpg --with httpx pytest tests/ -v

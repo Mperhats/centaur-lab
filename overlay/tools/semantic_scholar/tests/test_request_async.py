@@ -1,17 +1,14 @@
-"""Tests for the async retry path: ``_request_async`` + ``_search_async``.
+"""Tests for the async retry path: ``_request_async`` + ``search_papers_async``.
 
-These tests pin the behavior added for review.md A5: the live top-up
-inside ``_search_async`` must not block the asyncio event loop on retry
-backoff. Two pieces of evidence:
+These tests pin the behavior added for review.md A5: async S2 calls must
+not block the asyncio event loop on retry backoff. Two pieces of evidence:
 
 1. ``_request_async`` directly: a mocked ``httpx.AsyncClient`` returns
    429 then 200; we patch both ``asyncio.sleep`` and ``time.sleep`` and
    assert the awaitable variant was awaited and the blocking variant
    was never touched.
-2. ``_search_async`` end-to-end: same 429 → 200 response sequence, but
-   driven through the public ``search`` entrypoint (which wraps
-   ``_search_async`` in ``asyncio.run``); asserts the returned envelope
-   contains the success payload and that ``time.sleep`` was never
+2. ``search_papers_async`` end-to-end: same 429 → 200 response sequence;
+   asserts the recovered paper list and that ``time.sleep`` was never
    called.
 
 Mocks live inline (no shared fixture file) so this file stays a
@@ -25,7 +22,6 @@ import asyncio
 import json
 from typing import Any
 
-import asyncpg
 import httpx
 import pytest
 
@@ -231,55 +227,15 @@ async def test_request_async_raises_on_400_without_retry(
 
 
 # ---------------------------------------------------------------------------
-# 4. _search_async end-to-end: 429 → 200 on the live top-up succeeds
-#    and never blocks via time.sleep
+# 4. search_papers_async end-to-end: 429 → 200 succeeds without blocking
 # ---------------------------------------------------------------------------
 
 
-class _MockAsyncpgConn:
-    """asyncpg.Connection stand-in for the hybrid ``search`` path.
-
-    ``_search_async`` only calls ``fetch`` (for the BM25 query) and
-    ``close``; nothing else is exercised here.
-    """
-
-    def __init__(self, rows: list[dict[str, Any]] | None = None) -> None:
-        self._rows = rows or []
-        self.fetch_calls: list[tuple[str, tuple[Any, ...]]] = []
-        self.close_count = 0
-
-    async def fetch(self, sql: str, *args: Any) -> list[dict[str, Any]]:
-        self.fetch_calls.append((sql, args))
-        return self._rows
-
-    async def close(self) -> None:
-        self.close_count += 1
-
-
-def _install_database_url(
-    monkeypatch: pytest.MonkeyPatch, url: str = "postgres://test/db"
-) -> None:
-    monkeypatch.setenv("DATABASE_URL", url)
-    monkeypatch.setattr(s2_client, "secret", lambda _k, default="": default)
-
-
-def _install_mock_conn(
-    monkeypatch: pytest.MonkeyPatch, mock: _MockAsyncpgConn
-) -> None:
-    async def _connect(_url: str, **_kwargs: Any) -> _MockAsyncpgConn:
-        return mock
-
-    monkeypatch.setattr(asyncpg, "connect", _connect)
-
-
-def test_search_async_recovers_from_live_429_without_blocking(
+@pytest.mark.asyncio
+async def test_search_papers_async_recovers_from_429_without_blocking(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """End-to-end: the live S2 top-up returns 429 → 200; the hybrid
-    ``search`` envelope contains the recovered live paper and the retry
-    backoff never reached ``time.sleep``."""
-    _install_database_url(monkeypatch)
-    _install_mock_conn(monkeypatch, _MockAsyncpgConn(rows=[]))
+    """End-to-end: S2 returns 429 → 200; retry backoff never uses ``time.sleep``."""
     live_payload = {
         "data": [
             {
@@ -301,15 +257,9 @@ def test_search_async_recovers_from_live_429_without_blocking(
     asyncio_sleeps, time_sleeps = _install_sleep_recorders(monkeypatch)
 
     client = SemanticScholarClient(api_key="")
-    result = client.search("async retry coverage")
+    papers = await client.search_papers_async("async retry coverage")
 
-    assert result["status"] == "ok"
-    assert result["live_error"] is None
-    assert result["live_count"] == 1
-    assert [r["paperId"] for r in result["results"]] == ["L1"]
-    assert [r["lane"] for r in result["results"]] == ["live"]
-    # Retry backoff went through the awaitable path; nothing blocked
-    # the event loop via ``time.sleep``.
+    assert [p["paperId"] for p in papers] == ["L1"]
     assert asyncio_sleeps == [1.0]
     assert time_sleeps == []
 
