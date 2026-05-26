@@ -26,11 +26,18 @@ up: bootstrap-secrets
 deploy:
     #!/usr/bin/env bash
     set -euo pipefail
+    if [[ -f ../overlay/.tag ]]; then
+      overlay_tag=$(tr -d '[:space:]' < ../overlay/.tag)
+    else
+      overlay_tag="sha-$(git -C .. rev-parse --short HEAD)"
+    fi
     helm dependency update contrib/chart >/dev/null
     helm upgrade --install $CENTAUR_RELEASE contrib/chart \
         --namespace $CENTAUR_NAMESPACE --create-namespace \
         -f contrib/chart/values.dev.yaml \
-        -f ../values.local.yaml
+        -f ../values.org.yaml \
+        -f ../values.local.yaml \
+        --set "overlay.image.tag=${overlay_tag}"
 
 # Run upstream bootstrap, then patch in keys it does not handle.
 [group('lifecycle')]
@@ -70,11 +77,16 @@ down:
 status:
     kubectl get all -n $CENTAUR_NAMESPACE
 
-# Rebuild overlay image + restart API + recycle Slack sandboxes.
+# Rebuild overlay image + deploy (sha tag roll) + tear down Slack sandboxes.
 # Implemented in overlay/Justfile; exposed here for discoverability.
 [group('lifecycle')]
 reload:
     just overlay::reload
+
+# filter: all (default) | slack
+[group('lifecycle')]
+clean-sandboxes filter="all":
+    just overlay::clean-sandboxes {{filter}}
 
 # Upstream `just smoke` with X-Api-Key added — current chart rejects unauthed localhost.
 [group('dev')]

@@ -1,123 +1,22 @@
-# centaur-lab MVP — the ONLY chart customization layered on top of
-# .centaur/contrib/chart/values.dev.yaml. Keep this file minimal; every
-# additional knob is one more thing that can drift across upstream bumps.
+# Laptop-only overrides layered on values.org.yaml.
 
 ironProxy:
-  # Resolve credentials from the centaur-infra-env Kubernetes Secret
-  # directly. No 1Password Connect or service account.
-  secretSource: env
-
-  # Same imagePullPolicy fix as `api.image.pullPolicy` below — kubelet's
-  # default for `:latest` is Always, which makes it try to pull the
-  # locally-built centaur-iron-proxy:latest from a registry. Force it to
-  # use the local image.
   image:
     pullPolicy: IfNotPresent
 
 api:
-  # Default harness when a Slack mention has no explicit selector. Claude
-  # Code by default because Anthropic is our primary credential; override
-  # per-turn with `--codex`, `--amp`, or `--pi` once those keys are set.
-  defaultHarness: claude-code
-
-  # Save laptop CPU/memory; sandboxes spawn cold per turn. Acceptable for
-  # smoke and early development. Re-enable in production values.
   warmPoolEnabled: false
-
-  # Enable scheduled Slack history sync (`slack_sync`, `slack_backfill`,
-  # `company_context_documents` workflows). Requires SLACK_ETL_TOKEN
-  # (a Slack USER token, distinct from SLACK_BOT_TOKEN) in .env. With it
-  # unset, the workflows will run on schedule but log token errors —
-  # set it before flipping this on. See docs/centaur/operate/slack-etl.md.
-  slackEtlEnabled: true
-
-  # 2-year backfill window for newly-bootstrapped channels (chart default is
-  # 30d). Centaur's `slack_backfill` workflow drains the queue on its
-  # chart-configured tick (1h in dev). Channels already synced with the
-  # smaller window keep their existing watermark — they won't re-pull older
-  # history just because this value went up.
-  slackSyncBackfillLookbackDays: 700
-
-  # The chart's default for `:latest`-tagged images is Always, which makes
-  # kubelet try to pull centaur-api:latest from a public registry instead of
-  # using the locally-built image. Slackbot already has IfNotPresent set in
-  # values.dev.yaml; this matches that behavior for the API. (Same fix
-  # repeated below for ironProxy and sandbox — upstream values.dev.yaml
-  # only covers slackbot.)
   image:
     pullPolicy: IfNotPresent
 
 sandbox:
-  # Same image-pull fix: sandbox pods spawn per agent turn, get the same
-  # default `pullPolicy: Always`, and silently fail with "sandbox readiness
-  # timed out" after 60s because kubelet can't pull centaur-agent:latest
-  # from any registry. Without this override, every Slack mention errors out.
   image:
     pullPolicy: IfNotPresent
-  # Mount path inside each sandbox pod where the repo-cache DaemonSet's
-  # hostPath volume gets attached read-only at /home/agent/github. Setting
-  # this also makes the chart export REPOS_PATH into the API deployment so
-  # api/sandbox/kubernetes.py can validate that AGENT_REPO has a backing
-  # mount. Must match repoCache.hostPath below.
   reposPath: /var/lib/centaur/repos
 
-slackbot:
-  # Slack ingress enabled. Requires real SLACK_BOT_TOKEN and
-  # SLACK_SIGNING_SECRET in .env, plus a `cloudflared` tunnel + a
-  # `kubectl port-forward` exposing the Slackbot Service at a stable public
-  # URL Slack can hit. See cloudflared/README.md.
-  enabled: true
-
 overlay:
-  # Mount the local overlay/ tree into the API pod at /app/overlay/org and
-  # into sandbox pods at /home/agent/overlay/org. Built once per `just up`
-  # (chained via `just overlay::build`) into a host-local Docker image.
-  # After editing overlay code on a running cluster, run
-  # `just overlay::reload` (rebuild + API restart + sandbox recycle).
-  # Docker Desktop's Kubernetes shares the host image cache, so
-  # `pullPolicy: IfNotPresent` finds the local tag without a registry.
-  # Adds /app/overlay/org/tools to TOOL_DIRS so the API discovers tools
-  # like semantic_scholar; copies .agents/skills into sandbox workspaces so
-  # academic-research and friends are loaded by Claude Code.
   image:
-    repository: centaur-overlay
-    tag: latest
     pullPolicy: IfNotPresent
 
 repoCache:
-  # Spin up the repo-cache DaemonSet that periodically `git fetch`s every
-  # repo listed in .repositories into .hostPath. Every sandbox pod gets
-  # that hostPath mounted read-only at ~/github/<org>/<repo>, which is the
-  # source the sandbox entrypoint uses for `git clone --shared` (cheap,
-  # CoW-style writable clone via `git-branch`). Without this enabled, any
-  # sandbox spawned with AGENT_REPO set will exit during entrypoint with
-  # "not a valid git repository".
-  enabled: true
-
-  # The DaemonSet writes here on each cluster node; sandbox pods mount the
-  # same path read-only. On Docker Desktop, /var/lib/* paths are inside
-  # the host VM's filesystem and work without any extra config. The
-  # `type: DirectoryOrCreate` in repo-cache.yaml means the path is created
-  # if missing on first start.
   hostPath: /var/lib/centaur/repos
-
-  # Mirror only the repo the sandbox needs to edit. Each entry is fetched
-  # by the DaemonSet in a loop every syncIntervalSeconds. Add more here
-  # when you want the agent to be able to edit additional repos (e.g.,
-  # an infra repo for Argo CD bootstrap once you ship it).
-  repositories:
-    - Mperhats/centaur-lab
-
-  # 5 minutes is upstream's default; tune lower if you want PRs to see
-  # the latest main quickly after merge. Each cycle is a `git fetch`, not
-  # a full clone, so the cost is low.
-  syncIntervalSeconds: 300
-
-  # Reuse the GITHUB_TOKEN already living in centaur-infra-env (patched
-  # by bootstrap-secrets). The chart's repoCache.githubToken supports
-  # `existingSecretName + secretKey` to avoid creating a second Secret.
-  # See .centaur/contrib/chart/templates/_helpers.tpl:58-64 for the
-  # helper that resolves the secret name.
-  githubToken:
-    existingSecretName: centaur-infra-env
-    secretKey: GITHUB_TOKEN

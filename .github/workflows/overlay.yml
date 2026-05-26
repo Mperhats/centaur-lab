@@ -1,0 +1,71 @@
+# Prod overlay path: merges to main that touch overlay/** build and push
+# ghcr.io/<repo>/centaur-overlay:sha-<full> and :sha-<7-char> here. A separate
+# infra/Argo repo pins overlay.image.repository + overlay.image.tag to that
+# sha tag so the cluster rolls API and sandbox pods (see Phase 4 plan).
+
+name: Overlay CI
+
+on:
+  push:
+    paths:
+      - overlay/**
+  pull_request:
+    paths:
+      - overlay/**
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  overlay:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install just
+        uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6 # v2
+        with:
+          just-version: 1.36.0
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          enable-cache: true
+
+      - name: Lint
+        working-directory: overlay
+        run: just lint
+
+      - name: Test tools
+        run: just overlay::test-tools
+
+      - name: Test workflows
+        run: just overlay::test-workflows
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push overlay image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        working-directory: overlay
+        run: |
+          image="ghcr.io/${{ github.repository }}/centaur-overlay"
+          short="${GITHUB_SHA:0:7}"
+          docker build \
+            -t "${image}:sha-${{ github.sha }}" \
+            -t "${image}:sha-${short}" \
+            .
+          docker push "${image}:sha-${{ github.sha }}"
+          docker push "${image}:sha-${short}"

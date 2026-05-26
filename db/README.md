@@ -59,7 +59,7 @@ kernel shutdown.
 
 Slack ingestion is wholly owned by centaur's scheduler — see
 `.centaur/docs/public/md/operate/slack-etl.md`. Toggle it in
-`values.local.yaml` (`api.slackEtlEnabled` + `api.slackSyncBackfillLookbackDays`)
+`values.org.yaml` (`api.slackEtlEnabled` + `api.slackSyncBackfillLookbackDays`)
 and let the workflows tick on their chart-configured interval.
 
 Centaur's Postgres is the `paradedb/paradedb` image with `pg_search`
