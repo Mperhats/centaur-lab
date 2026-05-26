@@ -1207,8 +1207,14 @@ async def test_num_seeds_with_no_best_skips_seed_fan_out(
 
 def test_aggregate_seed_metrics_skips_buggy_children() -> None:
     """A buggy seed child is excluded so a single crash doesn't poison
-    the mean; one healthy child is enough to produce an aggregate
-    (``std=0``)."""
+    the mean; one healthy child is enough to produce an aggregate.
+
+    With ``n=1`` ``aggregate_std`` is ``None`` rather than ``0.0`` —
+    the previous ``std=0.0`` was misleading because it looked like
+    "we observed zero variance" instead of "we don't have enough
+    samples to estimate variance" (which is what really happened
+    when one seed silently failed and only the other made it through).
+    """
     from bfts_tree import _aggregate_seed_metrics
 
     out = _aggregate_seed_metrics(
@@ -1221,7 +1227,7 @@ def test_aggregate_seed_metrics_skips_buggy_children() -> None:
     assert out is not None
     assert out["aggregate_n"] == 1.0
     assert out["aggregate_mean"] == pytest.approx(0.5)
-    assert out["aggregate_std"] == pytest.approx(0.0)
+    assert out["aggregate_std"] is None
 
 
 def test_aggregate_seed_metrics_handles_nested_schema() -> None:

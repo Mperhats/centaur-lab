@@ -310,16 +310,19 @@ async def update_node_aggregate_metric(
     pool: asyncpg.Pool,
     *,
     node_id: str,
-    aggregate: dict[str, float],
+    aggregate: dict[str, float | None],
 ) -> None:
     """F.4: merge an aggregate sub-dict into an existing ``metric_json``.
 
     ``aggregate`` is e.g. ``{"aggregate_mean": 0.32, "aggregate_std":
-    0.04, "aggregate_n": 3.0}``. Postgres jsonb ``||`` operator does a
-    shallow concatenation so the merge cleanly overwrites the same
-    keys on replay without disturbing the rest of the JSON. The
-    ``COALESCE(... '{}'::jsonb)`` defends against ``metric_json IS
-    NULL`` (e.g. a degenerate best node whose parse step never ran).
+    0.04, "aggregate_n": 3.0}``. ``aggregate_std`` may be ``None`` when
+    only one seed survived (``_aggregate_seed_metrics`` distinguishes
+    "we don't have enough samples" from "we observed zero variance").
+    Postgres jsonb ``||`` operator does a shallow concatenation so the
+    merge cleanly overwrites the same keys on replay without disturbing
+    the rest of the JSON. The ``COALESCE(... '{}'::jsonb)`` defends
+    against ``metric_json IS NULL`` (e.g. a degenerate best node whose
+    parse step never ran).
     """
     await pool.execute(
         """

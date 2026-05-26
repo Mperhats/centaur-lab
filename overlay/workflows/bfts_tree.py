@@ -466,7 +466,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     # ``metric_json`` so downstream tooling sees the noise estimate
     # alongside the point metric.
     seed_rows: list[dict[str, Any]] = []
-    aggregate: dict[str, float] | None = None
+    aggregate: dict[str, float | None] | None = None
     if best is not None and search.num_seeds > 0:
         # The final main-loop iteration left the sandbox at
         # ``replicas=0``. Seed-eval children each ``exec_python`` the
@@ -535,10 +535,45 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                 eager_start=True,
             )
             seed_children.append((seed_node_id, child))
+        # Same failure-mode discipline as the main expansion loop above:
+        # ``wait_for_workflow`` returns the child record even for
+        # failed/cancelled seed children. The placeholder row inserted
+        # at lines 496-513 would otherwise sit with NULL ``is_buggy`` /
+        # ``metric_json`` forever, and ``_aggregate_seed_metrics``
+        # would compute mean/std over the surviving seeds without ever
+        # signalling that one was lost — so a 1-of-2 success silently
+        # produced ``aggregate_n=1, aggregate_std=0``, misleading any
+        # downstream consumer about run stability. Mirroring the main
+        # loop's ``mark_node_failed`` flips the placeholder to
+        # ``is_buggy=TRUE`` with a synthetic ``ChildWorkflowFailed``
+        # exception so the aggregator's ``if r.get("is_buggy")``
+        # filter (line 666 in ``_aggregate_seed_metrics``) excludes it
+        # cleanly and the n=1 case lands in the Bessel-correction
+        # branch below.
         for nid, child in seed_children:
-            await ctx.wait_for_workflow(
+            seed_result = await ctx.wait_for_workflow(
                 f"wait_seed_{nid}", run_id=child["run_id"]
             )
+            seed_status = (seed_result or {}).get("status")
+            if seed_status in ("failed", "failed_permanent", "cancelled"):
+                seed_error = (seed_result or {}).get("error") or (
+                    seed_result or {}
+                ).get("error_text")
+                await ctx.step(
+                    f"mark_seed_failed_{nid}",
+                    lambda nid=nid, st=seed_status, err=seed_error: (
+                        mark_node_failed(
+                            pool,
+                            node_id=nid,
+                            exc_type="ChildWorkflowFailed",
+                            exc_info={"child_status": st, "error": err},
+                            analysis=(
+                                f"seed bfts_expand_one terminated with "
+                                f"status={st}"
+                            ),
+                        )
+                    ),
+                )
         seed_rows = await ctx.step(
             "list_seed_children",
             lambda: list_seed_children(pool, parent_node_id=best["node_id"]),
@@ -650,7 +685,7 @@ def _project_seed_children(
 
 def _aggregate_seed_metrics(
     seed_rows: list[dict[str, Any]],
-) -> dict[str, float] | None:
+) -> dict[str, float | None] | None:
     """Compute mean / std / n over ``final_value`` of non-buggy seed
     children. ``metric_json`` arrives as either a raw JSON string
     (asyncpg jsonb return) or a pre-parsed dict; tolerate both.
@@ -658,6 +693,15 @@ def _aggregate_seed_metrics(
     Returns ``None`` if no seed child produced a usable scalar, so
     the caller can skip the aggregate write. Excludes buggy children
     so a single seed crash doesn't poison the mean.
+
+    ``aggregate_std`` uses Bessel's correction (``n-1`` denominator)
+    when ``n >= 2`` — matches ``numpy.std(ddof=1)`` and signals that
+    the value is a sample-variance estimator. With a single surviving
+    seed (e.g. one seed_override child failed and was marked buggy
+    upstream), we emit ``aggregate_std=None`` rather than the previous
+    misleading ``0.0`` — downstream consumers must distinguish "we
+    observed zero variance" from "we don't have enough samples to
+    estimate variance".
     """
     import json as _json
 
@@ -690,9 +734,14 @@ def _aggregate_seed_metrics(
     if not values:
         return None
     mean = sum(values) / len(values)
-    var = sum((v - mean) ** 2 for v in values) / len(values)
+    std: float | None
+    if len(values) >= 2:
+        var = sum((v - mean) ** 2 for v in values) / (len(values) - 1)
+        std = var ** 0.5
+    else:
+        std = None
     return {
         "aggregate_mean": mean,
-        "aggregate_std": var ** 0.5,
+        "aggregate_std": std,
         "aggregate_n": float(len(values)),
     }
