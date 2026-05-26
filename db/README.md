@@ -16,8 +16,8 @@ cd .. && pre-commit install
 ```
 
 - `ipykernel install` registers `db/.venv` as a named Jupyter kernel that
-  Cursor / VS Code can find. `notebooks/explore.ipynb` is pinned to this
-  kernel, so it auto-selects the right interpreter on open.
+  Cursor / VS Code can find. The notebooks under `db/notebooks/` are
+  pinned to this kernel, so they auto-select the right interpreter on open.
 - `nbstripout --install` registers a git **clean filter** for `*.ipynb`
   (path set in the committed `.gitattributes`). Notebook outputs are
   silently stripped on every `git add` — outputs stay visible in your
@@ -32,9 +32,17 @@ cd .. && pre-commit install
 
 ## Using it
 
-Open `db/notebooks/explore.ipynb` in Cursor. Run the cells. Everything
-needed (port-forward to in-cluster Postgres, password fetch, BM25 example)
-is in the notebook.
+Two purpose-specific notebooks live under `db/notebooks/`:
+
+- [`slack.ipynb`](notebooks/slack.ipynb) — Slack ETL projection in
+  `company_context_documents`, raw `slack_sync_*` tables, BM25 search via
+  ParadeDB.
+- [`papers.ipynb`](notebooks/papers.ipynb) — Semantic Scholar rows written
+  by the `save_papers` and `research_brief` workflows, briefs joined to
+  their child papers, BM25 over the indexed lane.
+
+Open either in Cursor. Run the cells — port-forward, password fetch, and
+queries are all wired up.
 
 ```python
 import centaur_db as db

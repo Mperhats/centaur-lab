@@ -17,7 +17,6 @@ from pathlib import Path
 import typer
 from dotenv import find_dotenv, load_dotenv
 from rich.console import Console
-from rich.table import Table
 
 # Make `from centaur_sdk import ...` (used by client.py) resolvable when
 # running from `uv run`. The upstream centaur_sdk pyproject uses
@@ -70,6 +69,12 @@ def _truncate(text: str | None, length: int = 80) -> str:
 
 
 def _render_papers(papers: list[dict], title: str) -> None:
+    # Lazy-imported so the centaur_sdk path bootstrap above is in effect
+    # before `from centaur_sdk import Table` resolves. Mirrors the upstream
+    # tool CLI convention of going through the SDK re-export instead of
+    # importing rich.table.Table directly.
+    from centaur_sdk import Table
+
     if not papers:
         console.print("[yellow]No results.[/]")
         raise typer.Exit()
