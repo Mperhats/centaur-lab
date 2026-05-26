@@ -1,14 +1,11 @@
 """Test: collect_artifacts moves .npy + .png out of the Sandbox PVC."""
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from client import BFTSExecutor
+from bfts_executor.client import BFTSExecutor
 
 
 class _FakeSandboxAPI:

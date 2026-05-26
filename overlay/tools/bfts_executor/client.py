@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from models import ExecutionResult
+from .models import ExecutionResult
 
 WORKING_DIR = "/workspace/working"
 """Per-node writable workspace under the inline workspace PVC.
@@ -348,7 +348,7 @@ class _KubernetesSandboxAPI:
             bfts-executor image and a `sleep infinity` CMD — no harness.
         """
         await self._ensure_clients()
-        from network_policy import ensure_sandbox_egress_policy
+        from .network_policy import ensure_sandbox_egress_policy
 
         await ensure_sandbox_egress_policy(
             self.networking_api, namespace=self.namespace

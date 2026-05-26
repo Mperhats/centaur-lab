@@ -1,15 +1,11 @@
 """Test: ensure_sandbox_egress_policy is idempotent + carries correct rules."""
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from network_policy import (
+from bfts_executor.network_policy import (
     POLICY_NAME,
     ensure_sandbox_egress_policy,
 )

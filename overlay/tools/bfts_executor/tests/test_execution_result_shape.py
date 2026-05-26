@@ -1,12 +1,7 @@
 """Test: ExecutionResult preserves Sakana's wire shape exactly."""
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from models import ExecutionResult
+from bfts_executor.models import ExecutionResult
 
 
 def test_execution_result_minimal_construction() -> None:
