@@ -65,6 +65,77 @@ bootstrap-secrets:
 down:
     helm uninstall $CENTAUR_RELEASE --namespace $CENTAUR_NAMESPACE
 
+# Mirrors upstream's `cleanup-orphan-proxy-services` `dry-run | delete`
+# interface and delegates the orphan-Service half to that recipe so we do
+# not reimplement it. Sandbox pods owned by a Sandbox CR with replicas > 0
+# are skipped — the agent-sandbox controller would recreate them — and
+# per-sandbox proxy pods whose sandbox-id maps to a skipped sandbox are
+# kept. The cluster-wide api iron-proxy (sandbox-id="api") is never
+# touched.
+# Reap stale sandbox + per-sandbox iron-proxy Pods + orphan proxy Services. Pass `delete` to apply.
+[group('lifecycle')]
+clean mode="dry-run":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{mode}}" in
+      dry-run|delete) ;;
+      *) echo "mode must be dry-run or delete" >&2; exit 2 ;;
+    esac
+
+    ns=$CENTAUR_NAMESPACE
+    keep_ids=()
+    drop_sandboxes=()
+    drop_proxies=()
+
+    while IFS=$'\t' read -r pod sid owner_kind owner_name; do
+      [[ -n "$pod" ]] || continue
+      if [[ "$owner_kind" == "Sandbox" && -n "$owner_name" ]]; then
+        replicas=$(kubectl get sandbox -n "$ns" "$owner_name" -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "")
+        if [[ -n "$replicas" && "$replicas" != "0" ]]; then
+          keep_ids+=("$sid")
+          continue
+        fi
+      fi
+      drop_sandboxes+=("$pod")
+    done < <(
+      kubectl get pods -n "$ns" -l centaur.ai/managed=true \
+        -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.centaur\.ai/sandbox-id}{"\t"}{.metadata.ownerReferences[?(@.kind=="Sandbox")].kind}{"\t"}{.metadata.ownerReferences[?(@.kind=="Sandbox")].name}{"\n"}{end}'
+    )
+
+    while IFS=$'\t' read -r pod sid; do
+      [[ -n "$pod" && "$sid" != "api" ]] || continue
+      for kid in "${keep_ids[@]+"${keep_ids[@]}"}"; do
+        [[ "$kid" == "$sid" ]] && continue 2
+      done
+      drop_proxies+=("$pod")
+    done < <(
+      kubectl get pods -n "$ns" -l centaur.ai/iron-proxy=true \
+        -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.centaur\.ai/sandbox-id}{"\n"}{end}'
+    )
+
+    total=$(( ${#drop_sandboxes[@]} + ${#drop_proxies[@]} ))
+    if [[ "$total" -eq 0 ]]; then
+      echo "No stale sandbox or proxy pods found."
+    else
+      for pod in "${drop_sandboxes[@]+"${drop_sandboxes[@]}"}"; do
+        if [[ "{{mode}}" == "delete" ]]; then
+          kubectl delete pod -n "$ns" "$pod" --wait=false
+        else
+          printf 'sandbox pod: %s\n' "$pod"
+        fi
+      done
+      for pod in "${drop_proxies[@]+"${drop_proxies[@]}"}"; do
+        if [[ "{{mode}}" == "delete" ]]; then
+          kubectl delete pod -n "$ns" "$pod" --wait=false
+        else
+          printf 'proxy pod:   %s\n' "$pod"
+        fi
+      done
+    fi
+
+    echo "---"
+    (cd {{centaur}} && just cleanup-orphan-proxy-services "{{mode}}")
+
 # Upstream `just smoke` with X-Api-Key added — current chart rejects unauthed localhost.
 [group('dev')]
 smoke:
