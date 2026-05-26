@@ -63,8 +63,14 @@ jobs:
         with:
           enable-cache: true
 
+      # Shape B: ``--all-packages`` walks every workspace member's
+      # ``[project].dependencies`` (the same files entrypoint.sh
+      # installs from in the API pod) into the dev ``.venv``. Root
+      # pyproject does not re-list members in a root ``dependencies``
+      # block; the workspace glob is the single source of truth for
+      # membership.
       - name: Install dev deps + aggregated runtime deps
-        run: uv sync --python 3.11
+        run: uv sync --all-packages --python 3.11
 
       - name: Lint
         run: uv run --python 3.11 ruff check .

@@ -118,36 +118,63 @@ PR.
   upstream's own `company_context_documents.py` repeats the same SQL
   rather than sharing through a sibling module — and it keeps the
   per-consumer parent-linkage / retry semantics local to the consumer.
-- Dependency management uses a **uv workspace**: the root
-  `pyproject.toml` declares `[tool.uv.workspace] members = ["tools/*", "packages/bfts_sdk"]`
-  and lists each member dist-name in `[project].dependencies`
-  (`bfts-sdk`, `bfts-executor`, `bfts-vlm`, `semantic-scholar`); each
-  member name is pinned to `{ workspace = true }` under
-  `[tool.uv.sources]`. A single `uv sync` from the repo root walks
-  every member's `[project].dependencies` and installs them into the
-  root `.venv` — no hand-curated transitive dep lists at the root,
-  no duplication, and the dev/test venv matches what the API pod's
-  `entrypoint.sh` installs at startup (which scans every
-  `tools/*/pyproject.toml` independently). Each member sets
-  `[tool.uv] package = false` so uv contributes the `[project].dependencies`
-  block to the root venv **without** trying to wheel-build the
-  member itself; consumers continue to import from the source tree
-  (`tools.<name>.client`, `packages.bfts_sdk.X`) via pytest's
-  `pythonpath` and the API pod's `TOOL_DIRS` lookup. Distribution
-  names use dashes (`bfts-sdk`, `semantic-scholar`); module
-  directory names keep their underscore form (`packages/bfts_sdk/`,
-  `tools/semantic_scholar/`). Adding a new tool: drop a new
-  `tools/<name>/pyproject.toml` with `name = "<name>"`, add `"<name>"`
-  to the root `[project].dependencies`, and add the matching
-  `[tool.uv.sources]` entry. `packages/centaur_sdk` is explicitly NOT
-  a workspace member — upstream's pyproject there is not opted out of
-  building and would confuse uv; the symlink exists only for dev-time
-  import resolution (see below).
-- Each `tools/<name>/` directory has its own `pyproject.toml` with a
+- Dependency management uses a **uv workspace in Shape B**: the
+  root `pyproject.toml` only declares
+  `[tool.uv.workspace] members = ["tools/*", "packages/bfts_sdk"]`.
+  It does NOT re-list members in a root `[project].dependencies`
+  block, and it does NOT carry a `[tool.uv.sources]` table — the
+  workspace glob is the single source of truth for membership, and
+  each member's own `pyproject.toml` is the single source of truth
+  for what that member needs at runtime. CI runs
+  `uv sync --all-packages --python 3.11`, which walks every member's
+  `[project].dependencies` into the root `.venv`. Each member sets
+  `[tool.uv] package = false` so uv contributes deps without trying
+  to wheel-build the member itself; consumers continue to import
+  from the source tree (`tools.<n>.client`,
+  `packages.bfts_sdk.X`) via pytest's `pythonpath` and the API
+  pod's `TOOL_DIRS` lookup. Distribution names use dashes
+  (`bfts-sdk`, `semantic-scholar`); module directory names keep
+  their underscore form. Adding a new tool: drop
+  `tools/<n>/pyproject.toml` with `name = "<n>"` and the
+  `[tool.centaur]` block — that's it; the `tools/*` workspace glob
+  picks it up automatically. `packages/centaur_sdk` is explicitly NOT
+  a workspace member because upstream's pyproject there is not opted
+  out of building and would confuse uv; the symlink exists only for
+  dev-time import resolution.
+- Each `tools/<n>/` directory has its own `pyproject.toml` with a
   `[tool.centaur]` block. This is how the upstream `tool_manager`
-  discovers tools and binds iron-proxy headers — without it the API
-  pod registers zero tools at runtime. The same pyproject doubles as
-  the workspace member manifest described above.
+  discovers tools (`.centaur/services/api/api/tool_manager.py:1375-1484`)
+  and binds iron-proxy headers — without it the API pod registers
+  zero tools at runtime. The same pyproject doubles as the workspace
+  member manifest described above. Tool runtime name = **directory
+  name** (not `[project].name`); the `[project].name` is only used
+  for uv workspace dist resolution. `_client()` factory in the
+  declared `module` (defaults to `client.py`) returns an instance
+  whose public methods are auto-registered as agent-callable; methods
+  starting with `_`, `@property` descriptors, and the lifecycle names
+  `close` / `connect` / `disconnect` / `shutdown` are filtered out.
+  Forbidden argument names (per `tool_manager._FORBIDDEN_TOOL_ARGUMENT_NAMES`):
+  `output_path`, `output_dir`, `download_path`, `save_path`,
+  `dest_path`, `destination_path`.
+- **The API pod only installs deps declared in `tools/*/pyproject.toml`.**
+  `entrypoint.sh` globs `${TOOL_DIRS}/**/pyproject.toml` and
+  `uv pip install`s the union of every `[project].dependencies`.
+  It does NOT scan `packages/` or `workflows/`. So the invariant
+  that keeps prod working is: *every Python import in overlay code
+  outside `tools/` must have its top-level distribution declared by
+  some tool's `[project].dependencies`*. Today
+  `packages/bfts_sdk/` only imports `asyncpg` + `httpx`, both
+  declared by `tools/semantic_scholar/` (and `httpx` also by
+  `tools/bfts_vlm/`), so the invariant holds. When you add a new
+  third-party import to `packages/bfts_sdk/*.py` or to a
+  `workflows/*.py` handler, declare it in the
+  `tools/<n>/pyproject.toml` whose runtime use-case is closest
+  (usually `bfts_executor` for BFTS internals or `semantic_scholar`
+  for data-layer pieces). This is a code-review invariant — there
+  is no automated CI check, because a string-equality check between
+  two locations would only catch literal-mirror drift and would mask
+  the real failure mode (a new transitive import landing with no
+  tool home).
 - `centaur_sdk` resolves through a tracked symlink at
   `packages/centaur_sdk` pointing into `.centaur/centaur_sdk`.
   Upstream's wheel-packaging declares
