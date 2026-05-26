@@ -1,13 +1,14 @@
-#!/usr/bin/env -S uv run --script
-# /// script
-# requires-python = ">=3.11"
-# ///
 """Populate .centaur/ and sync the dev venv.
 
+Run from the repo root:
+
+    uv run python scripts/sync_sdk.py            # default: init at pinned SHA + uv sync
+    uv run python scripts/sync_sdk.py bump       # advance pin to upstream HEAD + pytest
+
 Default
-    Init the .centaur submodule at the pinned SHA, then ``uv sync``
-    so .venv/ matches pyproject.toml. Run after a fresh clone or
-    after pulling a teammate's pin bump.
+    Init the .centaur submodule at the pinned SHA, then ``uv sync`` so
+    .venv/ matches pyproject.toml. Run after a fresh clone or after
+    pulling a teammate's pin bump.
 
 bump
     Advance .centaur/ to upstream HEAD, run the test suite, and stage
@@ -51,7 +52,7 @@ def main() -> int:
         print(f'\nPin advanced to {sha}. Commit with:\n  git commit -m "bump .centaur to {sha}"')
         return 0
 
-    print(f"Usage: {sys.argv[0]} [init|bump]", file=sys.stderr)
+    print(f"Usage: uv run python {sys.argv[0]} [init|bump]", file=sys.stderr)
     return 2
 
 
