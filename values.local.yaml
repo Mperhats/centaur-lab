@@ -61,6 +61,32 @@ sandbox:
   # mount. Must match repoCache.hostPath below.
   reposPath: /var/lib/centaur/repos
 
+  # Use the Agent Sandbox backend (kubernetes-sigs/agent-sandbox) instead of
+  # the default bare-Pod backend. The API resolves this through
+  # KUBERNETES_SANDBOX_CONTROLLER and routes lifecycle calls (spawn / pause /
+  # resume / status / stop) through the Sandbox CRD in api/sandbox/
+  # kubernetes_agent_sandbox.py. Required for the BFTS workflow port —
+  # pause/resume between tree-search expansions is the value prop. See
+  # docs/agent-sandbox-in-centaur.md for the full wiring.
+  controller: agent-sandbox
+
+  # Attach a per-sandbox PVC at /home/agent/state so workspace, .codex,
+  # .claude, branches, and uploads survive a pause (replicas=0). Without
+  # this, pause/resume still works at the CR level but every wake starts
+  # from the image's empty home. 1Gi is plenty for the smoke loop; bump
+  # for real BFTS runs that persist large checkpoints.
+  stateVolume:
+    enabled: true
+    size: 1Gi
+    storageClassName: ""   # use the cluster default (hostpath on Docker Desktop)
+
+# Install the upstream agent-sandbox controller + CRDs into this release.
+# Off in the chart default because most deployments bring their own
+# controller; for the lab we want the chart to manage it so a single
+# `just up` is enough. Pins the vendored subchart at v0.4.6.
+agentSandbox:
+  enabled: true
+
 slackbot:
   # Slack ingress enabled. Requires real SLACK_BOT_TOKEN and
   # SLACK_SIGNING_SECRET in .env, plus a `cloudflared` tunnel + a
