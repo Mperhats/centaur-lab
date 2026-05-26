@@ -5,12 +5,12 @@ upstream's reserved ``shared.tools_runtime`` namespace) so both
 ``overlay/workflows/`` and ``overlay/tools/`` can import these helpers
 without sys.path gymnastics or cross-package back-references.
 
-``build_paper_document`` projects a Semantic Scholar paper dict into the
-column shape expected by ``company_context_documents``; ``upsert_document``
-applies that row idempotently via ``content_hash`` so reruns over
-unchanged input no-op, while re-parenting an otherwise-unchanged paper
-(e.g. one previously saved by ``save_papers`` and later surfaced by
-``research_brief``) still updates the row.
+``build_paper_document`` projects a :class:`centaur_lab.paper_models.Paper`
+into the column shape expected by ``company_context_documents``;
+``upsert_document`` applies that row idempotently via ``content_hash``
+so reruns over unchanged input no-op, while re-parenting an otherwise-
+unchanged paper (e.g. one previously saved by ``save_papers`` and later
+surfaced by ``research_brief``) still updates the row.
 """
 
 from __future__ import annotations
@@ -19,6 +19,8 @@ import hashlib
 import json
 from datetime import UTC, datetime
 from typing import Any, Literal
+
+from centaur_lab.paper_models import Paper
 
 
 # We intentionally do not import api.runtime_control.canonical_json here so
@@ -39,13 +41,11 @@ def _content_hash(*parts: Any) -> str:
     return hashlib.sha256(_canonical_json(parts).encode("utf-8")).hexdigest()
 
 
-def build_paper_document(paper: dict, *, query: str | None = None) -> dict:
-    """Project a Semantic Scholar paper dict into a company_context_documents row.
+def build_paper_document(paper: Paper, *, query: str | None = None) -> dict:
+    """Project a Semantic Scholar :class:`Paper` into a company_context_documents row.
 
     Args:
-        paper: A paper dict as returned by the Semantic Scholar Graph API
-            (`paperId`, `title`, `authors`, `year`, `abstract`, `citationCount`,
-            `url`, `openAccessPdf`, `venue`, `externalIds`, ...).
+        paper: A typed :class:`Paper` parsed from the Graph API response.
         query: Optional free-text query that produced this paper; persisted
             in `metadata.query` for downstream attribution.
 
@@ -54,48 +54,38 @@ def build_paper_document(paper: dict, *, query: str | None = None) -> dict:
         SQL in `company_context_documents.py`.
 
     Raises:
-        ValueError: If `paper` has no `paperId` — we cannot synthesize a stable
-            primary key without it.
+        ValueError: If `paper.paperId` is missing — we cannot synthesize a
+            stable primary key without it.
     """
-    paper_id = paper.get("paperId")
-    if not paper_id:
+    if not paper.paperId:
         raise ValueError("paper.paperId is required to build a paper document.")
-    paper_id_str = str(paper_id)
+    paper_id_str = str(paper.paperId)
 
-    title = paper.get("title") or "Untitled"
+    title = paper.title or "Untitled"
 
-    authors_raw = paper.get("authors") or []
-    author_dicts = [a for a in authors_raw if isinstance(a, dict)]
-    display_names = [str(a.get("name")) for a in author_dicts if a.get("name")]
-
-    first_author = author_dicts[0] if author_dicts else None
+    display_names = [a.name for a in paper.authors if a.name]
+    first_author = paper.authors[0] if paper.authors else None
     author_id = ""
     author_name = ""
     if first_author is not None:
-        raw_author_id = first_author.get("authorId")
-        author_id = str(raw_author_id) if raw_author_id else ""
-        author_name = str(first_author.get("name") or "")
+        author_id = str(first_author.authorId) if first_author.authorId else ""
+        author_name = str(first_author.name or "")
 
-    year = paper.get("year")
-    year_int = year if isinstance(year, int) else None
-    venue = paper.get("venue")
-    citation_count = int(paper.get("citationCount") or 0)
+    year_int = paper.year
+    venue = paper.venue
+    citation_count = int(paper.citationCount or 0)
 
-    external_ids_raw = paper.get("externalIds")
-    external_ids = external_ids_raw if isinstance(external_ids_raw, dict) else {}
-    doi = external_ids.get("DOI")
-    arxiv_id = external_ids.get("ArXiv")
+    doi = paper.externalIds.get("DOI")
+    arxiv_id = paper.externalIds.get("ArXiv")
 
-    open_access_pdf_raw = paper.get("openAccessPdf")
     open_access_pdf_url: str | None = None
-    if isinstance(open_access_pdf_raw, dict):
-        pdf_url = open_access_pdf_raw.get("url")
-        open_access_pdf_url = str(pdf_url) if pdf_url else None
+    if paper.openAccessPdf is not None and paper.openAccessPdf.url:
+        open_access_pdf_url = str(paper.openAccessPdf.url)
 
     canonical_s2_url = f"https://www.semanticscholar.org/paper/{paper_id_str}"
-    url = paper.get("url") or canonical_s2_url
+    url = paper.url or canonical_s2_url
 
-    abstract = paper.get("abstract") or "No abstract available."
+    abstract = paper.abstract or "No abstract available."
     body = "\n".join(
         [
             f"# {title}",
@@ -119,10 +109,10 @@ def build_paper_document(paper: dict, *, query: str | None = None) -> dict:
 
     metadata_authors = [
         {
-            "authorId": (str(a["authorId"]) if a.get("authorId") else None),
-            "name": str(a.get("name") or ""),
+            "authorId": str(a.authorId) if a.authorId else None,
+            "name": str(a.name or ""),
         }
-        for a in author_dicts
+        for a in paper.authors
     ]
 
     # OVERLAY: include all metadata keys with explicit nulls (instead of
@@ -181,9 +171,10 @@ async def upsert_document(
     """Upsert a projected paper document and return inserted/updated/noop.
 
     Mirrors `_upsert_document` from the upstream `company_context_documents`
-    workflow. The `parent_document_id` kwarg overrides whatever is in
-    `document` so callers can link papers to a brief after the fact (e.g. the
-    research-brief workflow stamps each paper row with the brief's id).
+    workflow. Callers may pass `parent_document_id` as a kwarg to link a
+    child to a parent; when omitted, falls back to ``document["parent_document_id"]``
+    so callers like ``_archive_paper_async`` that bake the parent into the
+    returned dict don't need to re-pass it.
 
     The persisted `content_hash` combines the document's intrinsic hash with
     the effective parent. Without this, re-parenting an otherwise-unchanged

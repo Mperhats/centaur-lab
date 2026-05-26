@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from centaur_lab.paper_models import Paper
 from centaur_lab.testing import (
     EXECUTE_ARG_INDEX,
     MockAsyncpgConn,
@@ -30,7 +31,7 @@ def _install_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _install_search_papers(
     monkeypatch: pytest.MonkeyPatch,
-    papers: list[dict[str, Any]] | None = None,
+    papers: list[Paper] | None = None,
     *,
     exc: BaseException | None = None,
 ) -> list[dict[str, Any]]:
@@ -75,19 +76,21 @@ def _install_metrics(monkeypatch: pytest.MonkeyPatch) -> MetricsRecorder:
     return recorder
 
 
-def _paper(paper_id: str) -> dict[str, Any]:
-    return {
-        "paperId": paper_id,
-        "title": f"Paper {paper_id}",
-        "authors": [{"authorId": f"a-{paper_id}", "name": f"Author {paper_id}"}],
-        "year": 2024,
-        "abstract": f"Abstract for {paper_id}.",
-        "citationCount": 7,
-        "url": f"https://www.semanticscholar.org/paper/{paper_id}",
-        "openAccessPdf": None,
-        "venue": "Test Venue",
-        "externalIds": {"DOI": f"10.0/{paper_id}"},
-    }
+def _paper(paper_id: str) -> Paper:
+    return Paper.model_validate(
+        {
+            "paperId": paper_id,
+            "title": f"Paper {paper_id}",
+            "authors": [{"authorId": f"a-{paper_id}", "name": f"Author {paper_id}"}],
+            "year": 2024,
+            "abstract": f"Abstract for {paper_id}.",
+            "citationCount": 7,
+            "url": f"https://www.semanticscholar.org/paper/{paper_id}",
+            "openAccessPdf": None,
+            "venue": "Test Venue",
+            "externalIds": {"DOI": f"10.0/{paper_id}"},
+        }
+    )
 
 
 def _client() -> SemanticScholarClient:

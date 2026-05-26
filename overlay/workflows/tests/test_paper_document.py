@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from centaur_lab.paper_document import _content_hash, build_paper_document, upsert_document
+from centaur_lab.paper_models import Paper
 from centaur_lab.testing import EXECUTE_ARG_INDEX, MockPool
 
 # Tolerance for source_updated_at = datetime.now(UTC) at projection.
@@ -22,7 +23,7 @@ def _assert_recent_utc(value: Any) -> None:
     assert now - _RECENCY_TOLERANCE <= value <= now + _RECENCY_TOLERANCE
 
 
-def _sample_paper() -> dict[str, Any]:
+def _sample_paper_dict() -> dict[str, Any]:
     return {
         "paperId": "abc123",
         "title": "Attention Is All You Need",
@@ -38,6 +39,11 @@ def _sample_paper() -> dict[str, Any]:
         "venue": "NeurIPS",
         "externalIds": {"DOI": "10.5555/3295222.3295349", "ArXiv": "1706.03762"},
     }
+
+
+def _sample_paper() -> Paper:
+    """Typed sibling of ``_sample_paper_dict`` for the post-Pydantic API."""
+    return Paper.model_validate(_sample_paper_dict())
 
 
 def test_build_paper_document_full_happy_shape() -> None:
@@ -67,7 +73,7 @@ def test_build_paper_document_full_happy_shape() -> None:
         "year": 2017,
         "venue": "NeurIPS",
         "citationCount": 75000,
-        "authors": _sample_paper()["authors"],
+        "authors": _sample_paper_dict()["authors"],
         "doi": "10.5555/3295222.3295349",
         "arxivId": "1706.03762",
         "openAccessPdf": "https://arxiv.org/pdf/1706.03762.pdf",
@@ -76,10 +82,10 @@ def test_build_paper_document_full_happy_shape() -> None:
 
 
 def test_build_paper_document_raises_on_missing_paperId() -> None:
-    paper = _sample_paper()
-    del paper["paperId"]
+    paper_data = _sample_paper_dict()
+    del paper_data["paperId"]
     with pytest.raises(ValueError, match="paperId"):
-        build_paper_document(paper)
+        build_paper_document(Paper.model_validate(paper_data))
 
 
 def test_build_paper_document_preserves_explicit_nulls_for_missing_optional_fields() -> None:
@@ -88,14 +94,14 @@ def test_build_paper_document_preserves_explicit_nulls_for_missing_optional_fiel
     behave like upstream Slack rows), reports ``occurred_at=None`` for an
     unknown year, and yields empty author fields when ``authors=[]``.
     """
-    paper = _sample_paper() | {
+    paper_data = _sample_paper_dict() | {
         "externalIds": {},
         "openAccessPdf": None,
         "venue": None,
         "year": None,
         "authors": [],
     }
-    doc = build_paper_document(paper)
+    doc = build_paper_document(Paper.model_validate(paper_data))
 
     assert doc["occurred_at"] is None
     assert doc["author_id"] == "" and doc["author_name"] == ""
@@ -110,11 +116,11 @@ def test_content_hash_non_ascii_byte_form_matches_upstream() -> None:
     proves determinism, non-ASCII literal-byte serialization, and exact
     cross-system agreement with ``api.runtime_control.canonical_json``.
     """
-    paper = _sample_paper() | {
+    paper_data = _sample_paper_dict() | {
         "title": "深層学習: 変換器の基礎",
         "authors": [{"authorId": "1", "name": "山田太郎"}],
     }
-    doc = build_paper_document(paper, query="変換器")
+    doc = build_paper_document(Paper.model_validate(paper_data), query="変換器")
 
     parts = (doc["title"], doc["body"], doc["url"], doc["metadata"])
     upstream = json.dumps(parts, separators=(",", ":"), sort_keys=True, ensure_ascii=False)

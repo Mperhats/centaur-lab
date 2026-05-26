@@ -13,6 +13,7 @@ from centaur_lab.paper_document import (
     build_paper_document,
     upsert_document,
 )
+from centaur_lab.paper_models import Author, Paper
 
 _BRIEF_ABSTRACT_TRUNCATE = 500
 _BRIEF_TITLE_QUERY_TRUNCATE = 80
@@ -30,14 +31,8 @@ def _normalize_oneline(text: str) -> str:
     return " ".join(text.split())
 
 
-def _format_authors(authors: list[Any]) -> str:
-    names: list[str] = []
-    for entry in authors or []:
-        if not isinstance(entry, dict):
-            continue
-        name = entry.get("name")
-        if name:
-            names.append(str(name))
+def _format_authors(authors: list[Author]) -> str:
+    names = [a.name for a in authors if a.name]
     if not names:
         return "Unknown"
     if len(names) <= _BRIEF_MAX_AUTHORS_INLINE:
@@ -46,27 +41,23 @@ def _format_authors(authors: list[Any]) -> str:
     return f"{head} +{len(names) - _BRIEF_MAX_AUTHORS_INLINE} more"
 
 
-def _paper_url(paper: dict[str, Any]) -> str:
-    url = paper.get("url")
-    if url:
-        return str(url)
-    paper_id = paper.get("paperId")
-    if paper_id:
-        return f"https://www.semanticscholar.org/paper/{paper_id}"
+def _paper_url(paper: Paper) -> str:
+    if paper.url:
+        return str(paper.url)
+    if paper.paperId:
+        return f"https://www.semanticscholar.org/paper/{paper.paperId}"
     return ""
 
 
-def _format_abstract(paper: dict[str, Any]) -> str:
-    abstract = paper.get("abstract")
-    if not abstract:
+def _format_abstract(paper: Paper) -> str:
+    if not paper.abstract:
         return "No abstract available."
-    text = str(abstract)
-    if len(text) > _BRIEF_ABSTRACT_TRUNCATE:
-        return text[:_BRIEF_ABSTRACT_TRUNCATE] + "..."
-    return text
+    if len(paper.abstract) > _BRIEF_ABSTRACT_TRUNCATE:
+        return paper.abstract[:_BRIEF_ABSTRACT_TRUNCATE] + "..."
+    return paper.abstract
 
 
-def render_brief(query: str, year_from: int | None, papers: list[dict[str, Any]]) -> str:
+def render_brief(query: str, year_from: int | None, papers: list[Paper]) -> str:
     """Render the brief Markdown. Pure; no I/O."""
     display_query = _normalize_oneline(query)
     year_label = str(year_from) if year_from is not None else "any"
@@ -86,17 +77,14 @@ def render_brief(query: str, year_from: int | None, papers: list[dict[str, Any]]
 
     lines: list[str] = [*header, "## Papers", ""]
     for index, paper in enumerate(papers, start=1):
-        display_title = _normalize_oneline(str(paper.get("title") or "Untitled"))
-        year = paper.get("year")
-        year_text = str(year) if isinstance(year, int) else "Unknown"
-        citations = int(paper.get("citationCount") or 0)
-        authors_value = paper.get("authors")
-        authors_list = authors_value if isinstance(authors_value, list) else []
+        display_title = _normalize_oneline(paper.title or "Untitled")
+        year_text = str(paper.year) if paper.year is not None else "Unknown"
+        citations = int(paper.citationCount or 0)
         lines.extend(
             [
                 f"### {index}. {display_title}",
                 "",
-                f"- Authors: {_format_authors(authors_list)}",
+                f"- Authors: {_format_authors(paper.authors)}",
                 f"- Year: {year_text}",
                 f"- Citations: {citations}",
                 f"- URL: {_paper_url(paper)}",
@@ -112,14 +100,14 @@ def build_brief_document(
     query: str,
     year_from: int | None,
     limit: int,
-    papers: list[dict[str, Any]],
+    papers: list[Paper],
     markdown: str,
 ) -> dict[str, Any]:
     """Project the rendered brief into a ``company_context_documents`` row."""
     suffix = brief_id_for(query, year_from)
     truncated_query = query[:_BRIEF_TITLE_QUERY_TRUNCATE]
     title = f"Research Brief: {truncated_query}"
-    paper_ids = [str(p["paperId"]) for p in papers if p.get("paperId")]
+    paper_ids = [str(p.paperId) for p in papers if p.paperId]
     metadata: dict[str, Any] = {
         "query": query,
         "year_from": year_from,
@@ -151,7 +139,7 @@ async def persist_research_brief_from_papers(
     pool: Any,
     *,
     query: str,
-    papers: list[dict[str, Any]],
+    papers: list[Paper],
     year_from: int | None = None,
     limit: int | None = None,
 ) -> dict[str, Any]:

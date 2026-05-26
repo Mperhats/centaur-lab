@@ -17,6 +17,8 @@ from typing import Final
 
 import httpx
 
+from centaur_lab.paper_models import Paper
+
 log = logging.getLogger(__name__)
 
 DEFAULT_USER_AGENT: Final[str] = "centaur-scientist/0.1 (paper-archive)"
@@ -99,8 +101,8 @@ def download_pdf(
     return bytes(buffer), mime
 
 
-def derive_pdf_url(paper: dict) -> str | None:
-    """Pick the best PDF URL for a Semantic Scholar paper dict, or ``None``.
+def derive_pdf_url(paper: Paper) -> str | None:
+    """Pick the best PDF URL for a Semantic Scholar :class:`Paper`, or ``None``.
 
     Preference order:
 
@@ -108,24 +110,17 @@ def derive_pdf_url(paper: dict) -> str | None:
     2. ``https://arxiv.org/pdf/{externalIds.ArXiv}.pdf`` (when an
        ArXiv ID is present and non-empty).
 
-    Returns ``None`` when neither field is usable. Non-string values
-    (a publisher returning ``null`` or a number in the JSON) are
-    treated as missing rather than raising.
+    Returns ``None`` when neither field is usable.
     """
-    open_access = paper.get("openAccessPdf")
-    if isinstance(open_access, dict):
-        candidate = open_access.get("url")
-        if isinstance(candidate, str):
-            stripped = candidate.strip()
-            if stripped:
-                return stripped
+    if paper.openAccessPdf is not None and paper.openAccessPdf.url:
+        stripped = paper.openAccessPdf.url.strip()
+        if stripped:
+            return stripped
 
-    external_ids = paper.get("externalIds")
-    if isinstance(external_ids, dict):
-        arxiv_id = external_ids.get("ArXiv")
-        if isinstance(arxiv_id, str):
-            stripped = arxiv_id.strip()
-            if stripped:
-                return f"https://arxiv.org/pdf/{stripped}.pdf"
+    arxiv_id = paper.externalIds.get("ArXiv")
+    if arxiv_id:
+        stripped = arxiv_id.strip()
+        if stripped:
+            return f"https://arxiv.org/pdf/{stripped}.pdf"
 
     return None

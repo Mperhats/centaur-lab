@@ -58,11 +58,11 @@ def _make_client():
     return SemanticScholarClient()
 
 
-def _format_authors(authors: list[dict] | None, max_authors: int = 3) -> str:
+def _format_authors(authors, max_authors: int = 3) -> str:
+    """Format a list of :class:`Author` (or empty) into a human-readable string."""
     if not authors:
         return ""
-    names = [a.get("name", "") for a in authors if isinstance(a, dict)]
-    names = [n for n in names if n]
+    names = [a.name for a in authors if a.name]
     if len(names) > max_authors:
         return ", ".join(names[:max_authors]) + f" +{len(names) - max_authors}"
     return ", ".join(names)
@@ -76,7 +76,12 @@ def _truncate(text: str | None, length: int = 80) -> str:
     return text[: length - 1] + "…"
 
 
-def _render_papers(papers: list[dict], title: str) -> None:
+def _papers_to_json(papers) -> str:
+    """Dump a ``list[Paper]`` to a JSON string, preserving the wire shape."""
+    return json.dumps([p.model_dump(exclude_unset=True) for p in papers], indent=2)
+
+
+def _render_papers(papers, title: str) -> None:
     # Lazy-imported so the centaur_sdk path bootstrap above is in effect
     # before `from centaur_sdk import Table` resolves. Mirrors the upstream
     # tool CLI convention of going through the SDK re-export instead of
@@ -93,10 +98,10 @@ def _render_papers(papers: list[dict], title: str) -> None:
     table.add_column("Cites", style="dim", justify="right")
     for paper in papers:
         table.add_row(
-            _truncate(paper.get("title"), 60),
-            _format_authors(paper.get("authors"), max_authors=2),
-            str(paper.get("year") or ""),
-            str(paper.get("citationCount") or ""),
+            _truncate(paper.title, 60),
+            _format_authors(paper.authors, max_authors=2),
+            str(paper.year or ""),
+            str(paper.citationCount or ""),
         )
     console.print(table)
 
@@ -114,7 +119,7 @@ def search(
     with _make_client() as client:
         papers = client.search_papers(query=query, limit=limit, year_from=year_from)
     if json_output:
-        print(json.dumps(papers, indent=2))
+        print(_papers_to_json(papers))
         return
     _render_papers(papers, title=f"Semantic Scholar: '{query}'")
 
@@ -128,17 +133,16 @@ def paper(
     with _make_client() as client:
         data = client.get_paper(paper_id)
     if json_output:
-        print(json.dumps(data, indent=2))
+        print(json.dumps(data.model_dump(exclude_unset=True), indent=2))
         return
-    console.print(f"[bold cyan]{data.get('title', '(no title)')}[/]")
-    console.print(f"[yellow]{_format_authors(data.get('authors'), max_authors=10)}[/]")
-    console.print(f"Year: {data.get('year') or '?'}  |  Cites: {data.get('citationCount') or 0}")
-    if data.get("url"):
-        console.print(f"URL: {data['url']}")
-    abstract = data.get("abstract") or ""
-    if abstract:
+    console.print(f"[bold cyan]{data.title or '(no title)'}[/]")
+    console.print(f"[yellow]{_format_authors(data.authors, max_authors=10)}[/]")
+    console.print(f"Year: {data.year or '?'}  |  Cites: {data.citationCount or 0}")
+    if data.url:
+        console.print(f"URL: {data.url}")
+    if data.abstract:
         console.print()
-        console.print(abstract)
+        console.print(data.abstract)
 
 
 @app.command()
@@ -151,7 +155,7 @@ def references(
     with _make_client() as client:
         refs = client.get_references(paper_id=paper_id, limit=limit)
     if json_output:
-        print(json.dumps(refs, indent=2))
+        print(_papers_to_json(refs))
         return
     _render_papers(refs, title=f"References of {paper_id}")
 

@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+from centaur_lab.paper_models import Paper
 from centaur_lab.testing import MockContext
 
 
@@ -34,10 +35,10 @@ class FakeS2Client:
     def __init__(self, papers_by_id: dict[str, dict[str, Any]]) -> None:
         self._papers_by_id = papers_by_id
 
-    def get_paper(self, paper_id: str) -> dict[str, Any]:
+    def get_paper(self, paper_id: str) -> Paper:
         if paper_id not in self._papers_by_id:
             raise RuntimeError(f"unknown paper id in stub: {paper_id}")
-        return dict(self._papers_by_id[paper_id])
+        return Paper.model_validate(self._papers_by_id[paper_id])
 
     def close(self) -> None:
         pass
@@ -75,9 +76,7 @@ async def test_save_papers_writes_paper_row_with_full_shape(
     monkeypatch.setattr(
         save_papers,
         "SemanticScholarClient",
-        lambda: FakeS2Client(
-            papers_by_id={_PAPER_173BA["paperId"]: _PAPER_173BA}
-        ),
+        lambda: FakeS2Client(papers_by_id={_PAPER_173BA["paperId"]: _PAPER_173BA}),
     )
 
     result = await save_papers.handler(
@@ -120,9 +119,7 @@ async def test_save_papers_is_idempotent_on_rerun(
     monkeypatch.setattr(
         save_papers,
         "SemanticScholarClient",
-        lambda: FakeS2Client(
-            papers_by_id={_PAPER_173BA["paperId"]: _PAPER_173BA}
-        ),
+        lambda: FakeS2Client(papers_by_id={_PAPER_173BA["paperId"]: _PAPER_173BA}),
     )
     inp = save_papers.Input(paper_ids=[_PAPER_173BA["paperId"]])
 
@@ -149,9 +146,7 @@ async def test_save_papers_partial_failure_writes_successful_papers(
     monkeypatch.setattr(
         save_papers,
         "SemanticScholarClient",
-        lambda: FakeS2Client(
-            papers_by_id={_PAPER_173BA["paperId"]: _PAPER_173BA}
-        ),
+        lambda: FakeS2Client(papers_by_id={_PAPER_173BA["paperId"]: _PAPER_173BA}),
     )
 
     result = await save_papers.handler(

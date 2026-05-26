@@ -19,6 +19,7 @@ from centaur_lab.paper_fulltext import (
     compute_pdf_sha256,
     upsert_paper_archive,
 )
+from centaur_lab.paper_models import Paper
 from centaur_sdk import secret
 from tools.semantic_scholar import pdf_fetch, pdf_parse
 
@@ -188,7 +189,7 @@ class SemanticScholarClient:
         limit: int = 10,
         year_from: int | None = None,
         fields: str = DEFAULT_PAPER_FIELDS,
-    ) -> list[dict]:
+    ) -> list[Paper]:
         """Search papers by free-text query.
 
         Args:
@@ -198,7 +199,9 @@ class SemanticScholarClient:
             fields: Comma-separated list of fields per the Graph API spec.
 
         Returns:
-            A list of paper dicts (already unwrapped from the ``data`` envelope).
+            Typed :class:`Paper` instances (already unwrapped from the ``data``
+            envelope). Use ``.model_dump(exclude_unset=True)`` at the agent
+            boundary to recover the original dict shape.
         """
         if not query or not query.strip():
             raise ValueError("query cannot be empty.")
@@ -211,13 +214,13 @@ class SemanticScholarClient:
             params["year"] = f"{year_from}-"
         payload = self._request("/paper/search", params=params)
         results = payload.get("data", [])
-        return [item for item in results if isinstance(item, dict)]
+        return [Paper.model_validate(item) for item in results if isinstance(item, dict)]
 
     def get_paper(
         self,
         paper_id: str,
         fields: str = DEFAULT_PAPER_FIELDS,
-    ) -> dict:
+    ) -> Paper:
         """Fetch metadata for a single paper.
 
         ``paper_id`` accepts any of the IDs the Graph API understands —
@@ -226,14 +229,15 @@ class SemanticScholarClient:
         """
         if not paper_id or not paper_id.strip():
             raise ValueError("paper_id cannot be empty.")
-        return self._request(f"/paper/{paper_id.strip()}", params={"fields": fields})
+        payload = self._request(f"/paper/{paper_id.strip()}", params={"fields": fields})
+        return Paper.model_validate(payload)
 
     def get_references(
         self,
         paper_id: str,
         limit: int = 20,
         fields: str = DEFAULT_REFERENCE_FIELDS,
-    ) -> list[dict]:
+    ) -> list[Paper]:
         """List the papers that the given paper cites."""
         if not paper_id or not paper_id.strip():
             raise ValueError("paper_id cannot be empty.")
@@ -241,14 +245,14 @@ class SemanticScholarClient:
         payload = self._request(f"/paper/{paper_id.strip()}/references", params=params)
         items = payload.get("data", [])
         # Each reference entry wraps the cited paper under "citedPaper"; flatten
-        # so callers get a list of paper dicts directly.
-        out: list[dict] = []
+        # so callers get typed Paper objects directly.
+        out: list[Paper] = []
         for entry in items:
             if not isinstance(entry, dict):
                 continue
             cited = entry.get("citedPaper")
             if isinstance(cited, dict):
-                out.append(cited)
+                out.append(Paper.model_validate(cited))
         return out
 
     def search(
@@ -299,13 +303,20 @@ class SemanticScholarClient:
                 limit=clamped_limit,
                 year_from=year_from,
             )
+            # Dump at the agent boundary so the wire shape stays a plain
+            # list[dict] for the tool runtime / Slack renderer / CLI --json
+            # consumers. ``exclude_unset=True`` round-trips fields S2 didn't
+            # send back to "absent" instead of "explicit null" — preserves
+            # the byte-for-byte shape today's tests assert against and keeps
+            # forward-compat: extras in ``__pydantic_extra__`` always come
+            # through.
             return {
                 "status": "ok",
                 "query": normalized_query,
                 "limit": clamped_limit,
                 "year_from": year_from,
                 "count": len(papers),
-                "results": papers,
+                "results": [p.model_dump(exclude_unset=True) for p in papers],
             }
         except Exception as exc:
             log.warning("semantic_scholar search failed", exc_info=True)

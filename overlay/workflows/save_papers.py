@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 from centaur_lab.brief import persist_research_brief_from_papers
 from centaur_lab.metrics import observe_document_size, record_document_change
 from centaur_lab.paper_document import build_paper_document, upsert_document
+from centaur_lab.paper_models import Paper
 from tools.semantic_scholar.client import SemanticScholarClient
 
 WORKFLOW_NAME = "save_papers"
@@ -38,9 +39,7 @@ class Input:
 def _brief_query_for_save(paper_ids: list[str], explicit: str | None) -> str:
     if explicit and explicit.strip():
         return explicit.strip()
-    digest = hashlib.sha256(",".join(sorted(paper_ids)).encode()).hexdigest()[
-        :12
-    ]
+    digest = hashlib.sha256(",".join(sorted(paper_ids)).encode()).hexdigest()[:12]
     return f"save_papers:{digest}"
 
 
@@ -52,7 +51,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
 
     client = SemanticScholarClient()
     results: list[dict[str, Any]] = []
-    saved_papers: list[dict[str, Any]] = []
+    saved_papers: list[Paper] = []
     try:
         for paper_id in inp.paper_ids:
             try:

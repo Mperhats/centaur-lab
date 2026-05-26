@@ -6,10 +6,11 @@ from typing import Any
 
 import pytest
 
+from centaur_lab.paper_models import Paper
 from semantic_scholar.client import SemanticScholarClient
 
 
-def _live_paper(paper_id: str, *, year: int = 2024) -> dict[str, Any]:
+def _live_paper_dict(paper_id: str, *, year: int = 2024) -> dict[str, Any]:
     return {
         "paperId": paper_id,
         "title": f"Paper {paper_id}",
@@ -22,9 +23,14 @@ def _live_paper(paper_id: str, *, year: int = 2024) -> dict[str, Any]:
     }
 
 
+def _live_paper(paper_id: str, *, year: int = 2024) -> Paper:
+    """Build a typed :class:`Paper` for use as a ``search_papers`` mock return."""
+    return Paper.model_validate(_live_paper_dict(paper_id, year=year))
+
+
 def _install_search_papers(
     monkeypatch: pytest.MonkeyPatch,
-    papers: list[dict[str, Any]] | None = None,
+    papers: list[Paper] | None = None,
     *,
     exc: BaseException | None = None,
 ) -> list[dict[str, Any]]:
@@ -36,7 +42,7 @@ def _install_search_papers(
         limit: int = 10,
         year_from: int | None = None,
         **kwargs: Any,
-    ) -> list[dict[str, Any]]:
+    ) -> list[Paper]:
         calls.append(
             {
                 "query": query,
@@ -72,7 +78,11 @@ def test_search_returns_live_papers(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result["status"] == "ok"
     assert result["query"] == "graph neural networks"
     assert result["count"] == 2
-    assert result["results"] == papers
+    # Wire shape contract: results round-trip through
+    # ``Paper.model_validate(...).model_dump(exclude_unset=True)`` and equal
+    # the original dicts the agent harness/Slack renderer/CLI --json
+    # depend on.
+    assert result["results"] == [_live_paper_dict("p1"), _live_paper_dict("p2")]
     assert calls == [
         {
             "query": "graph neural networks",
@@ -130,3 +140,24 @@ def test_search_does_not_require_database_url(monkeypatch: pytest.MonkeyPatch) -
 
     assert result["status"] == "ok"
     assert result["count"] == 1
+
+
+def test_search_dumps_paper_models_at_agent_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Agent-boundary contract: ``search()`` returns plain dicts even though
+    ``search_papers()`` now returns typed :class:`Paper`.
+
+    Pinned because the rest of the codebase (CLI ``--json``, Slack tool
+    runtime, downstream agents) depends on ``result["results"]`` being a
+    JSON-serialisable list of dicts.
+    """
+    papers = [_live_paper("p1")]
+    _install_search_papers(monkeypatch, papers)
+
+    result = SemanticScholarClient(api_key="").search("anything")
+
+    assert result["status"] == "ok"
+    assert isinstance(result["results"], list)
+    assert all(isinstance(item, dict) for item in result["results"])
+    assert result["results"][0]["paperId"] == "p1"

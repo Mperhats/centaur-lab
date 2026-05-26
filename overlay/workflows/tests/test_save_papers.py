@@ -9,6 +9,7 @@ import pytest
 import save_papers
 
 from centaur_lab.paper_document import _content_hash, build_paper_document
+from centaur_lab.paper_models import Paper
 from centaur_lab.testing import MockContext, MockPool
 
 
@@ -46,7 +47,7 @@ class MockS2Client:
 
     def __init__(
         self,
-        papers_by_id: dict[str, dict[str, Any]],
+        papers_by_id: dict[str, Paper],
         *,
         fail_ids: tuple[str, ...] = (),
         raise_on: dict[str, BaseException] | None = None,
@@ -57,7 +58,7 @@ class MockS2Client:
         self.close_called = False
         self.get_paper_calls: list[str] = []
 
-    def get_paper(self, paper_id: str) -> dict[str, Any]:
+    def get_paper(self, paper_id: str) -> Paper:
         self.get_paper_calls.append(paper_id)
         if paper_id in self._raise_on:
             raise self._raise_on[paper_id]
@@ -75,20 +76,22 @@ class MockS2Client:
         self.close()
 
 
-def _paper(paper_id: str, *, title: str = "Sample Paper") -> dict[str, Any]:
-    """Minimal S2-shaped paper dict sufficient for ``build_paper_document``."""
-    return {
-        "paperId": paper_id,
-        "title": title,
-        "authors": [{"authorId": "a1", "name": "Test Author"}],
-        "year": 2024,
-        "abstract": f"Abstract for {paper_id}.",
-        "citationCount": 1,
-        "url": f"https://www.semanticscholar.org/paper/{paper_id}",
-        "openAccessPdf": None,
-        "venue": "Test Venue",
-        "externalIds": {"DOI": f"10.0/{paper_id}"},
-    }
+def _paper(paper_id: str, *, title: str = "Sample Paper") -> Paper:
+    """Minimal S2-shaped :class:`Paper` sufficient for ``build_paper_document``."""
+    return Paper.model_validate(
+        {
+            "paperId": paper_id,
+            "title": title,
+            "authors": [{"authorId": "a1", "name": "Test Author"}],
+            "year": 2024,
+            "abstract": f"Abstract for {paper_id}.",
+            "citationCount": 1,
+            "url": f"https://www.semanticscholar.org/paper/{paper_id}",
+            "openAccessPdf": None,
+            "venue": "Test Venue",
+            "externalIds": {"DOI": f"10.0/{paper_id}"},
+        }
+    )
 
 
 @pytest.mark.asyncio

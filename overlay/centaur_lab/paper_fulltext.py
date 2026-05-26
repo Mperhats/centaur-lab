@@ -29,6 +29,7 @@ from datetime import UTC, datetime
 from typing import Any, Final, Literal
 
 from centaur_lab.paper_document import _canonical_json, _content_hash
+from centaur_lab.paper_models import Paper
 
 FULLTEXT_BODY_MAX_BYTES: Final[int] = 1 * 1024 * 1024  # 1 MiB cap on indexed body bytes.
 
@@ -47,7 +48,7 @@ def compute_pdf_sha256(data: bytes) -> str:
 
 
 def build_fulltext_document(
-    paper: dict[str, Any],
+    paper: Paper,
     *,
     parsed_text: str,
     parent_document_id: str,
@@ -64,7 +65,7 @@ def build_fulltext_document(
     UTF-8 bytes for BM25 index efficiency.
 
     Args:
-        paper: A paper dict as returned by the Semantic Scholar Graph API;
+        paper: A typed :class:`Paper` parsed from the Graph API response;
             only ``paperId``, ``title``, ``authors``, ``year``, and ``url``
             are read here.
         parsed_text: The Markdown produced by the PDF parser. Will be
@@ -92,27 +93,22 @@ def build_fulltext_document(
     Raises:
         ValueError: If ``paper.paperId`` is missing or empty.
     """
-    paper_id = paper.get("paperId")
-    if not paper_id:
+    if not paper.paperId:
         raise ValueError("paper.paperId is required to build fulltext document")
-    paper_id_str = str(paper_id)
+    paper_id_str = str(paper.paperId)
 
-    title = str(paper.get("title") or "Untitled")
+    title = paper.title or "Untitled"
 
-    authors_raw = paper.get("authors") or []
-    author_dicts = [a for a in authors_raw if isinstance(a, dict)]
-    first_author = author_dicts[0] if author_dicts else None
+    first_author = paper.authors[0] if paper.authors else None
     author_id = ""
     author_name = ""
     if first_author is not None:
-        raw_author_id = first_author.get("authorId")
-        author_id = str(raw_author_id) if raw_author_id else ""
-        author_name = str(first_author.get("name") or "")
+        author_id = str(first_author.authorId) if first_author.authorId else ""
+        author_name = str(first_author.name or "")
 
-    year = paper.get("year")
-    year_int = year if isinstance(year, int) else None
+    year_int = paper.year
 
-    url = paper.get("url") or f"https://www.semanticscholar.org/paper/{paper_id_str}"
+    url = paper.url or f"https://www.semanticscholar.org/paper/{paper_id_str}"
 
     body, body_was_truncated = _safe_truncate_utf8(parsed_text, FULLTEXT_BODY_MAX_BYTES)
 

@@ -30,26 +30,29 @@ from typing import Any
 
 import pytest
 
+from centaur_lab.paper_models import Paper
 from semantic_scholar.client import SemanticScholarClient
 
 
-def _paper(paper_id: str, *, title: str | None = None) -> dict[str, Any]:
-    """Minimal S2-shaped paper dict sufficient for ``build_paper_document``."""
-    return {
-        "paperId": paper_id,
-        "title": title or f"Paper {paper_id}",
-        "authors": [{"authorId": f"a-{paper_id}", "name": f"Author {paper_id}"}],
-        "year": 2024,
-        "abstract": f"Abstract for {paper_id}.",
-        "citationCount": 7,
-        "url": f"https://www.semanticscholar.org/paper/{paper_id}",
-        "openAccessPdf": None,
-        "venue": "Test Venue",
-        "externalIds": {"DOI": f"10.0/{paper_id}"},
-    }
+def _paper(paper_id: str, *, title: str | None = None) -> Paper:
+    """Minimal S2-shaped :class:`Paper` sufficient for ``build_paper_document``."""
+    return Paper.model_validate(
+        {
+            "paperId": paper_id,
+            "title": title or f"Paper {paper_id}",
+            "authors": [{"authorId": f"a-{paper_id}", "name": f"Author {paper_id}"}],
+            "year": 2024,
+            "abstract": f"Abstract for {paper_id}.",
+            "citationCount": 7,
+            "url": f"https://www.semanticscholar.org/paper/{paper_id}",
+            "openAccessPdf": None,
+            "venue": "Test Venue",
+            "externalIds": {"DOI": f"10.0/{paper_id}"},
+        }
+    )
 
 
-def _stub_search_papers(papers: list[dict[str, Any]]):
+def _stub_search_papers(papers: list[Paper]):
     """Build a closure suitable for ``monkeypatch.setattr`` on the class.
 
     Patches the sync ``search_papers``; ``_research_brief_async`` bounces
@@ -63,7 +66,7 @@ def _stub_search_papers(papers: list[dict[str, Any]]):
         limit: int = 10,
         year_from: int | None = None,
         fields: str | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[Paper]:
         return list(papers)
 
     return _search_papers
@@ -129,7 +132,7 @@ async def test_research_brief_persists_brief_and_papers_with_parent_link(
         "WHERE source_type = 'paper' ORDER BY document_id",
     )
     assert len(paper_rows) == 3
-    expected_doc_ids = {f"semantic_scholar:paper:{p['paperId']}" for p in papers}
+    expected_doc_ids = {f"semantic_scholar:paper:{p.paperId}" for p in papers}
     actual_doc_ids = {row["document_id"] for row in paper_rows}
     assert actual_doc_ids == expected_doc_ids
     for row in paper_rows:
