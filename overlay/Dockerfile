@@ -10,3 +10,4 @@ WORKDIR /overlay
 COPY tools /overlay/tools
 COPY workflows /overlay/workflows
 COPY .agents /overlay/.agents
+COPY services /overlay/services
