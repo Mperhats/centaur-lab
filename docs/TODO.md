@@ -92,39 +92,8 @@ CI requires `submodules: recursive` on `actions/checkout` so `.centaur/centaur_s
 
 ## Overlay DB migrations (future)
 
-**Reuse core schema vs add overlay migrations**
+Decision tree, schema reuse rules, dbmate workflow, and gotchas live in [`docs/overlay-db-migrations.md`](./overlay-db-migrations.md). Open work items below; do those once a new overlay-owned table is actually needed.
 
-- **Reuse `company_context_documents`** for org-specific *data* (JSONB `metadata`, `source` / `source_type`). centaur-lab already does this for Semantic Scholar — table defined in `.centaur/services/api/db/migrations/022_add_company_context_documents.sql`.
-- **Add overlay migrations** only for *new* tables/indexes/columns upstream will never ship (e.g. a dedicated `lab_experiments` table).
-
-**Centaur mechanics** (see `.centaur/services/api/api/db.py`: `get_migration_sets`, `run_migrations`)
-
-| What | Where |
-|------|-------|
-| Overlay migration dir | `$CENTAUR_OVERLAY_DIR/services/api/db/migrations/` → repo path `overlay/services/api/db/migrations/` |
-| Tracking table | `schema_migrations_overlay` (core uses `schema_migrations`) |
-| When applied | API startup — `create_pool()` runs dbmate `up` for both sets |
-| File format | Numbered `*.sql` with `-- migrate:up` / `-- migrate:down` (same as core) |
-| Local CLI | `.centaur/contrib/scripts/dbmate --set overlay new|status|up` (`.centaur/AGENTS.md`) |
-| Mount context | `.centaur/docs/public/md/extend/overlay.md` |
-
-**centaur-lab today:** no `overlay/services/api/db/migrations/`; `overlay/Dockerfile` copies `tools/`, `workflows/`, `centaur_lab/`, `.agents/` only.
-
-**Skeleton if we ever need a new table:**
-
-```sql
--- overlay/services/api/db/migrations/001_add_lab_experiments.sql
--- migrate:up
-CREATE TABLE IF NOT EXISTS lab_experiments (
-    experiment_id TEXT PRIMARY KEY,
-    title         TEXT NOT NULL DEFAULT '',
-    metadata      JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
--- migrate:down
-DROP TABLE IF EXISTS lab_experiments;
-```
-
-- [ ] Add `overlay/services/api/db/migrations/` + first migration
+- [ ] Create `overlay/services/api/db/migrations/` and first migration
 - [ ] Extend `overlay/Dockerfile`: `COPY services /overlay/services`
-- [ ] Verify: `.centaur/contrib/scripts/dbmate --set overlay status`
+- [ ] Verify locally: `CENTAUR_OVERLAY_HOST_DIR=$PWD/overlay .centaur/contrib/scripts/dbmate --set overlay status`

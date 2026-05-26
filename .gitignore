@@ -14,6 +14,9 @@ venv/
 # smoke-testing only; the API pod resolves tool deps from each pyproject.toml.
 overlay/tools/*/uv.lock
 overlay/workflows/uv.lock
+# Defensive: there is no overlay/pyproject.toml, so any overlay/uv.lock
+# is an orphan from `uv run` walking up the tree looking for a workspace.
+overlay/uv.lock
 
 # Node detritus
 node_modules/

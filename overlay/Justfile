@@ -123,7 +123,7 @@ clean-sandboxes filter="all":
 # sandboxes — this recipe deletes Slack Sandbox CRDs after the API roll.
 #
 # This recipe is the local-dev loop after editing overlay/tools,
-# overlay/workflows, overlay/.agents/skills, or overlay/centaur_lab:
+# overlay/workflows, or overlay/.agents/skills:
 #   1. rebuild centaur-overlay:sha-<short> and write overlay/.tag
 #   2. helm deploy with overlay.image.tag (rolls API when tag changes)
 #   3. rollout restart API (same-commit rebuilds reuse sha tag; Helm may not roll)
@@ -165,14 +165,24 @@ lint:
 test-workflows:
     cd workflows && uv sync --group dev --python 3.11 && uv run --python 3.11 pytest tests/ --ignore=tests/integration -v
 
-# Run the org tool test suites locally. Dev deps (pytest, asyncpg, httpx)
-# come from overlay/tools/semantic_scholar/pyproject.toml's
-# [dependency-groups]; pytest pythonpath in the same file makes
-# centaur_sdk, centaur_lab, and tools.semantic_scholar.* importable without
+# Run a single org tool's test suite locally. Dev deps come from that
+# tool's pyproject.toml [dependency-groups]; pytest pythonpath in the
+# same file makes centaur_sdk and tools.<name>.* importable without
 # conftest sys.path bootstrap.
+#
+# Default is semantic_scholar (the original tool with the largest suite).
+# Pass any tool dirname to target a sibling: `just overlay::test-tools pdf`.
+# The recipe is a no-op (and prints a friendly note) when the tool has no
+# tests/ dir yet — useful for newly scaffolded tools.
 [group('dev')]
-test-tools:
-    cd tools/semantic_scholar && uv sync --group dev --python 3.11 && uv run --python 3.11 pytest tests/ --ignore=tests/integration -v
+test-tools tool="semantic_scholar":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ ! -d "tools/{{tool}}/tests" ]]; then
+      echo "tools/{{tool}}/tests does not exist — nothing to run."
+      exit 0
+    fi
+    cd tools/{{tool}} && uv sync --group dev --python 3.11 && uv run --python 3.11 pytest tests/ --ignore=tests/integration -v
 
 # Run integration tests for the save_papers workflow against a real
 # Postgres. Requires CENTAUR_TEST_DATABASE_URL to point at a centaur DB
@@ -210,6 +220,16 @@ smoke-semantic-scholar query="diffusion models protein design" limit="5":
 [group('dev')]
 smoke-research-brief query="active inference world models" limit="5":
     cd tools/semantic_scholar && uv run python cli.py research-brief {{ quote(query) }} --limit {{ limit }} --pretty
+
+# Smoke-test the pdf tool's fetch-and-parse pipeline against any
+# public PDF URL. Useful before paper_archive starts depending on
+# tools/pdf to verify the fallback chain (pymupdf4llm → pymupdf → pypdf)
+# resolves cleanly on the dev machine. Default URL is the Attention
+# is All You Need arxiv PDF — small (~1.5 MB), parses cleanly with
+# pymupdf4llm.
+[group('dev')]
+smoke-pdf url="https://arxiv.org/pdf/1706.03762.pdf":
+    cd tools/pdf && uv run python cli.py fetch-and-parse {{ quote(url) }} --json
 
 # Smoke-test the deployed save_papers workflow. Posts a single paper ID to
 # /workflows/runs from inside the API pod so we can reuse $SLACKBOT_API_KEY
