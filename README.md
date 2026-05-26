@@ -12,11 +12,14 @@
 ```bash
 git submodule update --init --recursive
 uv sync && uv run pytest tests/
-docker build -t centaur-overlay:dev .
+docker build -t centaur-overlay:dev .   # smoke test; CI publishes to GHCR on merge to main
 ```
 
-That's it. The image at `centaur-overlay:dev` is what Centaur's Helm chart
-mounts into the API and sandbox pods.
+Production deploys come from CI, not your laptop. Every push to `main`
+publishes `ghcr.io/<owner>/centaur-lab/centaur-overlay:sha-<git>` to GHCR;
+the sibling [`centaur-lab-infra`](https://github.com/paradigmxyz/centaur-acme-infra)
+repo pins one of those tags in cluster Helm values to roll the API + sandbox
+pods.
 
 ## Repository map
 
@@ -26,8 +29,6 @@ services/               # overlay-side migrations + sandbox prompt
 tools/                  # API-discovered tool plugins (pdf, semantic_scholar)
 workflows/              # durable workflow handlers
 tests/                  # ACME-style root pytest suite
-cloudflared/            # laptop-only Cloudflare Tunnel + launchd setup
-docs/                   # backlog + overlay-db migration guide
 .centaur/               # pinned upstream centaur submodule
 ```
 
