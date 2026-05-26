@@ -8,6 +8,7 @@ file where it's consumed.
 
 from __future__ import annotations
 
+import hashlib
 from urllib.parse import unquote, urlparse
 
 
@@ -48,3 +49,31 @@ def derive_filename_from_url(url: str, *, default: str = "downloaded.pdf") -> st
     if not basename.lower().endswith(".pdf"):
         return f"{basename}.pdf"
     return basename
+
+
+def compute_pdf_sha256(data: bytes) -> str:
+    """Hex SHA-256 digest of PDF bytes.
+
+    Used by callers that need a stable content identifier for an
+    archived PDF — idempotency keys for ``paper_archives`` upserts,
+    dedup against a content-addressed store, change detection across
+    re-fetches. Pure: same bytes in, same hex digest out.
+    """
+    return hashlib.sha256(data).hexdigest()
+
+
+def truncate_utf8(text: str, max_bytes: int) -> tuple[str, bool]:
+    """Truncate ``text`` to at most ``max_bytes`` UTF-8 bytes without splitting a codepoint.
+
+    BM25 and JSONB column limits are stated in bytes, not characters, so
+    a naive ``text[:n]`` slice would either over-truncate (multi-byte
+    codepoints) or yield a string that re-encodes past the cap. We
+    encode, slice, and decode with ``errors="ignore"`` so the last
+    partial codepoint is dropped cleanly. Returns
+    ``(truncated_text, was_truncated)``; ``was_truncated`` is ``True``
+    only when the input actually exceeded the cap.
+    """
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text, False
+    return encoded[:max_bytes].decode("utf-8", errors="ignore"), True

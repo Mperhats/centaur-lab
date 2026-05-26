@@ -49,6 +49,11 @@ DEFAULT_PAPER_FIELDS: list[str] = [
     "citationCount",
     "url",
     "openAccessPdf",
+    # Needed so derive_pdf_url's arxiv fallback (which reads
+    # externalIds["ArXiv"]) actually fires for non-OA papers — without
+    # this, the Graph API omits externalIds and the fallback was dead
+    # code on every real call.
+    "externalIds",
 ]
 DEFAULT_REFERENCE_FIELDS: list[str] = [
     "title",
