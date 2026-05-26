@@ -34,15 +34,20 @@ DEFAULT_FEEDBACK_MODEL = "claude-sonnet-4-20250514"
 DEFAULT_VLM_MODEL = "claude-sonnet-4-20250514"
 DEFAULT_METRIC_REDUCER = DEFAULT_REDUCER
 
-# Search-policy defaults consumed by the Phase 4c bfts_reflection_nightly
-# workflow as the initial values written into bfts_hyperparams, and by
-# upcoming Phase 4c.4 resolver logic (Input → BFTS_* env → these). The
-# `bfts_root.Input` per-run defaults intentionally remain separate so a
-# single ad-hoc run can override them without going through the table.
+# Search-policy defaults — last-resort tier in resolve_search_config's
+# Input → bfts_hyperparams DB row → BFTS_* env → these chain. Also
+# read by bfts_reflection_nightly to seed the first hyperparams row.
 DEFAULT_DEBUG_PROB = 0.5
 DEFAULT_MAX_DEBUG_DEPTH = 3
 DEFAULT_NUM_DRAFTS = 4
 DEFAULT_NUM_WORKERS = 2
+
+# Source-tier names returned by the resolver helpers and recorded into
+# ``bfts_runs.config_json["sources"]`` for replay observability.
+SOURCE_INPUT = "input"
+SOURCE_HYPERPARAMS = "hyperparams"
+SOURCE_ENV = "env"
+SOURCE_DEFAULT = "default"
 
 ENV_LLM_API_KEY_SECRET = "BFTS_LLM_API_KEY_SECRET"
 ENV_DRAFT_MODEL = "BFTS_DRAFT_MODEL"
@@ -114,6 +119,26 @@ class SearchSettings:
     metric_reducer: str
 
 
+@dataclass(frozen=True)
+class SearchSources:
+    """Which resolution tier won for each ``SearchSettings`` field.
+
+    Values are one of ``"input"`` (caller-provided override),
+    ``"hyperparams"`` (latest ``bfts_hyperparams`` DB row),
+    ``"env"`` (``BFTS_*`` env var), or ``"default"`` (code constant).
+    Persisted into ``bfts_runs.config_json["sources"]`` so an operator
+    postmortem can answer "why did this run use debug_prob=X?" with a
+    single ``SELECT config_json->'sources' ...`` query rather than
+    cross-table archaeology.
+    """
+
+    debug_prob: str
+    max_debug_depth: str
+    num_drafts: str
+    num_workers: str
+    metric_reducer: str
+
+
 def _validate_reducer(reducer: str) -> str:
     if reducer not in REDUCERS:
         raise ValueError(
@@ -129,7 +154,7 @@ def resolve_search_settings(
     num_drafts: int | None = None,
     num_workers: int | None = None,
     metric_reducer: str | None = None,
-) -> SearchSettings:
+) -> tuple[SearchSettings, SearchSources]:
     """Merge per-run Input overrides, deployment env, and code defaults.
 
     Resolution order per field: explicit Input value → ``BFTS_*`` env
@@ -139,27 +164,41 @@ def resolve_search_settings(
     standalone for testing/debugging. ``bfts_root`` instead uses
     ``resolve_search_config`` to layer ``bfts_hyperparams`` between
     Input and env. Unknown reducer strings (Input or env) raise
-    ``ValueError`` here (fail-fast at run start).
+    ``ValueError`` here (fail-fast at run start). The companion
+    ``SearchSources`` records which tier won each field; tier values
+    here are limited to ``input`` / ``env`` / ``default`` (no
+    ``hyperparams`` because there is no DB read).
     """
-    return SearchSettings(
-        debug_prob=_resolve_float(
-            debug_prob, ENV_DEBUG_PROB, DEFAULT_DEBUG_PROB
-        ),
-        max_debug_depth=_resolve_int(
-            max_debug_depth, ENV_MAX_DEBUG_DEPTH, DEFAULT_MAX_DEBUG_DEPTH
-        ),
-        num_drafts=_resolve_int(
-            num_drafts, ENV_NUM_DRAFTS, DEFAULT_NUM_DRAFTS
-        ),
-        num_workers=_resolve_int(
-            num_workers, ENV_NUM_WORKERS, DEFAULT_NUM_WORKERS
-        ),
-        metric_reducer=_validate_reducer(
-            _resolve_str(
-                metric_reducer, ENV_METRIC_REDUCER, DEFAULT_METRIC_REDUCER
-            )
-        ),
+    debug_prob_val, debug_prob_src = _resolve_float(
+        debug_prob, ENV_DEBUG_PROB, DEFAULT_DEBUG_PROB
     )
+    max_debug_depth_val, max_debug_depth_src = _resolve_int(
+        max_debug_depth, ENV_MAX_DEBUG_DEPTH, DEFAULT_MAX_DEBUG_DEPTH
+    )
+    num_drafts_val, num_drafts_src = _resolve_int(
+        num_drafts, ENV_NUM_DRAFTS, DEFAULT_NUM_DRAFTS
+    )
+    num_workers_val, num_workers_src = _resolve_int(
+        num_workers, ENV_NUM_WORKERS, DEFAULT_NUM_WORKERS
+    )
+    metric_reducer_raw, metric_reducer_src = _resolve_str(
+        metric_reducer, ENV_METRIC_REDUCER, DEFAULT_METRIC_REDUCER
+    )
+    settings = SearchSettings(
+        debug_prob=debug_prob_val,
+        max_debug_depth=max_debug_depth_val,
+        num_drafts=num_drafts_val,
+        num_workers=num_workers_val,
+        metric_reducer=_validate_reducer(metric_reducer_raw),
+    )
+    sources = SearchSources(
+        debug_prob=debug_prob_src,
+        max_debug_depth=max_debug_depth_src,
+        num_drafts=num_drafts_src,
+        num_workers=num_workers_src,
+        metric_reducer=metric_reducer_src,
+    )
+    return settings, sources
 
 
 async def resolve_search_config(
@@ -170,7 +209,7 @@ async def resolve_search_config(
     num_drafts: int | None = None,
     num_workers: int | None = None,
     metric_reducer: str | None = None,
-) -> SearchSettings:
+) -> tuple[SearchSettings, SearchSources]:
     """Same resolution as ``resolve_search_settings`` plus a DB layer.
 
     Per-field order: explicit Input value → ``bfts_hyperparams`` latest
@@ -178,12 +217,15 @@ async def resolve_search_config(
     module default. ``bfts_root`` uses this so reflection-tuned values
     feed forward to subsequent runs without operator intervention; the
     Input → DB → env → default chain is the canonical config story.
+    The companion ``SearchSources`` records which tier won each field
+    (``input`` / ``hyperparams`` / ``env`` / ``default``).
 
     A ``None`` pool skips the DB read (used by tests and any caller
-    without a workflow context). DB columns that are ``NULL`` (legal
-    per ``bfts_hyperparams.notes``-only updates) fall through to the
-    env/default tier per field; this matches the per-field layering
-    contract — a NULL DB value is "absent", not "use the default".
+    without a workflow context). DB values come from the most-recent
+    ``bfts_hyperparams`` row; ``None`` in any policy field is only
+    possible if a future schema change loosens a ``NOT NULL``, in
+    which case the per-field default contract still applies (the
+    layer is treated as absent and the env/default tier wins).
     """
     db_row: dict[str, Any] | None = None
     if pool is not None:
@@ -191,63 +233,74 @@ async def resolve_search_config(
 
         db_row = await latest_hyperparams(pool)
 
-    return SearchSettings(
-        debug_prob=_resolve_float_with_db(
-            debug_prob, db_row, "debug_prob",
-            ENV_DEBUG_PROB, DEFAULT_DEBUG_PROB,
-        ),
-        max_debug_depth=_resolve_int_with_db(
-            max_debug_depth, db_row, "max_debug_depth",
-            ENV_MAX_DEBUG_DEPTH, DEFAULT_MAX_DEBUG_DEPTH,
-        ),
-        num_drafts=_resolve_int_with_db(
-            num_drafts, db_row, "num_drafts",
-            ENV_NUM_DRAFTS, DEFAULT_NUM_DRAFTS,
-        ),
-        num_workers=_resolve_int_with_db(
-            num_workers, db_row, "num_workers",
-            ENV_NUM_WORKERS, DEFAULT_NUM_WORKERS,
-        ),
-        metric_reducer=_validate_reducer(
-            _resolve_str_with_db(
-                metric_reducer, db_row, "metric_reducer",
-                ENV_METRIC_REDUCER, DEFAULT_METRIC_REDUCER,
-            )
-        ),
+    debug_prob_val, debug_prob_src = _resolve_float_with_db(
+        debug_prob, db_row, "debug_prob",
+        ENV_DEBUG_PROB, DEFAULT_DEBUG_PROB,
     )
+    max_debug_depth_val, max_debug_depth_src = _resolve_int_with_db(
+        max_debug_depth, db_row, "max_debug_depth",
+        ENV_MAX_DEBUG_DEPTH, DEFAULT_MAX_DEBUG_DEPTH,
+    )
+    num_drafts_val, num_drafts_src = _resolve_int_with_db(
+        num_drafts, db_row, "num_drafts",
+        ENV_NUM_DRAFTS, DEFAULT_NUM_DRAFTS,
+    )
+    num_workers_val, num_workers_src = _resolve_int_with_db(
+        num_workers, db_row, "num_workers",
+        ENV_NUM_WORKERS, DEFAULT_NUM_WORKERS,
+    )
+    metric_reducer_raw, metric_reducer_src = _resolve_str_with_db(
+        metric_reducer, db_row, "metric_reducer",
+        ENV_METRIC_REDUCER, DEFAULT_METRIC_REDUCER,
+    )
+    settings = SearchSettings(
+        debug_prob=debug_prob_val,
+        max_debug_depth=max_debug_depth_val,
+        num_drafts=num_drafts_val,
+        num_workers=num_workers_val,
+        metric_reducer=_validate_reducer(metric_reducer_raw),
+    )
+    sources = SearchSources(
+        debug_prob=debug_prob_src,
+        max_debug_depth=max_debug_depth_src,
+        num_drafts=num_drafts_src,
+        num_workers=num_workers_src,
+        metric_reducer=metric_reducer_src,
+    )
+    return settings, sources
 
 
 def _resolve_float(
     input_val: float | None, env_var: str, default: float
-) -> float:
+) -> tuple[float, str]:
     if input_val is not None:
-        return float(input_val)
+        return float(input_val), SOURCE_INPUT
     env = os.getenv(env_var)
     if env is not None:
-        return float(env)
-    return float(default)
+        return float(env), SOURCE_ENV
+    return float(default), SOURCE_DEFAULT
 
 
 def _resolve_int(
     input_val: int | None, env_var: str, default: int
-) -> int:
+) -> tuple[int, str]:
     if input_val is not None:
-        return int(input_val)
+        return int(input_val), SOURCE_INPUT
     env = os.getenv(env_var)
     if env is not None:
-        return int(env)
-    return int(default)
+        return int(env), SOURCE_ENV
+    return int(default), SOURCE_DEFAULT
 
 
 def _resolve_str(
     input_val: str | None, env_var: str, default: str
-) -> str:
+) -> tuple[str, str]:
     if input_val is not None:
-        return input_val
+        return input_val, SOURCE_INPUT
     env = os.getenv(env_var)
     if env is not None:
-        return env
-    return default
+        return env, SOURCE_ENV
+    return default, SOURCE_DEFAULT
 
 
 def _db_value(
@@ -264,12 +317,12 @@ def _resolve_float_with_db(
     db_key: str,
     env_var: str,
     default: float,
-) -> float:
+) -> tuple[float, str]:
     if input_val is not None:
-        return float(input_val)
+        return float(input_val), SOURCE_INPUT
     db_val = _db_value(db_row, db_key)
     if db_val is not None:
-        return float(db_val)
+        return float(db_val), SOURCE_HYPERPARAMS
     return _resolve_float(None, env_var, default)
 
 
@@ -279,12 +332,12 @@ def _resolve_int_with_db(
     db_key: str,
     env_var: str,
     default: int,
-) -> int:
+) -> tuple[int, str]:
     if input_val is not None:
-        return int(input_val)
+        return int(input_val), SOURCE_INPUT
     db_val = _db_value(db_row, db_key)
     if db_val is not None:
-        return int(db_val)
+        return int(db_val), SOURCE_HYPERPARAMS
     return _resolve_int(None, env_var, default)
 
 
@@ -294,12 +347,12 @@ def _resolve_str_with_db(
     db_key: str,
     env_var: str,
     default: str,
-) -> str:
+) -> tuple[str, str]:
     if input_val is not None:
-        return input_val
+        return input_val, SOURCE_INPUT
     db_val = _db_value(db_row, db_key)
     if db_val is not None:
-        return str(db_val)
+        return str(db_val), SOURCE_HYPERPARAMS
     return _resolve_str(None, env_var, default)
 
 

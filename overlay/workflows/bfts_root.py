@@ -13,7 +13,7 @@ See docs/superpowers/plans/2026-05-25-bfts-on-centaur.md (Phase 2).
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -79,8 +79,10 @@ async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
     # one coherent config (Phase 4c.4). Layering: Input override →
     # bfts_hyperparams latest row (reflection-tuned) → BFTS_* env →
     # module default. The DB read is on the parent only; tree handlers
-    # treat the values as authoritative and don't re-resolve.
-    search = await resolve_search_config(
+    # treat the values as authoritative and don't re-resolve. The
+    # companion ``sources`` records which tier won each field so the
+    # postmortem ``why-did-this-run-use-X`` query is one SELECT.
+    search, sources = await resolve_search_config(
         ctx._pool,
         debug_prob=inp.debug_prob,
         max_debug_depth=inp.max_debug_depth,
@@ -90,11 +92,8 @@ async def handler(inp: Input, ctx: "WorkflowContext") -> dict[str, Any]:
     )
     ctx.log(
         "bfts_root_resolved_search_config",
-        debug_prob=search.debug_prob,
-        max_debug_depth=search.max_debug_depth,
-        num_drafts=search.num_drafts,
-        num_workers=search.num_workers,
-        metric_reducer=search.metric_reducer,
+        **asdict(search),
+        sources=asdict(sources),
     )
 
     # Every Sandbox we successfully create lands here BEFORE start_workflow

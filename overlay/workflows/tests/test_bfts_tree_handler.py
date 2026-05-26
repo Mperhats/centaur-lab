@@ -269,10 +269,10 @@ def _patch_fanout_deps(
 
 def _input(
     *,
-    num_drafts: int = 4,
-    num_workers: int = 4,
+    num_drafts: int | None = 4,
+    num_workers: int | None = 4,
     max_iters: int = 1,
-    debug_prob: float = 0.5,
+    debug_prob: float | None = 0.5,
     draft_model: str = "claude-draft-test",
     feedback_model: str = "claude-feedback-test",
     vlm_model: str = "claude-vision-test",
@@ -567,3 +567,77 @@ async def test_handler_uses_deterministic_trigger_key_per_node(
     assert len(triggers) == 2  # distinct per node
     # wait_for_workflow runs with the same run_id the start returned.
     assert set(ctx.wait_for_workflow_calls) == triggers
+
+
+# --- Phase 4c.4 follow-up: replay-determinism + sources persistence -----
+
+
+@pytest.mark.asyncio
+async def test_handler_persists_resolved_search_config_to_insert_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bfts_runs.config_json snapshot must hold RESOLVED values, not
+    raw Input — otherwise replay diverges from the original run when the
+    bfts_hyperparams row is rewritten between runs.
+
+    Lock the env-tier win path here so a future "let's just store inp"
+    refactor regresses loudly."""
+    import bfts_tree
+
+    monkeypatch.setenv("BFTS_NUM_WORKERS", "7")
+    _patch_fanout_deps(monkeypatch)
+    # Override insert_run AFTER _patch_fanout_deps so the recording
+    # mock is the one the handler invokes (the helper installs a
+    # discard-only stub).
+    insert_run_mock = AsyncMock(return_value=None)
+    monkeypatch.setattr(bfts_tree, "insert_run", insert_run_mock)
+
+    ctx = _TreeCtx()
+    await bfts_tree.handler(
+        _input(num_workers=None, num_drafts=1, max_iters=1), ctx
+    )
+
+    config = insert_run_mock.await_args.kwargs["config"]
+    # Resolved from env, not raw None — replay must reproduce 7.
+    assert config["num_workers"] == 7
+
+
+@pytest.mark.asyncio
+async def test_handler_persists_sources_in_config_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``config_json["sources"]`` must record which tier won each
+    field so the postmortem ``why-did-this-run-use-X`` query is one
+    SELECT against ``bfts_runs``."""
+    import bfts_tree
+
+    monkeypatch.setenv("BFTS_NUM_WORKERS", "7")
+    monkeypatch.delenv("BFTS_DEBUG_PROB", raising=False)
+    monkeypatch.delenv("BFTS_MAX_DEBUG_DEPTH", raising=False)
+    monkeypatch.delenv("BFTS_NUM_DRAFTS", raising=False)
+    monkeypatch.delenv("BFTS_METRIC_REDUCER", raising=False)
+
+    _patch_fanout_deps(monkeypatch)
+    insert_run_mock = AsyncMock(return_value=None)
+    monkeypatch.setattr(bfts_tree, "insert_run", insert_run_mock)
+
+    ctx = _TreeCtx()
+    # Input override on debug_prob; everything else falls through to env
+    # (num_workers) or default (max_debug_depth, num_drafts, metric_reducer).
+    await bfts_tree.handler(
+        _input(
+            num_drafts=1,
+            num_workers=None,
+            max_iters=1,
+            debug_prob=0.42,
+        ),
+        ctx,
+    )
+
+    config = insert_run_mock.await_args.kwargs["config"]
+    sources = config["sources"]
+    assert sources["debug_prob"] == "input"
+    assert sources["num_workers"] == "env"
+    assert sources["num_drafts"] == "input"  # _input passes num_drafts=1
+    assert sources["max_debug_depth"] == "default"
+    assert sources["metric_reducer"] == "default"

@@ -422,3 +422,46 @@ async def test_handler_logs_resolved_search_config(monkeypatch) -> None:
     assert log_kw["num_drafts"] == 2
     assert log_kw["num_workers"] == 3
     assert log_kw["metric_reducer"] == "mean"
+
+
+@pytest.mark.asyncio
+async def test_handler_logs_resolved_sources(monkeypatch) -> None:
+    """The structured log must include a ``sources`` dict alongside the
+    resolved values so an operator postmortem can see which tier won
+    each field — the same provenance that lands in ``bfts_runs.config_json``."""
+    import bfts_root
+
+    monkeypatch.delenv("BFTS_DEBUG_PROB", raising=False)
+    monkeypatch.delenv("BFTS_MAX_DEBUG_DEPTH", raising=False)
+    monkeypatch.delenv("BFTS_NUM_DRAFTS", raising=False)
+    monkeypatch.setenv("BFTS_NUM_WORKERS", "8")
+    monkeypatch.delenv("BFTS_METRIC_REDUCER", raising=False)
+
+    pool = MockPool(
+        fetchrow_result={
+            "debug_prob": 0.4,
+            "max_debug_depth": 2,
+            "num_drafts": 2,
+            "num_workers": None,
+            "metric_reducer": "mean",
+        }
+    )
+    ctx = _RootCtx(pool=pool)
+
+    inp = Input(
+        idea={"name": "toy"},
+        debug_prob=0.9,  # Input override
+        max_iters=1,
+    )
+    await bfts_root.handler(inp, ctx)
+
+    resolved_logs = [
+        kw for ev, kw in ctx.logs if ev == "bfts_root_resolved_search_config"
+    ]
+    assert len(resolved_logs) == 1
+    sources = resolved_logs[0]["sources"]
+    assert sources["debug_prob"] == "input"  # operator override
+    assert sources["max_debug_depth"] == "hyperparams"  # DB row
+    assert sources["num_drafts"] == "hyperparams"  # DB row
+    assert sources["num_workers"] == "env"  # DB null → env
+    assert sources["metric_reducer"] == "hyperparams"  # DB row

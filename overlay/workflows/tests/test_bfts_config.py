@@ -24,6 +24,11 @@ from _bfts_config import (
     ENV_METRIC_REDUCER,
     ENV_NUM_DRAFTS,
     ENV_NUM_WORKERS,
+    SOURCE_DEFAULT,
+    SOURCE_ENV,
+    SOURCE_HYPERPARAMS,
+    SOURCE_INPUT,
+    SearchSources,
     resolve_llm_settings,
     resolve_search_config,
     resolve_search_settings,
@@ -92,19 +97,19 @@ def test_input_overrides_round_trip() -> None:
 def test_resolve_search_settings_default_is_mean(monkeypatch) -> None:
     monkeypatch.delenv(ENV_METRIC_REDUCER, raising=False)
     assert DEFAULT_METRIC_REDUCER == "mean"
-    settings = resolve_search_settings()
+    settings, _sources = resolve_search_settings()
     assert settings.metric_reducer == "mean"
 
 
 def test_resolve_search_settings_env_override(monkeypatch) -> None:
     monkeypatch.setenv(ENV_METRIC_REDUCER, "weighted_mean")
-    settings = resolve_search_settings()
+    settings, _sources = resolve_search_settings()
     assert settings.metric_reducer == "weighted_mean"
 
 
 def test_resolve_search_settings_input_beats_env(monkeypatch) -> None:
     monkeypatch.setenv(ENV_METRIC_REDUCER, "weighted_mean")
-    settings = resolve_search_settings(metric_reducer="min")
+    settings, _sources = resolve_search_settings(metric_reducer="min")
     assert settings.metric_reducer == "min"
 
 
@@ -151,7 +156,7 @@ def test_search_settings_has_all_five_fields() -> None:
             ENV_NUM_DRAFTS, ENV_NUM_WORKERS, ENV_METRIC_REDUCER,
         ):
             monkeypatch_env.delenv(env_var, raising=False)
-        s = resolve_search_settings()
+        s, _ = resolve_search_settings()
         assert s.debug_prob == DEFAULT_DEBUG_PROB
         assert s.max_debug_depth == DEFAULT_MAX_DEBUG_DEPTH
         assert s.num_drafts == DEFAULT_NUM_DRAFTS
@@ -169,7 +174,7 @@ def test_resolve_search_settings_layers_input_env_default(monkeypatch) -> None:
     monkeypatch.delenv(ENV_MAX_DEBUG_DEPTH, raising=False)
     monkeypatch.delenv(ENV_METRIC_REDUCER, raising=False)
 
-    s = resolve_search_settings(debug_prob=0.7, num_drafts=8)
+    s, _ = resolve_search_settings(debug_prob=0.7, num_drafts=8)
     assert s.debug_prob == 0.7  # Input wins
     assert s.num_drafts == 8  # Input wins
     assert s.num_workers == 5  # Env wins (no Input)
@@ -191,7 +196,7 @@ async def test_resolve_search_config_uses_input_override_first(
     monkeypatch.delenv(ENV_DEBUG_PROB, raising=False)
     pool = MockPool(fetchrow_result={"debug_prob": 0.3})
 
-    s = await resolve_search_config(pool, debug_prob=0.7)
+    s, _ = await resolve_search_config(pool, debug_prob=0.7)
     assert s.debug_prob == 0.7
 
 
@@ -211,7 +216,7 @@ async def test_resolve_search_config_falls_back_to_db_row(
         }
     )
 
-    s = await resolve_search_config(pool)
+    s, _ = await resolve_search_config(pool)
     assert s.debug_prob == 0.3
     assert s.max_debug_depth == 5
     assert s.num_drafts == 7
@@ -229,7 +234,7 @@ async def test_resolve_search_config_falls_back_to_env(monkeypatch) -> None:
     monkeypatch.setenv(ENV_METRIC_REDUCER, "min")
     pool = MockPool(fetchrow_result=None)
 
-    s = await resolve_search_config(pool)
+    s, _ = await resolve_search_config(pool)
     assert s.debug_prob == 0.6
     assert s.max_debug_depth == 9
     assert s.num_drafts == 11
@@ -249,7 +254,7 @@ async def test_resolve_search_config_falls_back_to_default(
         monkeypatch.delenv(env_var, raising=False)
     pool = MockPool(fetchrow_result=None)
 
-    s = await resolve_search_config(pool)
+    s, _ = await resolve_search_config(pool)
     assert s.debug_prob == DEFAULT_DEBUG_PROB
     assert s.max_debug_depth == DEFAULT_MAX_DEBUG_DEPTH
     assert s.num_drafts == DEFAULT_NUM_DRAFTS
@@ -276,7 +281,7 @@ async def test_resolve_search_config_per_field_layering(monkeypatch) -> None:
         }
     )
 
-    s = await resolve_search_config(pool, num_drafts=10)
+    s, _ = await resolve_search_config(pool, num_drafts=10)
     assert s.num_drafts == 10  # Input wins
     assert s.debug_prob == 0.25  # DB wins (Input absent)
     assert s.num_workers == 4  # env wins (DB null, Input absent)
@@ -294,7 +299,7 @@ async def test_resolve_search_config_handles_none_pool(monkeypatch) -> None:
     monkeypatch.delenv(ENV_NUM_WORKERS, raising=False)
     monkeypatch.delenv(ENV_METRIC_REDUCER, raising=False)
 
-    s = await resolve_search_config(None, debug_prob=0.42)
+    s, _ = await resolve_search_config(None, debug_prob=0.42)
     assert s.debug_prob == 0.42
     assert s.num_drafts == DEFAULT_NUM_DRAFTS
 
@@ -343,3 +348,123 @@ def test_tree_input_search_fields_default_to_none() -> None:
     assert tree.num_workers is None
     assert tree.max_debug_depth is None
     assert tree.debug_prob is None
+
+
+# --- SearchSources per-field provenance (Phase 4c.4 follow-up) ----------
+#
+# ``SearchSources`` lets the postmortem "why did this run use X?" query
+# bottom out at one ``SELECT config_json->'sources' FROM bfts_runs``.
+# The tier values must be exactly the four ``SOURCE_*`` constants so a
+# typo in the persistence layer fails loudly here, not in production.
+
+
+@pytest.mark.asyncio
+async def test_resolve_search_config_returns_sources_for_each_tier(
+    monkeypatch,
+) -> None:
+    """One call hits all four tiers — Input wins one field, the
+    bfts_hyperparams row wins another, env wins a third, default wins
+    the fourth — and ``SearchSources`` records the winning tier per
+    field independently."""
+    monkeypatch.setenv(ENV_NUM_WORKERS, "4")
+    monkeypatch.delenv(ENV_DEBUG_PROB, raising=False)
+    monkeypatch.delenv(ENV_MAX_DEBUG_DEPTH, raising=False)
+    monkeypatch.delenv(ENV_NUM_DRAFTS, raising=False)
+    monkeypatch.delenv(ENV_METRIC_REDUCER, raising=False)
+    pool = MockPool(
+        fetchrow_result={
+            "debug_prob": 0.25,        # DB wins for debug_prob
+            "max_debug_depth": None,    # NULL → falls through to default
+            "num_drafts": 6,            # would win, but Input overrides
+            "num_workers": None,        # NULL → falls through to env
+            "metric_reducer": None,     # NULL → falls through to default
+        }
+    )
+
+    settings, sources = await resolve_search_config(pool, num_drafts=10)
+
+    assert settings.num_drafts == 10 and sources.num_drafts == SOURCE_INPUT
+    assert settings.debug_prob == 0.25 and sources.debug_prob == SOURCE_HYPERPARAMS
+    assert settings.num_workers == 4 and sources.num_workers == SOURCE_ENV
+    assert (
+        settings.max_debug_depth == DEFAULT_MAX_DEBUG_DEPTH
+        and sources.max_debug_depth == SOURCE_DEFAULT
+    )
+    assert (
+        settings.metric_reducer == DEFAULT_METRIC_REDUCER
+        and sources.metric_reducer == SOURCE_DEFAULT
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolve_search_config_marks_db_row_as_hyperparams(
+    monkeypatch,
+) -> None:
+    """A pure DB fall-back (Input None, env unset) must record every
+    field's source as ``hyperparams`` — confirming the DB tier label
+    and excluding any accidental ``default`` slip-through."""
+    for env_var in (
+        ENV_DEBUG_PROB, ENV_MAX_DEBUG_DEPTH,
+        ENV_NUM_DRAFTS, ENV_NUM_WORKERS, ENV_METRIC_REDUCER,
+    ):
+        monkeypatch.delenv(env_var, raising=False)
+    pool = MockPool(
+        fetchrow_result={
+            "debug_prob": 0.3,
+            "max_debug_depth": 5,
+            "num_drafts": 7,
+            "num_workers": 6,
+            "metric_reducer": "min",
+        }
+    )
+
+    _settings, sources = await resolve_search_config(pool)
+
+    assert sources.debug_prob == SOURCE_HYPERPARAMS
+    assert sources.max_debug_depth == SOURCE_HYPERPARAMS
+    assert sources.num_drafts == SOURCE_HYPERPARAMS
+    assert sources.num_workers == SOURCE_HYPERPARAMS
+    assert sources.metric_reducer == SOURCE_HYPERPARAMS
+
+
+def test_resolve_search_settings_sources_omit_hyperparams_tier(
+    monkeypatch,
+) -> None:
+    """The sync (no-DB) resolver can never emit ``hyperparams`` — the
+    tier doesn't exist for it. Locks the contract that ``bfts_tree``'s
+    persistence path can't accidentally claim a DB row decided a
+    field when the parent forwarded an env-tier value."""
+    monkeypatch.setenv(ENV_NUM_WORKERS, "9")
+    for env_var in (
+        ENV_DEBUG_PROB, ENV_MAX_DEBUG_DEPTH,
+        ENV_NUM_DRAFTS, ENV_METRIC_REDUCER,
+    ):
+        monkeypatch.delenv(env_var, raising=False)
+
+    _settings, sources = resolve_search_settings(num_drafts=4)
+
+    assert sources.num_drafts == SOURCE_INPUT
+    assert sources.num_workers == SOURCE_ENV
+    assert sources.debug_prob == SOURCE_DEFAULT
+    assert sources.max_debug_depth == SOURCE_DEFAULT
+    assert sources.metric_reducer == SOURCE_DEFAULT
+    # No field claims hyperparams — that tier requires resolve_search_config.
+    for field_value in (
+        sources.debug_prob, sources.max_debug_depth,
+        sources.num_drafts, sources.num_workers, sources.metric_reducer,
+    ):
+        assert field_value != SOURCE_HYPERPARAMS
+
+
+def test_search_sources_is_frozen_dataclass() -> None:
+    """SearchSources must be frozen so the resolver's snapshot can't be
+    mutated after the fact (e.g. from inside a log formatter)."""
+    s = SearchSources(
+        debug_prob=SOURCE_INPUT,
+        max_debug_depth=SOURCE_HYPERPARAMS,
+        num_drafts=SOURCE_ENV,
+        num_workers=SOURCE_DEFAULT,
+        metric_reducer=SOURCE_DEFAULT,
+    )
+    with pytest.raises((AttributeError, Exception)):
+        s.debug_prob = SOURCE_DEFAULT  # type: ignore[misc]

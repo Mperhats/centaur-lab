@@ -17,7 +17,7 @@ import json
 import random
 import sys
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -144,8 +144,10 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     # passthrough; for standalone tree invocations the env/default
     # tier still applies. The DB layer lives on bfts_root only —
     # re-reading bfts_hyperparams here would risk siblings disagreeing
-    # if the table was updated mid-run.
-    search = resolve_search_settings(
+    # if the table was updated mid-run. ``sources`` records which tier
+    # won each field; persisted into bfts_runs.config_json so an
+    # operator postmortem can reconstruct the run's provenance.
+    search, sources = resolve_search_settings(
         debug_prob=inp.debug_prob,
         max_debug_depth=inp.max_debug_depth,
         num_drafts=inp.num_drafts,
@@ -165,7 +167,8 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             idea=inp.idea,
             # Persist the resolved snapshot so replay reproduces the
             # exact run config even if bfts_hyperparams / env changes
-            # between runs (Phase 4c.4 contract).
+            # between runs (Phase 4c.4 contract). ``sources`` answers
+            # the postmortem question "which tier set this value?".
             config={
                 "num_drafts": search.num_drafts,
                 "num_workers": search.num_workers,
@@ -178,6 +181,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                 "feedback_model": llm.feedback_model,
                 "vlm_model": llm.vlm_model,
                 "metric_reducer": search.metric_reducer,
+                "sources": asdict(sources),
             },
             seed=inp.seed,
         ),
