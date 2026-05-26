@@ -15,7 +15,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from _bfts_state import update_node_metric
+from _bfts_state import fetch_best_node_for_run, update_node_metric
 
 from ._mocks import MockPool as FakePool
 
@@ -164,3 +164,46 @@ async def test_update_node_metric_backward_compatible_signature() -> None:
     )
 
     assert len(pool.execute_calls) == 1
+
+
+# --- Phase 4d.3: fetch_best_node_for_run --------------------------------
+#
+# Single-row lookup that ``gather_citations`` calls before fanning out
+# its claim-extraction LLM call. Resolves the join (best_node_id IN
+# bfts_runs → node row IN bfts_nodes) in one round-trip via a
+# correlated subquery; returns ``None`` when the run has no
+# ``best_node_id`` set (incomplete tree, every expansion was buggy).
+
+
+@pytest.mark.asyncio
+async def test_fetch_best_node_for_run_returns_row_when_set() -> None:
+    """Happy path: the run has a best_node_id; the DAO returns a dict
+    with at least ``node_id``, ``plan``, ``code``."""
+    pool = FakePool(
+        fetchrow_result={
+            "node_id": "best-1",
+            "plan": "the plan",
+            "code": "print('x')",
+        }
+    )
+
+    out = await fetch_best_node_for_run(pool, run_id="run-1")
+
+    assert out == {"node_id": "best-1", "plan": "the plan", "code": "print('x')"}
+    assert len(pool.fetchrow_calls) == 1
+    query, args = pool.fetchrow_calls[0]
+    assert "bfts_runs" in query
+    assert "bfts_nodes" in query
+    assert args == ("run-1",)
+
+
+@pytest.mark.asyncio
+async def test_fetch_best_node_for_run_returns_none_when_unset() -> None:
+    """Incomplete run: ``best_node_id`` is NULL → fetchrow → None →
+    DAO returns None. Caller fails fast on None instead of swallowing
+    the empty result."""
+    pool = FakePool(fetchrow_result=None)
+
+    out = await fetch_best_node_for_run(pool, run_id="run-incomplete")
+
+    assert out is None

@@ -78,3 +78,29 @@ async def write_best_node_id_artifact(
         artifact_id, node_id, node_id.encode("utf-8"),
     )
     return artifact_id
+
+
+async def write_references_artifact(
+    pool: asyncpg.Pool, *, node_id: str, bibtex: str
+) -> str:
+    """Persist the gathered BibTeX (`references.bib`) for the best node.
+
+    Idempotent ON CONFLICT upsert keyed by (node_id, relative_path) so
+    re-running ``gather_citations`` for the same best node overwrites
+    the previous BibTeX rather than colliding on the unique constraint
+    or orphaning a stale row. Empty ``bibtex`` is allowed (and
+    intentional in the no-claims / no-papers case): writing an empty
+    artifact lets a downstream writeup workflow detect "we tried, no
+    citations found" via byte length without needing to distinguish
+    "missing artifact" from "explicit empty".
+    """
+    artifact_id = uuid.uuid4().hex
+    await pool.execute(
+        """
+        INSERT INTO bfts_artifacts (artifact_id, node_id, kind, relative_path, bytes)
+        VALUES ($1, $2, 'references', 'references.bib', $3)
+        ON CONFLICT (node_id, relative_path) DO UPDATE SET bytes = EXCLUDED.bytes
+        """,
+        artifact_id, node_id, bibtex.encode("utf-8"),
+    )
+    return artifact_id

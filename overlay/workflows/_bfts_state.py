@@ -199,3 +199,28 @@ async def set_best_node(
         "UPDATE bfts_runs SET best_node_id = $2, status = 'completed', updated_at = NOW() WHERE run_id = $1",
         run_id, best_node_id,
     )
+
+
+async def fetch_best_node_for_run(
+    pool: asyncpg.Pool, *, run_id: str
+) -> dict[str, Any] | None:
+    """Return the best node's row (``node_id``, ``plan``, ``code``) for a run.
+
+    Resolves ``bfts_runs.best_node_id → bfts_nodes`` in one round-trip
+    via a correlated subquery so callers don't have to issue two
+    queries (and risk a TOCTOU between them). Returns ``None`` when the
+    run has no ``best_node_id`` set — the caller decides whether that
+    means "incomplete run" (fail-fast in ``gather_citations``) or
+    "no good nodes yet" (silent skip in some future analytics workflow).
+    """
+    row = await pool.fetchrow(
+        """
+        SELECT n.node_id, n.plan, n.code
+        FROM bfts_nodes n
+        WHERE n.node_id = (
+            SELECT best_node_id FROM bfts_runs WHERE run_id = $1
+        )
+        """,
+        run_id,
+    )
+    return dict(row) if row is not None else None

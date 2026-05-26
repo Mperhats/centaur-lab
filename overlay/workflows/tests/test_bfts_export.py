@@ -8,7 +8,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from _bfts_export import select_best, write_best_node_id_artifact
+from _bfts_export import (
+    select_best,
+    write_best_node_id_artifact,
+    write_references_artifact,
+)
 
 from ._mocks import MockPool as FakePool
 
@@ -95,3 +99,65 @@ async def test_write_best_node_id_artifact_returns_unique_ids() -> None:
     second = await write_best_node_id_artifact(pool, node_id="same-node")
 
     assert first != second
+
+
+# --- Phase 4d.3: write_references_artifact ------------------------------
+#
+# Mirror surface of ``write_best_artifact``: idempotent UPSERT keyed on
+# ``(node_id, relative_path)`` so a re-run of ``gather_citations`` for the
+# same best node overwrites the previous BibTeX rather than orphaning the
+# old row + colliding on the unique constraint. The artifact is the input
+# to a future writeup workflow; the contract those tests pin is what the
+# writeup workflow will read.
+
+
+@pytest.mark.asyncio
+async def test_write_references_artifact_inserts_row() -> None:
+    """The helper writes a ``references.bib`` artifact whose bytes are
+    the supplied BibTeX string (UTF-8 encoded). Mirrors
+    ``write_best_artifact``'s positional contract: ``(artifact_id,
+    node_id, bytes)`` so tests can assert the column ordering directly."""
+    pool = FakePool()
+
+    bibtex = "@article{Author2024, title={X}, author={A}, year={2024}}"
+    artifact_id = await write_references_artifact(
+        pool, node_id="node-abc", bibtex=bibtex
+    )
+
+    assert isinstance(artifact_id, str) and artifact_id
+    assert len(pool.execute_calls) == 1
+    query, args = pool.execute_calls[0]
+
+    assert args[0] == artifact_id
+    assert args[1] == "node-abc"
+    assert args[2] == bibtex.encode("utf-8")
+
+    assert "bfts_artifacts" in query
+
+
+@pytest.mark.asyncio
+async def test_write_references_artifact_uses_relative_path_references_bib() -> None:
+    """The relative path must be exactly ``references.bib`` so the
+    downstream writeup workflow can find it next to ``best_solution.py``."""
+    pool = FakePool()
+
+    await write_references_artifact(pool, node_id="node-abc", bibtex="@article{X}")
+
+    query, _ = pool.execute_calls[0]
+    assert "references.bib" in query
+
+
+@pytest.mark.asyncio
+async def test_write_references_artifact_overwrites_existing() -> None:
+    """Re-running ``gather_citations`` for the same best node must
+    overwrite the previous BibTeX (operator may have re-prompted the
+    LLM, S2 may have new entries). The UPSERT is keyed on
+    ``(node_id, relative_path)`` so we don't need to delete first."""
+    pool = FakePool()
+
+    await write_references_artifact(pool, node_id="node-xyz", bibtex="@article{V1}")
+
+    query, _ = pool.execute_calls[0]
+    upper = query.upper()
+    assert "ON CONFLICT" in upper
+    assert "DO UPDATE" in upper
