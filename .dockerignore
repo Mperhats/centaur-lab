@@ -52,10 +52,10 @@ values*.yaml
 # Docker
 .dockerignore
 
-# Tests (root pytest suite + legacy per-tool/workflow trees never run
-# inside the API or sandbox pods)
+# Tests (root pytest suite + local scratch dir never run inside the
+# API or sandbox pods)
 tests
-tests-old
+tmp
 
 # Local overlay-image tag sentinel written by `just build` (gitignored)
 .tag

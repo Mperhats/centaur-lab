@@ -1,12 +1,8 @@
 # centaur-lab backlog
 
-Actionable items only. Completed audits and MVP plans live in git history.
+Actionable items only. Completed audits and pre-reorg backlog live in git history (see `chore/reorganize` branch tip).
 
 ## Infra / deploy
-
-- [x] **Fix GHCR overlay image path in `infra/argocd/values/centaur.yaml`**
-  - Target image: `ghcr.io/Mperhats/centaur-lab/centaur-overlay:sha-<git>` (see `.github/workflows/overlay.yml`).
-  - Path fixed in `infra/argocd/values/centaur.yaml` and `infra/argocd/application.yaml`.
 
 - [ ] **First successful GHCR publish from Overlay CI on `main`**
   - Workflow exists (`.github/workflows/overlay.yml`) but has **never pushed** — only two failed runs on the feature branch (Justfile parse error on `just` 1.36; no run recorded after merge to `main`).
@@ -21,43 +17,13 @@ Actionable items only. Completed audits and MVP plans live in git history.
       --jq '.[0] | {name, created_at, tags: .metadata.container.tags}'
     ```
 
-- [x] **Merge `feat/deploy-alignment`** — values split, sha tags, CI workflow, infra skeleton.
-
-## Safe to delete (done or recommended)
-
-| Item | Why |
-|------|-----|
-| ~~`docs/review.md`~~ | Deleted — one-shot audit; critical API-key finding already fixed |
-| ~~`docs/centaur/`~~ | Deleted — offline mirror of `.centaur/docs/public/md/`; link to [centaur.run](https://centaur.run) instead |
-| ~~`docs/superpowers/plans/2026-05-25-centaur-lab-mvp.md`~~ | Deleted — completed plan; keep `specs/` + deploy alignment plan only |
-
-## Optional slim-down (only if annoying)
-
-- [x] Drop `just overlay::lint-tools` / `lint-workflows` — `just overlay::lint` already covers both
-- [x] Drop `just overlay::reload-api` / `reload-skills` — keep single `just reload` unless you use the split weekly
-- [x] ~~Rename test doubles `Mock*` → `Fake*`~~ — **won't do**; review A9 kept inline `Mock*` stubs (`e18bee5`) instead of reviving upstream `Fake*` hierarchy
+- [ ] **Spin up `centaur-lab-infra`** (sibling GitOps repo) shaped after [`paradigmxyz/centaur-acme-infra`](https://github.com/paradigmxyz/centaur-acme-infra). Argo CD apps + pinned overlay image tags + Helm values live there, not in this overlay repo. Pre-reorg `infra/argocd/` and `clusters/centaur-lab/argocd/` directories were deleted; recover the values shape from the `chore/reorganize` history if you need a starting point.
 
 ## Do not build
 
 - Bind-mount overlay dev mode (not in upstream chart)
-- Root `pyproject.toml` / uv workspace wrapping overlay (Centaur expects per-tool `pyproject.toml`)
 - Moving `centaur_lab/` into a published package (org shared helpers in overlay image are fine)
 - Second overlay repo until a second consumer exists
-
-## Python / uv / ruff — current shape vs Centaur
-
-**Matches upstream (keep as-is):**
-
-- One `pyproject.toml` per tool under `overlay/tools/<name>/` with `[tool.centaur]` block
-- Workflows are loose `.py` files; `overlay/workflows/pyproject.toml` exists **only for local pytest deps** (`package = false`) — same pattern as upstream workflow tests
-- `overlay/ruff.toml` mirrors `.centaur/tools/ruff.toml` — lint via `uvx ruff check .` from tool/workflow dirs
-- `db/pyproject.toml` — separate local notebook helper; not part of overlay image (correct)
-
-**No changes needed unless you want one convenience:**
-
-- Point overlay lint at shared config explicitly: `uvx ruff check --config ruff.toml .` from `overlay/` root (today each subdir inherits when run from `tools/` / `workflows/`)
-
-**Real bug already fixed:** lazy `secret()` in `SemanticScholarClient._get_api_key()` (was in old audit as critical).
 
 ## Known upstream limitation: `centaur_sdk` is not a real installable package
 
@@ -74,26 +40,26 @@ cd / && /tmp/t/.venv/bin/python -c "from centaur_sdk import secret"
 
 **Root cause:** `.centaur/centaur_sdk/pyproject.toml` declares `[tool.hatch.build.targets.wheel] packages = ["."]`. Hatchling installs the dir's contents at the wheel root, so `tool_sdk.py`, `cli_tables.py`, `__init__.py`, even `README.md` and `pyproject.toml` end up loose in `site-packages/` — there is no `centaur_sdk/` package directory. Upstream's own API gets away with it because its Dockerfile `COPY centaur_sdk/ centaur_sdk/` puts the source dir at `/app/centaur_sdk/` and runs with `WORKDIR /app`; the import resolves via cwd discovery, not via the install.
 
+We re-verified this against `uv add centaur-sdk = { path = ".centaur/centaur_sdk", editable = true }`: uv produces a working `dist-info` and `.pth` file pointing at `.centaur/centaur_sdk`, but because the `.pth` puts the package's *contents* on `sys.path` (not its parent), `from centaur_sdk import …` still fails — `tool_sdk` becomes a top-level module instead.
+
 Neither the README's `pip install "centaur-sdk @ git+..."` snippet nor the AGENTS.md `pip install centaur-sdk` comment actually works — the package is not on PyPI ([paradigmxyz packages](https://github.com/orgs/paradigmxyz/packages?repo_name=centaur) lists 4 containers, no SDK; `pypi.org/simple/centaur-sdk/` 404s).
 
-**Our workaround (`.github/workflows/overlay.yml`, `overlay/*/pyproject.toml`, `overlay/tools/semantic_scholar/cli.py`):**
+**Our current workaround** (`pyproject.toml`, `.github/workflows/overlay.yml`):
 
 | Context | Mechanism |
 |---|---|
-| Runtime in API pod | Centaur tool loader puts `overlay/` on `sys.path`; `/app/centaur_sdk/` already on cwd path |
-| Pytest (local + CI) | `[tool.pytest.ini_options] pythonpath = ["..", "../..", "../../../.centaur"]` in tool pyproject (+ analogous in workflows pyproject) |
-| `uv run python cli.py` from a tool dir | 9 lines of `sys.path.insert` bootstrap in `cli.py` (documented in the file) |
+| Runtime in API pod | Centaur tool loader puts `tools/` + overlay tool dirs on `sys.path`; `/app/centaur_sdk/` already on cwd path |
+| Pytest (local + CI) | `[tool.pytest.ini_options] pythonpath = [".", ".centaur"]` in root `pyproject.toml` puts the submodule's parent on the path so `import centaur_sdk` resolves to `.centaur/centaur_sdk/` as a package |
+| Tool CLIs (`uv run python -m tools.semantic_scholar.cli ...`) | The same root `pyproject.toml` `pythonpath` is honored by pytest only — for ad-hoc CLI runs, `PYTHONPATH=.centaur uv run …` |
 
 CI requires `submodules: recursive` on `actions/checkout` so `.centaur/centaur_sdk/` is present for pytest.
 
-**Upstream fix would collapse all of the above:** move files into `.centaur/centaur_sdk/centaur_sdk/` and change `packages = ["centaur_sdk"]`. After that, declare `centaur-sdk @ git+...` as a regular dep and delete every workaround. Not pursued because we don't own the upstream repo.
+**Upstream fix would collapse all of the above:** move files into `.centaur/centaur_sdk/centaur_sdk/` and change `packages = ["centaur_sdk"]`. After that, declare `centaur-sdk @ git+...` (or path-installed from the submodule) as a regular dep and delete every workaround. Not pursued because we don't own the upstream repo.
 
-- [ ] If upstream ever fixes the packaging, drop pythonpath/cli bootstrap and add `centaur-sdk @ git+...` as a regular dep in overlay tool/workflow pyprojects
+- [ ] If upstream ever fixes the packaging, drop the `pythonpath` entry and add `centaur-sdk` as a regular dep in root `pyproject.toml` (path-sourced from `.centaur/centaur_sdk` via `[tool.uv.sources]`).
 
 ## Overlay DB migrations (future)
 
-Decision tree, schema reuse rules, dbmate workflow, and gotchas live in [`docs/overlay-db-migrations.md`](./overlay-db-migrations.md). Open work items below; do those once a new overlay-owned table is actually needed.
+Decision tree, schema reuse rules, dbmate workflow, and gotchas live in [`docs/overlay-db-migrations.md`](./overlay-db-migrations.md). The first real overlay-owned migration already ships at [`services/api/db/migrations/20260526000001_add_paper_archives.sql`](../services/api/db/migrations/20260526000001_add_paper_archives.sql). Open work below; do these only when a new overlay-owned table is actually needed.
 
-- [ ] Create `overlay/services/api/db/migrations/` and first migration
-- [ ] Extend `overlay/Dockerfile`: `COPY services /overlay/services`
-- [ ] Verify locally: `CENTAUR_OVERLAY_HOST_DIR=$PWD/overlay .centaur/contrib/scripts/dbmate --set overlay status`
+- [ ] Verify locally: `CENTAUR_OVERLAY_HOST_DIR=$PWD .centaur/contrib/scripts/dbmate --set overlay status`

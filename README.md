@@ -22,24 +22,22 @@ ACME-mirror reorganization plan:
 | `.agents/skills/` | Sandbox-loaded agent skills (one `SKILL.md` per directory). |
 | `services/api/db/migrations/` | Overlay-side SQL migrations applied by the API on startup. |
 | `services/sandbox/SYSTEM_PROMPT.md` | Org-specific sandbox prompt overlay. |
-| `tests/` | Pytest suite at the repo root, ACME-style. New tests land here; legacy suites are staged in `tests-old/` for migration. |
-| `tests-old/` | Per-tool / per-workflow pytest suites pre-reorg. Migrating to `tests/` one-by-one as we re-author them in the new shape. |
+| `tests/` | Pytest suite at the repo root, ACME-style. |
 | `Dockerfile` + `.dockerignore` | Single-`COPY .` overlay image. The `.dockerignore` is the source of truth for what does **not** ship. |
-| `pyproject.toml` + `uv.lock` | Single-root uv project: aggregated dev/test deps and a single `.venv` at the repo root. Per-tool `pyproject.toml` files are still authoritative for runtime dep resolution inside the API pod. |
-| `clusters/centaur-lab/` | Prod GitOps skeleton (Argo CD + pinned image tags + Helm values), shaped to match [`paradigmxyz/centaur-acme-infra`](https://github.com/paradigmxyz/centaur-acme-infra). Cluster lifecycle, deploy orchestration, and **all Helm values** live here, not in the overlay repo. |
-| `.centaur/` | Git submodule pinned at a specific `paradigmxyz/centaur` SHA. The base platform. |
+| `pyproject.toml` + `uv.lock` | Single-root uv project: aggregated dev/test deps + `centaur-sdk` (path-installed from `.centaur/centaur_sdk`) and a single `.venv` at the repo root. Per-tool `pyproject.toml` files are still authoritative for runtime dep resolution inside the API pod. |
+| `.centaur/` | Git submodule pinned at a specific `paradigmxyz/centaur` SHA. Source of truth for the base platform **and** the `centaur-sdk` package. |
 | `.scientist/` | Git submodule pinning [Sakana AI-Scientist-v2](https://github.com/SakanaAI/AI-Scientist-v2) for research-flow experiments. |
-| `db/` | Local helpers for poking at the centaur Postgres (`centaur_db.py`, notebooks). Cluster-only — not packaged into the overlay image. |
 | `cloudflared/` | Cloudflare Tunnel routing, launchd agent template, and per-machine setup README. Has its own standalone `Justfile` (`cd cloudflared && just install-service`). |
 | `docs/superpowers/` | Design specs + implementation plans. |
 | `docs/TODO.md` | Actionable backlog. |
 | `.env.example` | Template for the shell env vars the cluster bootstrap script reads. |
+| `tmp/` | Local-only scratch (gitignored, also `.dockerignore`d). The pre-reorg per-tool/workflow test suites currently live at `tmp/tests-old/` for reference while we re-author them under `tests/`. |
 
 The overlay image build context is the entire repo. `.dockerignore`
 excludes everything that isn't an overlay extension point — submodules,
-`db/`, `cloudflared/`, `docs/`, `clusters/`, any local `values*.yaml`,
-lockfiles, the root `.venv/`, and README-style markdown — while
-allow-listing the runtime-loaded markdown under `.agents/skills/**` and
+`cloudflared/`, `docs/`, `tmp/`, any local `values*.yaml`, lockfiles,
+the root `.venv/`, and README-style markdown — while allow-listing the
+runtime-loaded markdown under `.agents/skills/**` and
 `services/**/SYSTEM_PROMPT.md`.
 
 **Credential hygiene:** per the
@@ -47,9 +45,10 @@ allow-listing the runtime-loaded markdown under `.agents/skills/**` and
 no credentials, secret values, `.env` files, or Helm values live in
 this repo. Tools request secrets through Centaur's secret system
 (`secret("…")` placeholders resolved by iron-proxy / iron-token-broker
-at the network boundary). Helm values for any cluster live in
-`clusters/centaur-lab/argocd/values/` (or in the sibling infra repo
-when you split that out).
+at the network boundary). Helm values for any cluster live in a
+sibling GitOps / infra repo (e.g. `centaur-lab-infra` shaped after
+[`paradigmxyz/centaur-acme-infra`](https://github.com/paradigmxyz/centaur-acme-infra)),
+not here.
 
 ## Prerequisites
 
@@ -132,19 +131,20 @@ docker run --rm centaur-overlay:dev sh -c 'ls /overlay && ls /overlay/tools /ove
 > `bootstrap-secrets` script that patches `centaur-infra-env`) used to
 > live in a root `Justfile`. They were removed to align this repo with
 > the [`paradigmxyz/centaur-acme`](https://github.com/paradigmxyz/centaur-acme)
-> overlay shape — cluster lifecycle ultimately lives in
-> [`clusters/centaur-lab/argocd/`](clusters/centaur-lab/) (Argo CD)
-> or in a sibling infra repo. The git history of `Justfile` on the
+> overlay shape — cluster lifecycle ultimately lives in a sibling
+> GitOps / infra repo (shaped after
+> [`paradigmxyz/centaur-acme-infra`](https://github.com/paradigmxyz/centaur-acme-infra)),
+> not in the overlay. The git history of `Justfile` on the
 > `chore/reorganize` branch is the canonical reference for any recipe
 > you want to bring back.
 
 For local laptop-cluster boot, the upstream submodule's `Justfile` covers
 most of what's needed. Provide your own `values.local.yaml` (gitignored)
 for any laptop-specific overrides — start from
-[`clusters/centaur-lab/argocd/values/centaur.yaml`](clusters/centaur-lab/argocd/values/centaur.yaml)
-and pare it down to your local environment (typically: drop image tags,
+[`.centaur/contrib/chart/values.dev.yaml`](.centaur/contrib/chart/values.dev.yaml)
+and add only the diffs you need for your local environment (typically:
 flip pull policies to `IfNotPresent`, point `repoCache.hostPath` at a
-local directory).
+local directory, set the overlay image tag).
 
 ```bash
 cd .centaur
@@ -267,16 +267,16 @@ Both workflows write to `company_context_documents`, which is BM25-indexed
 via paradedb — so persisted papers and briefs are immediately
 future-RAG-ready for retrieval across turns.
 
-## Migrating tests from `tests-old/`
+## Migrating legacy tests
 
-The pre-reorg per-tool/per-workflow test suites are staged in
-[`tests-old/`](tests-old/). To migrate one:
+The pre-reorg per-tool/per-workflow test suites are staged locally at
+`tmp/tests-old/` (gitignored). To migrate one:
 
 1. Copy the test file to `tests/`.
 2. Update its imports to be repo-rooted: `from tools.semantic_scholar.client import ...`,
    `from workflows.research_brief import handler`.
 3. Run `uv run pytest tests/<file>::<test>` and fix anything that breaks.
-4. `git rm` the old copy from `tests-old/`.
+4. Delete the old copy from `tmp/tests-old/` once it's been re-authored.
 
 The smoke test in [`tests/test_smoke.py`](tests/test_smoke.py) is the
 ACME-style template — keep new tests small, well-isolated, and prefer

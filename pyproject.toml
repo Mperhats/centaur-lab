@@ -10,6 +10,16 @@ license = "Apache-2.0 OR MIT"
 # ``tools/<name>/pyproject.toml`` at runtime — this list is the dev/test
 # mirror that lets a single root ``.venv`` import any tool or workflow
 # module the same way the API pod will.
+#
+# Note: ``centaur_sdk`` is intentionally NOT listed here. Upstream's
+# ``.centaur/centaur_sdk/pyproject.toml`` declares ``[tool.hatch.build.targets.wheel]
+# packages = ["."]`` which flattens module files into the wheel root,
+# so ``pip install`` / ``uv add`` produces a working dist-info but
+# ``from centaur_sdk import secret`` fails. The API pod sidesteps this
+# by mounting ``/app/centaur_sdk/`` and relying on cwd-based import
+# discovery; we mirror that locally by putting ``.centaur`` on the test
+# pythonpath below. Bumping the ``.centaur`` submodule pin updates the
+# SDK in lockstep with the API.
 dependencies = [
     "asyncpg>=0.30.0",
     "httpx>=0.27.0",
@@ -41,14 +51,15 @@ testpaths = ["tests"]
 # tests can import ``from tools.semantic_scholar.client import ...`` and
 # ``from workflows.research_brief import handler`` — byte-identical to
 # how the Centaur API pod resolves these at runtime via TOOL_DIRS /
-# WORKFLOW_DIRS bootstrap. ``.centaur`` exposes ``centaur_sdk``.
+# WORKFLOW_DIRS bootstrap. ``.centaur`` puts the upstream submodule on
+# sys.path so ``from centaur_sdk import secret`` resolves to the
+# submodule package — same pattern the API pod uses (cwd-based
+# discovery from ``/app``). See the ``dependencies`` comment above for
+# why centaur_sdk is NOT a normal pip dep.
 pythonpath = [".", ".centaur"]
 asyncio_mode = "strict"
 
-[tool.ruff]
-line-length = 100
-target-version = "py311"
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
-ignore = ["E501"]
+# ruff config lives in ./ruff.toml so it can also be used by per-tool
+# `uvx ruff check .` invocations from inside `tools/<name>/` — keeping
+# a duplicate `[tool.ruff]` block here would silently win over ruff.toml
+# in unrelated subdirs.
