@@ -28,6 +28,7 @@ from packages.bfts_sdk.config import (
     resolve_search_settings,
 )
 from packages.bfts_sdk.metric import score
+from packages.bfts_sdk.schema import assert_bfts_schema_present
 from packages.bfts_sdk.select import NodeRef, SearchConfig, select_next
 from packages.bfts_sdk.state import (
     insert_node,
@@ -135,6 +136,17 @@ def _root_id(row: dict[str, Any]) -> str:
 
 
 async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
+    # Pre-flight schema check (see ``bfts_root.handler`` for the full
+    # rationale). The parent already runs this when the tree is
+    # spawned via ``bfts_root``, but ``bfts_tree`` is also reachable
+    # standalone (tests, manual ``POST /api/workflows/...``), so the
+    # check is repeated here at no measurable cost — every BFTS table
+    # is queried with ``LIMIT 0``, which the planner short-circuits.
+    await ctx.step(
+        "preflight_schema_check",
+        lambda: assert_bfts_schema_present(ctx._pool),
+    )
+
     llm = resolve_llm_settings(
         draft_model=inp.draft_model,
         feedback_model=inp.feedback_model,

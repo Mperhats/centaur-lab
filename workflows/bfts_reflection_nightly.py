@@ -34,6 +34,7 @@ from packages.bfts_sdk.config import (
     DEFAULT_NUM_WORKERS,
 )
 from packages.bfts_sdk.hyperparams import insert_hyperparams, latest_hyperparams
+from packages.bfts_sdk.schema import assert_bfts_schema_present
 
 WORKFLOW_NAME = "bfts_reflection_nightly"
 
@@ -109,6 +110,17 @@ class Input:
 
 async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     pool = ctx._pool
+
+    # Pre-flight schema check (see ``bfts_root.handler``). The
+    # reflection workflow is the canonical case the schema-drift bug
+    # surfaced under: a missing ``bfts_hyperparams`` table here
+    # silently breaks every downstream BFTS run because
+    # ``resolve_search_config`` falls back to module defaults
+    # without telling the operator anything was wrong.
+    await ctx.step(
+        "preflight_schema_check",
+        lambda: assert_bfts_schema_present(pool),
+    )
 
     # v1 heuristic only inspects ``best_node_id`` (truthy ⇒ "good run").
     # The plan's wider SELECT was forward-looking; pulling

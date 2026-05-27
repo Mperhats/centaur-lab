@@ -19,6 +19,7 @@ member's deps into the dev ``.venv``.
 from __future__ import annotations
 
 import ast
+import re
 import sys
 import tomllib
 from pathlib import Path
@@ -193,6 +194,77 @@ def _has_import_error_handler(handlers: list[ast.ExceptHandler]) -> bool:
         return set()
 
     return any(targets & _names(h.type) for h in handlers)
+
+
+# Object-creation statements in overlay migrations must be idempotent so
+# that re-applying a file is a no-op when the object already exists. This
+# is defence-in-depth against the schema-drift state described in
+# ``docs/overlay-db-migrations.md`` ("Drift recovery") — without it, a
+# manual ``DELETE FROM schema_migrations_overlay`` recovery step would
+# fail with ``relation "X" already exists`` on objects that survived the
+# original drop.
+#
+# The check is a regex against ``-- migrate:up`` blocks because we don't
+# want to ship sqlglot just to validate three SQL files. Each pattern's
+# anchor is the SQL keyword that introduces a new object.
+_IDEMPOTENT_DDL_PATTERNS: tuple[tuple[str, str], ...] = (
+    (
+        r"(?im)^\s*CREATE\s+TABLE\s+(?!IF\s+NOT\s+EXISTS\b)",
+        "CREATE TABLE … must be CREATE TABLE IF NOT EXISTS …",
+    ),
+    (
+        r"(?im)^\s*CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?!IF\s+NOT\s+EXISTS\b)",
+        "CREATE INDEX … must be CREATE INDEX IF NOT EXISTS …",
+    ),
+    (
+        r"(?im)\bADD\s+COLUMN\s+(?!IF\s+NOT\s+EXISTS\b)",
+        "ADD COLUMN … must be ADD COLUMN IF NOT EXISTS …",
+    ),
+)
+
+
+def _migrate_up_block(sql: str) -> str:
+    """Return the ``-- migrate:up`` body of a dbmate migration file.
+
+    dbmate splits each file into ``-- migrate:up`` and ``-- migrate:down``
+    sections. We only require idempotency for the up direction; the down
+    direction is allowed to use plain ``DROP`` because manual rollback
+    via ``dbmate rollback`` always pairs the SQL with a stamp delete.
+    """
+    parts = re.split(
+        r"^\s*--\s*migrate:down\s*$", sql, flags=re.IGNORECASE | re.MULTILINE
+    )
+    return parts[0]
+
+
+def test_overlay_migrations_are_idempotent() -> None:
+    """Every ``-- migrate:up`` DDL must use ``IF NOT EXISTS``.
+
+    Catches the regression in `docs/overlay-db-migrations.md` ("Drift
+    recovery"): a non-idempotent migration cannot be re-applied after a
+    manual ``DELETE FROM schema_migrations_overlay`` step on the
+    "objects survived but stamp was cleared" half of the drift state
+    space, so the operator-facing recovery procedure breaks. Every new
+    overlay migration this CI gate sees must keep the property — the
+    failure message names the exact file + DDL keyword to fix.
+    """
+    migrations_dir = REPO_ROOT / "services" / "api" / "db" / "migrations"
+    failures: list[str] = []
+    for sql_path in sorted(migrations_dir.glob("*.sql")):
+        up_block = _migrate_up_block(sql_path.read_text())
+        for pattern, message in _IDEMPOTENT_DDL_PATTERNS:
+            for match in re.finditer(pattern, up_block):
+                line_no = up_block[: match.start()].count("\n") + 1
+                failures.append(
+                    f"{sql_path.relative_to(REPO_ROOT)}:{line_no} -- "
+                    f"{message}"
+                )
+    assert not failures, (
+        "Overlay migrations must use IF NOT EXISTS for all object "
+        "creation in the migrate:up direction (see "
+        "docs/overlay-db-migrations.md 'Drift recovery'):\n  "
+        + "\n  ".join(failures)
+    )
 
 
 def test_workflow_imports_satisfiable_in_api_pod() -> None:

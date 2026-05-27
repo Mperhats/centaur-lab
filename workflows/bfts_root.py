@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from api.workflow_engine import WorkflowContext
 
 from packages.bfts_sdk.config import resolve_llm_settings, resolve_search_config
+from packages.bfts_sdk.schema import assert_bfts_schema_present
 
 WORKFLOW_NAME = "bfts_root"
 
@@ -136,6 +137,21 @@ def _sandbox_id(*, run_id: str, tree_idx: int) -> str:
 
 
 async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
+    # Pre-flight: assert the overlay-owned BFTS tables exist BEFORE
+    # any DB-touching step. Catches the schema-drift state where
+    # ``schema_migrations_overlay`` says a table is applied but the
+    # table itself was dropped out-of-band (see ``packages.bfts_sdk
+    # .schema`` and ``docs/overlay-db-migrations.md`` "Drift
+    # recovery"). Without this guard, the failure surfaces deep
+    # inside ``resolve_search_config`` / ``insert_run`` as a
+    # confusing ``UndefinedTableError``; with it, the run aborts at
+    # iteration 0 with a message naming the missing table and the
+    # recovery procedure.
+    await ctx.step(
+        "preflight_schema_check",
+        lambda: assert_bfts_schema_present(ctx._pool),
+    )
+
     # Idea resolution happens BEFORE anything else: a defaulted toy idea
     # should win every downstream prompt the same way an operator-supplied
     # idea would, and the substitution must be visible in workflow logs so

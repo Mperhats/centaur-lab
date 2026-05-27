@@ -17,12 +17,15 @@
 -- The partial index on (parent_node_id) WHERE is_seed_node = TRUE makes
 -- ``list_seed_children(parent_node_id=$1)`` a single seek for the trailing
 -- aggregation step.
+--
+-- ``IF NOT EXISTS`` is defence-in-depth against out-of-band drift; see
+-- the same comment in ``20260525000001_add_bfts_tables.sql``.
 
 ALTER TABLE bfts_nodes
-    ADD COLUMN is_seed_node BOOLEAN NOT NULL DEFAULT FALSE,
-    ADD COLUMN seed         INT;
+    ADD COLUMN IF NOT EXISTS is_seed_node BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS seed         INT;
 
-CREATE INDEX bfts_nodes_seed_parent_idx
+CREATE INDEX IF NOT EXISTS bfts_nodes_seed_parent_idx
     ON bfts_nodes(parent_node_id)
     WHERE is_seed_node = TRUE;
 
