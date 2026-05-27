@@ -101,5 +101,4 @@ Override only when the user explicitly asks (e.g. "3 trees, 3 seeds each" →
 
 - Do not call `bfts_root` with only knobs and no `idea`.
 - Do not omit `bfts_run_input` after ideation — use the envelope field.
-- Do not tell users to watch only `#bfts-runs` unless thread delivery failed.
 - Do not burn budget on 4×2 parallel LLM burst when defaults are enough.
