@@ -12,6 +12,7 @@ See ``docs/bfts-phase5-orchestration.md`` (Phase 5a).
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import json
 import random
 import uuid
@@ -438,6 +439,24 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             ),
         )
         iters_used += 1
+
+        # Yield the workflow worker between iterations. Without this, the
+        # tree handler holds its worker continuously for the full
+        # ``max_iters`` x ~2-min/iter run (40-60 min), starving ``bfts_root``'s
+        # progress poller (which sleeps 90s between polls and needs a
+        # worker to re-claim). The 0-duration suspend persists a
+        # checkpoint with ``available_at = now`` and raises
+        # ``SuspendWorkflow``; the scheduler picks the most-overdue
+        # runnable next, which is normally ``bfts_root`` if its
+        # 90-second sleep elapsed during the iteration we just ran.
+        # ``iters_used - 1`` because the increment happened above; the
+        # checkpoint name pairs each yield with the iteration that
+        # produced it. Step name is per-iteration so workflow replay
+        # finds a distinct cache entry for each yield.
+        await ctx.sleep(
+            f"tree_iter_yield_{iters_used - 1}",
+            dt.timedelta(seconds=0),
+        )
 
     final_nodes = await ctx.step(
         "list_nodes_final", lambda: list_nodes_for_run(pool, run_id=inp.run_id)
