@@ -4,7 +4,7 @@ Design sketch for decoupling **tree control** from **node expansion** so BFTS st
 
 **Context:** Phase 4 (“Design B-lite”) fans each tree node out as a child workflow `bfts_expand_one`. That preserved per-LLM-call durability but multiplied `workflow_runs` rows and worker claims. On a single API pod / Mac dev cluster, `WORKFLOW_WORKER_CONCURRENCY` became the real scheduler — not sandbox count or `num_workers`.
 
-**Status:** proposal / sketch — not implemented.
+**Status:** Phase 5a implemented on branch `feat/bfts-phase5a-inline-expand` (in-tree expand only). Phase 5b/c and batch iron-proxy infra remain follow-ups — see `docs/bfts-batch-iron-proxy.md`.
 
 ---
 
@@ -203,7 +203,7 @@ Child-workflow `ChildWorkflowFailed` path goes away; failures are in-process exc
 
 `num_workers` becomes a **semaphore inside the tree**, not “number of workflow children.” Defaults stay `1` for research; operators can raise to `2` on clusters with higher proxy timeout and Anthropic quota.
 
-Optional: **global LLM semaphore** in `packages/bfts_sdk/llm.py` (env `BFTS_LLM_MAX_INFLIGHT`) across all trees on one API pod — second line of defense against 502 storms.
+Egress backpressure belongs at the **iron-proxy layer** (timeout, replicas, optional batch proxy) and in **`num_workers` / `num_drafts`**, not a global in-process LLM semaphore — see ``docs/bfts-batch-iron-proxy.md``.
 
 ### 5a.5 Tests
 
@@ -287,14 +287,13 @@ Slack: keep BFTS stream; add “iteration N, M nodes expanded” from tree (not 
 
 | Step | Deliverable | Risk |
 |------|-------------|------|
-| **5a.0** | `step_prefix` on `ExpandContext` + tests; no behavior change | Low |
-| **5a.1** | `BFTS_EXPAND_MODE=child\|inline` env; tree uses `inline` when set | Medium — feature flag |
-| **5a.2** | Default `inline` in `centaur-lab-infra`; deprecate child path | Medium |
-| **5a.3** | Remove child fan-out; keep `bfts_expand_one` for manual only | Low after bake-in |
+| **5a.0** | `step_prefix` on `ExpandContext` + tests | Low |
+| **5a.1** | In-tree expand in `bfts_tree`; remove child fan-out | Medium |
+| **5a.2** | Keep `bfts_expand_one` for manual replay only | Low |
 | **5b** | Optional worker Deployment + upstream claim filter | Infra + upstream |
 | **5c** | Job queue | High — separate project |
 
-**Rollback:** set `BFTS_EXPAND_MODE=child` to restore Phase 4 behavior without redeploying schema.
+**Rollback:** revert overlay deploy to pre-5a image (git revert), not an env toggle.
 
 ---
 
@@ -331,4 +330,4 @@ Phase 5a is **not** “fix Mac code” — it fixes an **architectural unit of w
 | **5c** | Job queue for cluster-scale expand |
 | **Infra** | Proxy timeout + (optional) more tree-worker replicas |
 
-**Recommendation:** implement **5a** first behind `BFTS_EXPAND_MODE`; validate on dev cluster with `num_workers=2` and VictoriaLogs proxy timeout rate; then default inline and delete child fan-out from `bfts_tree`.
+**Recommendation:** ship **5a** (in-tree expand only); validate on dev cluster with VictoriaLogs proxy timeout rate; raise iron-proxy upstream timeout in infra.

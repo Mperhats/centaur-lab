@@ -72,6 +72,7 @@ ENV_NUM_DRAFTS = "BFTS_NUM_DRAFTS"
 ENV_NUM_WORKERS = "BFTS_NUM_WORKERS"
 ENV_PRIOR_ATTEMPTS_WINDOW = "BFTS_PRIOR_ATTEMPTS_WINDOW"
 ENV_NUM_SEEDS = "BFTS_NUM_SEEDS"
+ENV_LLM_HTTPS_PROXY = "BFTS_LLM_HTTPS_PROXY"
 
 
 def _env_knob(name: str) -> str | None:
@@ -440,3 +441,19 @@ def api_key_secret_for_model(model: str) -> str:
 def resolve_api_key_for_model(model: str) -> str:
     """Placeholder API key for a vision/chat model string."""
     return resolve_llm_api_key(api_key_secret_for_model(model))
+
+
+def resolve_llm_https_proxy() -> str | None:
+    """Optional batch iron-proxy URL for BFTS-owned LLM httpx clients.
+
+    When set via ``BFTS_LLM_HTTPS_PROXY`` (Helm ``api.extraEnv``), expand and
+    VLM calls route through a dedicated proxy pool (longer upstream timeout)
+    instead of the pod's default ``HTTPS_PROXY`` interactive pool.
+
+    Returns ``None`` when unset so callers defer to httpx's normal
+    ``HTTPS_PROXY`` env behavior.
+    """
+    raw = _env_knob(ENV_LLM_HTTPS_PROXY)
+    if raw is None or not str(raw).strip():
+        return None
+    return str(raw).strip()

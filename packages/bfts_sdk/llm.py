@@ -23,6 +23,8 @@ from typing import Any
 
 import httpx
 
+from packages.bfts_sdk.config import resolve_llm_https_proxy
+
 _ANTHROPIC_VERSION = "2023-06-01"
 _OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
 _ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
@@ -41,6 +43,14 @@ adding the ``backoff`` package as a dep."""
 
 _RETRY_BASE_DELAY_S = 1.0
 """Initial backoff. Doubles each retry: 1s, 2s, 4s."""
+
+
+def llm_http_client(timeout: float) -> httpx.AsyncClient:
+    """Outbound client for provider APIs via iron-proxy."""
+    proxy = resolve_llm_https_proxy()
+    if proxy is None:
+        return httpx.AsyncClient(timeout=timeout)
+    return httpx.AsyncClient(timeout=timeout, proxy=proxy)
 
 
 async def _post_with_retry(
@@ -176,7 +186,7 @@ async def _call_with_function_openai(
             "function": {"name": function_spec["function"]["name"]},
         },
     }
-    async with httpx.AsyncClient(timeout=call.timeout) as client:
+    async with llm_http_client(call.timeout) as client:
         resp = await _post_with_retry(
             client,
             _OPENAI_CHAT_URL,
@@ -213,7 +223,7 @@ async def _call_with_function_anthropic(
         "tools": [tool],
         "tool_choice": {"type": "tool", "name": tool["name"]},
     }
-    async with httpx.AsyncClient(timeout=call.timeout) as client:
+    async with llm_http_client(call.timeout) as client:
         resp = await _post_with_retry(
             client,
             _ANTHROPIC_MESSAGES_URL,
@@ -244,7 +254,7 @@ async def _call_for_text_openai(call: LLMCall) -> str:
         "max_tokens": call.max_tokens,
         "messages": [{"role": "user", "content": call.prompt}],
     }
-    async with httpx.AsyncClient(timeout=call.timeout) as client:
+    async with llm_http_client(call.timeout) as client:
         resp = await _post_with_retry(
             client,
             _OPENAI_CHAT_URL,
@@ -267,7 +277,7 @@ async def _call_for_text_anthropic(call: LLMCall) -> str:
         "max_tokens": call.max_tokens,
         "messages": [{"role": "user", "content": call.prompt}],
     }
-    async with httpx.AsyncClient(timeout=call.timeout) as client:
+    async with llm_http_client(call.timeout) as client:
         resp = await _post_with_retry(
             client,
             _ANTHROPIC_MESSAGES_URL,

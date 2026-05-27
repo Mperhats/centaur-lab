@@ -596,6 +596,8 @@ Symptoms on a busy dev cluster:
 api:
   extraEnv:
     WORKFLOW_WORKER_CONCURRENCY: "4"   # not 16 on laptop/single-node clusters
+    # Optional: route BFTS expand + VLM LLM calls through a batch iron-proxy pool
+    # BFTS_LLM_HTTPS_PROXY: "http://centaur-batch-proxy.centaur-system.svc:8080"
     # BFTS parallelism (also defaults in packages/bfts_sdk/research.py):
     # num_drafts=2, num_workers=1, num_seeds=3 via bfts_research / build_bfts_run_input
 ```
@@ -605,7 +607,8 @@ api:
 1. Lower `WORKFLOW_WORKER_CONCURRENCY` so short workflows (`ideation`, `save_papers`) get slots.
 2. Avoid many overlapping `bfts_root` runs on one API pod.
 3. Raise iron-proxy upstream timeout above 30s in the Centaur chart (infra-owned; overlay cannot fix from centaur-lab alone).
-4. `packages/bfts_sdk/llm.py` retries 502 but cannot outrun a hard proxy cap.
+4. Set `BFTS_LLM_HTTPS_PROXY` to a dedicated batch proxy Service once deployed (see `docs/bfts-batch-iron-proxy.md`).
+5. `packages/bfts_sdk/llm.py` retries 502 but cannot outrun a hard proxy cap.
 
 ---
 
