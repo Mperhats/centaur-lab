@@ -3,26 +3,25 @@
 #
 # Why its own workflow:
 #   The executor image's only real input is ``Dockerfile.bfts-executor``
-#   (pinned numpy/matplotlib/scikit-learn/torch, no overlay code), so its
-#   release cadence is the Dockerfile, not the overlay. Co-publishing it
-#   with the overlay job (the previous arrangement) caused every overlay
-#   commit to silently produce a new executor image even when nothing
-#   about the executor changed.
+#   (pinned numpy/matplotlib/scikit-learn/torch, no overlay code), so
+#   its release cadence is the Dockerfile, not the overlay. Co-publishing
+#   it with the overlay job (the original arrangement) republished the
+#   executor on every overlay commit even when nothing about the
+#   Dockerfile changed; the path filter on this workflow gates rebuilds
+#   to the recipe.
 #
-# Why ``df-<hash>`` instead of ``sha-<commit>``:
-#   The tag is the SHA-256 of ``Dockerfile.bfts-executor`` itself. Same
-#   recipe ⇒ same tag ⇒ immutable per recipe; sandbox pulls become
-#   reproducible across overlay-only changes. ``hashFiles`` here returns
-#   the same SHA-256 as ``shasum -a 256 Dockerfile.bfts-executor``, so
-#   the literal hardcoded in ``tools/bfts_executor/client.py`` matches
-#   the GHCR tag this workflow publishes.
-#
-# Why no ``:latest``:
-#   The previous setup combined ``:latest`` with a default of
-#   ``...:latest`` in ``client.py``, which meant every sandbox pull was
-#   non-deterministic and could land on whichever build finished last.
-#   Dropping the mutable tag plus pinning the default to ``df-<hash>``
-#   removes the drift entirely.
+# Tagging strategy:
+#   ``type=sha`` (e.g. ``sha-<commit>``) — tracks the commit that built
+#   the image, matches the overlay image's tag convention, and the tag
+#   is generated automatically by ``docker/metadata-action`` so there's
+#   no literal in code that has to stay in sync with anything. ``:latest``
+#   is also emitted on the default branch for dev/local; production
+#   overrides via ``BFTS_EXECUTOR_IMAGE`` in Helm ``api.extraEnv`` to a
+#   specific ``sha-<commit>`` so prod is pinned regardless of when CI
+#   last republished. The actual reproducibility guarantee for the
+#   image content lives in the Dockerfile's exact dep pins
+#   (``numpy==1.26.4`` etc.); the tag is the addressing layer, not the
+#   reproducibility layer.
 #
 # Why amd64-only:
 #   ``Dockerfile.bfts-executor`` pins ``torch ... ; platform_machine=='x86_64'``
@@ -78,7 +77,8 @@ jobs:
           flavor: |
             latest=false
           tags: |
-            type=raw,value=df-${{ hashFiles('Dockerfile.bfts-executor') }}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha
           labels: |
             org.opencontainers.image.title=bfts-executor
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
