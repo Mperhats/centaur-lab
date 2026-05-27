@@ -12,7 +12,11 @@ import asyncpg
 import httpx
 
 from centaur_sdk import secret
-from tools.semantic_scholar.projections.brief import build_brief_document, render_brief
+from tools.semantic_scholar.projections.brief import (
+    build_brief_document,
+    render_brief,
+    render_brief_compact,
+)
 from tools.semantic_scholar.projections.paper import build_paper_document
 from tools.semantic_scholar.utils import canonical_json, content_hash
 
@@ -607,6 +611,7 @@ class SemanticScholarClient:
 
         effective_limit = limit if limit is not None else len(papers)
         markdown = render_brief(query, year_from, papers)
+        compact_markdown = render_brief_compact(query, papers)
         brief_doc = build_brief_document(query, year_from, effective_limit, papers, markdown)
 
         conn = await self._connect()
@@ -644,6 +649,7 @@ class SemanticScholarClient:
                 "papers_updated": papers_updated,
                 "papers_noop": papers_noop,
                 "markdown": markdown,
+                "compact_markdown": compact_markdown,
             }
         finally:
             await conn.close()

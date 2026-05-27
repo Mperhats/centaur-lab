@@ -24,6 +24,8 @@ from typing import Any
 from tools.semantic_scholar.utils import canonical_json, content_hash
 
 _BRIEF_ABSTRACT_TRUNCATE = 500
+_SLACK_BRIEF_ABSTRACT_CHARS = 120
+_SLACK_BRIEF_MAX_PAPERS = 6
 _BRIEF_TITLE_QUERY_TRUNCATE = 80
 _BRIEF_ID_HEX_LEN = 16
 _BRIEF_MAX_AUTHORS_INLINE = 3
@@ -114,6 +116,35 @@ def render_brief(query: str, year_from: int | None, papers: list[dict[str, Any]]
                 "",
             ]
         )
+    return "\n".join(lines)
+
+
+def render_brief_compact(
+    query: str,
+    papers: list[dict[str, Any]],
+    *,
+    max_papers: int = _SLACK_BRIEF_MAX_PAPERS,
+) -> str:
+    """Short Slack-friendly lit review (title + numbered one-liners)."""
+    display_query = _normalize_oneline(query)
+    if not papers:
+        return f"**Research brief** — {display_query}\n\n_No papers found._"
+
+    lines = [
+        f"**Research brief** — {display_query}",
+        f"_{min(len(papers), max_papers)} of {len(papers)} top hits_",
+        "",
+    ]
+    for index, paper in enumerate(papers[:max_papers], start=1):
+        title = _normalize_oneline(str(paper.get("title") or "Untitled"))
+        year = paper.get("year")
+        year_text = f" ({year})" if isinstance(year, int) else ""
+        abstract = (paper.get("abstract") or "").strip()
+        if len(abstract) > _SLACK_BRIEF_ABSTRACT_CHARS:
+            abstract = abstract[: _SLACK_BRIEF_ABSTRACT_CHARS - 1].rstrip() + "…"
+        if not abstract:
+            abstract = "_No abstract._"
+        lines.append(f"{index}. **{title}**{year_text} — {abstract}")
     return "\n".join(lines)
 
 

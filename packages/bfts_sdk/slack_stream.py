@@ -134,22 +134,39 @@ async def close_session(
     await ctx.step(step_name, _done)
 
 
+def format_research_stream_intro(topic: str) -> str:
+    """Opening copy for the ideation Slack stream (message 1 of 2)."""
+    topic_line = topic.strip()
+    return (
+        "**Step 1 of 2 — Research**\n"
+        f"Literature review and experiment idea for _{topic_line}_. "
+        "BFTS tree search starts in a **separate message** when this finishes."
+    )
+
+
+def format_bfts_stream_intro(idea_title: str) -> str:
+    """Opening copy for the BFTS Slack stream (message 2 of 2)."""
+    label = idea_title.strip() or "(untitled)"
+    return (
+        "**Step 2 of 2 — BFTS**\n"
+        f"Long-running tree search for **{label}**. Live progress below."
+    )
+
+
 def format_idea_markdown(idea: dict[str, Any]) -> str:
-    """Short structured idea block for the ideation stream."""
+    """Compact structured idea block for the ideation stream."""
     title = idea.get("Title") or idea.get("Name") or "(untitled)"
-    hypothesis = idea.get("Short Hypothesis") or ""
+    hypothesis = (idea.get("Short Hypothesis") or "").strip()
     experiments = idea.get("Experiments") or []
     exp_lines: list[str] = []
     if isinstance(experiments, list):
-        exp_lines = [f"- {x}" for x in experiments if x]
+        exp_lines = [str(x).strip() for x in experiments if x]
     elif experiments:
-        exp_lines = [f"- {experiments}"]
-    parts = [
-        "### Research idea",
-        f"**{title}**",
-        "",
-        hypothesis,
-    ]
+        exp_lines = [str(experiments).strip()]
+    parts = ["**Research idea**", f"**{title}**"]
+    if hypothesis:
+        parts.append(hypothesis)
     if exp_lines:
-        parts.extend(["", "**Experiments**", *exp_lines[:5]])
+        parts.append("")
+        parts.extend(f"• {line}" for line in exp_lines[:4])
     return "\n".join(parts)

@@ -11,7 +11,6 @@ Falls back to plain ``send_message`` when ``SLACKBOT_URL`` is unset.
 """
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -22,7 +21,9 @@ from packages.bfts_sdk.research import build_bfts_run_input
 from packages.bfts_sdk.slack_delivery import resolve_slack_delivery
 from packages.bfts_sdk.slack_stream import (
     close_session,
+    format_bfts_stream_intro,
     format_idea_markdown,
+    format_research_stream_intro,
     open_session,
     post_markdown,
     post_step,
@@ -33,7 +34,7 @@ from workflows.ideation import _child_workflow_output
 WORKFLOW_NAME = "bfts_research"
 SCHEDULE: dict[str, Any] = {}
 
-_DEFAULT_BRIEF_LIMIT = 10
+_DEFAULT_BRIEF_LIMIT = 6
 
 
 @dataclass
@@ -62,15 +63,17 @@ async def _run_research_brief(
     topic: str,
     limit: int,
 ) -> dict[str, Any]:
-    """Persisted research brief with full markdown (tool, not workflow envelope)."""
+    """Persisted research brief via checkpointed ``ctx.tools`` (async proxy)."""
 
-    def _call() -> dict[str, Any]:
-        return ctx.tools.semantic_scholar.research_brief(
+    # ``ctx.tools.*`` returns a coroutine; do not wrap in ``asyncio.to_thread``
+    # (that checkpoints an unawaited coroutine → JSON serialize failure).
+    return await ctx.step(
+        "research_brief",
+        lambda: ctx.tools.semantic_scholar.research_brief(
             query=topic,
             limit=limit,
-        )
-
-    return await ctx.step("research_brief", lambda: asyncio.to_thread(_call))
+        ),
+    )
 
 
 async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
@@ -97,24 +100,35 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             delivery=delivery,
             thread_key=thread_key,
             metadata=metadata,
-            title="Research ideation",
-            header="scientist · literature",
+            title="Research brief & idea",
+            header="scientist · research",
             step_name="open_slack_ideation_stream",
         )
-        await post_step(
-            ctx,
-            ideation_session,
-            step_id="literature",
-            title="Literature search",
-            status="in_progress",
-            details=f"Topic: {topic}",
-            step_name="stream_literature_start",
-        )
+        if ideation_session:
+            await post_markdown(
+                ctx,
+                ideation_session,
+                format_research_stream_intro(topic),
+                step_name="stream_ideation_intro",
+            )
+            await post_step(
+                ctx,
+                ideation_session,
+                step_id="literature",
+                title="Literature search",
+                status="in_progress",
+                details=f"Topic: {topic}",
+                step_name="stream_literature_start",
+            )
 
     brief_result = await _run_research_brief(ctx, topic=topic, limit=brief_limit)
     brief_markdown = ""
-    if isinstance(brief_result, dict) and brief_result.get("status") == "success":
-        brief_markdown = str(brief_result.get("markdown") or "")
+    if isinstance(brief_result, dict) and brief_result.get("status") == "completed":
+        brief_markdown = str(
+            brief_result.get("compact_markdown")
+            or brief_result.get("markdown")
+            or ""
+        )
         if ideation_session:
             await post_step(
                 ctx,
@@ -237,6 +251,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
 
     slack_stream_session_id: str | None = None
     if use_stream and delivery:
+        idea_title = str(idea.get("Title") or idea.get("Name") or "")
         bfts_session = await open_session(
             ctx,
             delivery=delivery,
@@ -249,6 +264,12 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         if bfts_session:
             slack_stream_session_id = bfts_session.session_id
             bfts_run_input["slack_stream_session_id"] = slack_stream_session_id
+            await post_markdown(
+                ctx,
+                bfts_session,
+                format_bfts_stream_intro(idea_title),
+                step_name="stream_bfts_intro",
+            )
 
     bfts_child = await ctx.start_workflow(
         "start_bfts_root",

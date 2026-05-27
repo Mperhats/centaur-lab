@@ -33,11 +33,15 @@ call workflow run '{
 Sandbox `call workflow run` sends `X-Centaur-Thread-Key`; pass `thread_key` /
 `delivery` in input when the API pin lacks header enrichment.
 
-Tell the user **`bfts_run_id`** once when `bfts_research` completes (~minutes).
-**Do not** poll workflows for hours. **Do not** post your own kickoff/progress
-Slack messages — the workflows stream them.
+After starting `bfts_research`, run **one** `call workflow get <run_id>` when
+the user asks for status or you need `bfts_run_id` / the idea (~2–5 minutes).
+Report `output_json.bfts_run_id` and the idea title on success, or `error_text`
+on failure. **Do not** poll for hours. **Do not** promise a follow-up you will
+not deliver.
 
-**Do not** poll `workflow get` for hours.
+**Do not** post your own kickoff/progress Slack messages — the workflows stream
+them when `thread_key` / delivery are present (sandbox sends
+`X-Centaur-Thread-Key`).
 
 ## Manual two-step path (ideation → bfts_root)
 

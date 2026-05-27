@@ -584,10 +584,7 @@ async def _post_slack_kickoff(
     )
     if stream:
         prefix = slack_mention_prefix(delivery or {})
-        text = (
-            f"{prefix}**BFTS tree search** `{run_id}`\n"
-            f"Idea: {label}\n{config_line}"
-        )
+        text = f"{prefix}**BFTS** `{run_id}` — {label}\n{config_line}"
         await post_markdown(
             ctx, stream, text, step_name="stream_bfts_kickoff_md",
         )
