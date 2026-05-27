@@ -57,11 +57,19 @@ license = "Apache-2.0 OR MIT"
 # explicitly NOT a workspace member because the upstream pyproject
 # there is not opted out of building and would confuse uv.
 
+# ``tools/personas/`` is a category dir (no pyproject.toml at its root —
+# matches upstream ``.centaur/tools/personas/`` shape) whose CHILDREN are
+# the registerable persona entries. We exclude the category dir itself
+# from the workspace and add ``tools/personas/*`` so each persona child
+# becomes a workspace member, mirroring the auto-discovery semantics of
+# the flat ``tools/*`` glob.
 [tool.uv.workspace]
 members = [
     "tools/*",
+    "tools/personas/*",
     "packages/bfts_sdk",
 ]
+exclude = ["tools/personas"]
 
 # This repo is a Docker image build context, not a publishable Python
 # distribution — tell uv not to build the overlay itself.
