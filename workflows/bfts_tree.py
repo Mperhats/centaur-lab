@@ -1,16 +1,13 @@
 """Workflow: BFTS tree controller (Stage 1 only).
 
 Loops:
-  select_next → insert placeholder rows → expand selected nodes
-  (inline inside this workflow when ``BFTS_EXPAND_MODE=inline``, or
-  fan out ``bfts_expand_one`` child workflows when ``=child``)
-  → re-query DB → check terminate.
+  select_next → insert placeholder rows → expand selected nodes in-process
+  (bounded by ``num_workers``) → re-query DB → check terminate.
 
 Terminate when ≥1 good_node exists (Sakana stage-1 completion rule,
 agent_manager.py:434-442) OR iters_used >= max_iters.
 
-See ``docs/bfts-phase5-orchestration.md`` (Phase 5a) and
-``docs/superpowers/plans/2026-05-26-bfts-phase4.md`` (Phase 4h).
+See ``docs/bfts-phase5-orchestration.md`` (Phase 5a).
 """
 from __future__ import annotations
 
@@ -26,8 +23,6 @@ if TYPE_CHECKING:
 
 from packages.bfts_sdk.config import (
     DEFAULT_METRIC_REDUCER,
-    EXPAND_MODE_INLINE,
-    resolve_expand_mode,
     resolve_llm_api_key,
     resolve_llm_settings,
     resolve_search_settings,
@@ -141,67 +136,7 @@ def _root_id(row: dict[str, Any]) -> str:
     return row["node_id"] if row.get("parent_node_id") is None else (row.get("parent_node_id") or "ROOT")
 
 
-async def _run_iteration_expansions_child(
-    *,
-    ctx: WorkflowContext,
-    pool: Any,
-    inp: Input,
-    prepared: list[tuple[str, dict[str, Any] | None]],
-    llm: Any,
-    search: Any,
-) -> None:
-    """Phase 4: fan out one ``bfts_expand_one`` child workflow per node."""
-    children: list[tuple[str, dict[str, Any]]] = []
-    for node_id, parent_row in prepared:
-        child_run_id = f"{inp.run_id}:expand:{node_id}"
-        child = await ctx.start_workflow(
-            f"start_expand_{node_id}",
-            workflow_name="bfts_expand_one",
-            run_input={
-                "run_id": inp.run_id,
-                "node_id": node_id,
-                "sandbox_id": inp.sandbox_id,
-                "working_dir": f"node_{node_id[:8]}",
-                "parent_node": parent_row,
-                "idea": inp.idea,
-                "llm_api_key_secret": llm.llm_api_key_secret,
-                "draft_model": llm.draft_model,
-                "feedback_model": llm.feedback_model,
-                "vlm_model": llm.vlm_model,
-                "prior_attempts_window": search.prior_attempts_window,
-            },
-            trigger_key=child_run_id,
-            eager_start=True,
-        )
-        children.append((node_id, child))
-
-    for node_id, child in children:
-        result = await ctx.wait_for_workflow(
-            f"wait_expand_{node_id}", run_id=child["run_id"]
-        )
-        child_status = (result or {}).get("status")
-        if child_status in ("failed", "failed_permanent", "cancelled"):
-            child_error = (result or {}).get("error") or (result or {}).get(
-                "error_text"
-            )
-            await ctx.step(
-                f"mark_failed_{node_id}",
-                lambda nid=node_id, st=child_status, err=child_error: (
-                    mark_node_failed(
-                        pool,
-                        node_id=nid,
-                        exc_type="ChildWorkflowFailed",
-                        exc_info={"child_status": st, "error": err},
-                        analysis=(
-                            f"bfts_expand_one terminated with "
-                            f"status={st}"
-                        ),
-                    )
-                ),
-            )
-
-
-async def _run_iteration_expansions_inline(
+async def _run_iteration_expansions(
     *,
     ctx: WorkflowContext,
     pool: Any,
@@ -211,7 +146,7 @@ async def _run_iteration_expansions_inline(
     search: Any,
     llm_api_key: str,
 ) -> None:
-    """Phase 5a: run up to ``num_workers`` expansions inside this workflow."""
+    """Run up to ``num_workers`` node expansions inside this workflow."""
     sem = asyncio.Semaphore(search.num_workers)
 
     async def _run_one(node_id: str, parent_row: dict[str, Any] | None) -> None:
@@ -231,7 +166,6 @@ async def _run_iteration_expansions_inline(
                     feedback_model=llm.feedback_model,
                     vlm_model=llm.vlm_model,
                     prior_attempts_window=search.prior_attempts_window,
-                    inline=True,
                 )
             except Exception as exc:
                 await ctx.step(
@@ -241,7 +175,7 @@ async def _run_iteration_expansions_inline(
                         node_id=nid,
                         exc_type=type(err).__name__,
                         exc_info={"error": str(err)},
-                        analysis=f"inline expand failed: {err}",
+                        analysis=f"expand failed: {err}",
                     ),
                 )
 
@@ -250,87 +184,7 @@ async def _run_iteration_expansions_inline(
     )
 
 
-async def _run_seed_evaluations_child(
-    *,
-    ctx: WorkflowContext,
-    pool: Any,
-    inp: Input,
-    best: dict[str, Any],
-    llm: Any,
-    search: Any,
-) -> None:
-    seed_children: list[tuple[str, dict[str, Any]]] = []
-    for seed_idx in range(search.num_seeds):
-        seed_node_id = (
-            f"{inp.run_id}-seed-{seed_idx}"
-            .replace("_", "-").replace(":", "-").lower()
-        )
-        child_run_id = f"{inp.run_id}:seed:{seed_idx}"
-        await ctx.step(
-            f"insert_seed_node_{seed_idx}",
-            lambda nid=seed_node_id, s=seed_idx: insert_node(
-                pool,
-                node_id=nid,
-                run_id=inp.run_id,
-                parent_node_id=best["node_id"],
-                step=99000 + s,
-                stage_name="seed",
-                plan=f"seed re-eval {s}",
-                code=best["code"],
-                is_seed_node=True,
-                seed=s,
-            ),
-        )
-        child = await ctx.start_workflow(
-            f"start_seed_{seed_idx}",
-            workflow_name="bfts_expand_one",
-            run_input={
-                "run_id": inp.run_id,
-                "node_id": seed_node_id,
-                "sandbox_id": inp.sandbox_id,
-                "working_dir": f"seed_{seed_idx}",
-                "parent_node": best,
-                "idea": inp.idea,
-                "llm_api_key_secret": llm.llm_api_key_secret,
-                "draft_model": llm.draft_model,
-                "feedback_model": llm.feedback_model,
-                "vlm_model": llm.vlm_model,
-                "prior_attempts_window": 0,
-                "seed_override": seed_idx,
-                "is_seed_node": True,
-            },
-            trigger_key=child_run_id,
-            eager_start=True,
-        )
-        seed_children.append((seed_node_id, child))
-
-    for nid, child in seed_children:
-        seed_result = await ctx.wait_for_workflow(
-            f"wait_seed_{nid}", run_id=child["run_id"]
-        )
-        seed_status = (seed_result or {}).get("status")
-        if seed_status in ("failed", "failed_permanent", "cancelled"):
-            seed_error = (seed_result or {}).get("error") or (
-                seed_result or {}
-            ).get("error_text")
-            await ctx.step(
-                f"mark_seed_failed_{nid}",
-                lambda nid=nid, st=seed_status, err=seed_error: (
-                    mark_node_failed(
-                        pool,
-                        node_id=nid,
-                        exc_type="ChildWorkflowFailed",
-                        exc_info={"child_status": st, "error": err},
-                        analysis=(
-                            f"seed bfts_expand_one terminated with "
-                            f"status={st}"
-                        ),
-                    )
-                ),
-            )
-
-
-async def _run_seed_evaluations_inline(
+async def _run_seed_evaluations(
     *,
     ctx: WorkflowContext,
     pool: Any,
@@ -379,7 +233,6 @@ async def _run_seed_evaluations_inline(
                     vlm_model=llm.vlm_model,
                     prior_attempts_window=0,
                     seed_override=seed_idx,
-                    inline=True,
                 )
             except Exception as exc:
                 await ctx.step(
@@ -389,7 +242,7 @@ async def _run_seed_evaluations_inline(
                         node_id=nid,
                         exc_type=type(err).__name__,
                         exc_info={"error": str(err)},
-                        analysis=f"inline seed expand failed: {err}",
+                        analysis=f"seed expand failed: {err}",
                     ),
                 )
 
@@ -417,7 +270,6 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         llm_api_key_secret=inp.llm_api_key_secret,
     )
     llm_api_key = resolve_llm_api_key(llm.llm_api_key_secret)
-    expand_mode = resolve_expand_mode()
     # Phase 4c.4: tree resolves all five search-policy fields through
     # the sync (no-DB) resolver. On the happy path bfts_root has
     # already forwarded resolved values via Input, so this is a
@@ -471,7 +323,6 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                 "feedback_model": llm.feedback_model,
                 "vlm_model": llm.vlm_model,
                 "metric_reducer": search.metric_reducer,
-                "expand_mode": expand_mode,
                 "sources": asdict(sources),
             },
             seed=inp.seed,
@@ -500,12 +351,11 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             break
 
         # Insert one bfts_nodes row per selection up-front. The
-        # placeholder is required so the child workflow's
-        # ``update_node_metric`` has an existing row to update; if a
-        # child crashes between ``expand_node`` success and
-        # ``update_node_metric`` success, replay re-runs from the
-        # cached ``expand_node`` step and writes the update on retry.
-        # The placeholder stays until then.
+        # placeholder is required so ``update_node_metric`` has an
+        # existing row to update; if expansion fails between
+        # ``expand_node`` success and ``update_node_metric`` success,
+        # replay re-runs from the cached ``expand_node`` step and writes
+        # the update on retry.
         prepared: list[tuple[str, dict[str, Any] | None]] = []
         for i, sel in enumerate(selections):
             parent_id = sel.node_id if sel is not None else None
@@ -567,25 +417,15 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                 ),
             )
 
-        if expand_mode == EXPAND_MODE_INLINE:
-            await _run_iteration_expansions_inline(
-                ctx=ctx,
-                pool=pool,
-                inp=inp,
-                prepared=prepared,
-                llm=llm,
-                search=search,
-                llm_api_key=llm_api_key,
-            )
-        else:
-            await _run_iteration_expansions_child(
-                ctx=ctx,
-                pool=pool,
-                inp=inp,
-                prepared=prepared,
-                llm=llm,
-                search=search,
-            )
+        await _run_iteration_expansions(
+            ctx=ctx,
+            pool=pool,
+            inp=inp,
+            prepared=prepared,
+            llm=llm,
+            search=search,
+            llm_api_key=llm_api_key,
+        )
 
         # All expansions in this iteration finished — their ``exec_python``
         # calls are done and we don't touch the sandbox again until the
@@ -681,25 +521,15 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
                 sandbox_id=inp.sandbox_id
             ),
         )
-        if expand_mode == EXPAND_MODE_INLINE:
-            await _run_seed_evaluations_inline(
-                ctx=ctx,
-                pool=pool,
-                inp=inp,
-                best=best,
-                llm=llm,
-                search=search,
-                llm_api_key=llm_api_key,
-            )
-        else:
-            await _run_seed_evaluations_child(
-                ctx=ctx,
-                pool=pool,
-                inp=inp,
-                best=best,
-                llm=llm,
-                search=search,
-            )
+        await _run_seed_evaluations(
+            ctx=ctx,
+            pool=pool,
+            inp=inp,
+            best=best,
+            llm=llm,
+            search=search,
+            llm_api_key=llm_api_key,
+        )
         seed_rows = await ctx.step(
             "list_seed_children",
             lambda: list_seed_children(pool, parent_node_id=best["node_id"]),

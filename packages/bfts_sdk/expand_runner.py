@@ -1,7 +1,8 @@
-"""Shared node-expansion runner for ``bfts_expand_one`` and inline ``bfts_tree``.
+"""Shared node-expansion runner for ``bfts_tree`` and standalone ``bfts_expand_one``.
 
-Phase 5a runs the same pipeline inside the tree workflow (namespaced
-``ctx.step`` checkpoints) instead of fanning out child workflow runs.
+Runs the expand pipeline with per-node namespaced ``ctx.step`` checkpoints
+(``load_prior_{id8}``, ``expand_{id8}_draft_propose``, …) so parallel
+siblings inside one tree workflow do not collide in ``workflow_checkpoints``.
 """
 from __future__ import annotations
 
@@ -32,26 +33,13 @@ async def run_expand_for_node(
     vlm_model: str,
     prior_attempts_window: int | None,
     seed_override: int | None = None,
-    inline: bool = False,
 ) -> dict[str, Any]:
-    """Load memory, run ``expand_node``, persist ``bfts_nodes`` updates.
-
-    When ``inline=True`` (Phase 5a), outer step names and
-    ``ExpandContext.step_prefix`` are namespaced by ``node_id[:8]`` so
-    parallel siblings inside one ``bfts_tree`` run do not collide in
-    ``workflow_checkpoints``.
-    """
+    """Load memory, run ``expand_node``, persist ``bfts_nodes`` updates."""
     node_id8 = node_id[:8]
-    if inline:
-        load_step = f"load_prior_{node_id8}"
-        update_step = f"update_node_{node_id8}"
-        plots_step = f"mark_buggy_plots_{node_id8}"
-        expand_step_prefix = f"expand_{node_id8}_"
-    else:
-        load_step = "load_prior_attempts"
-        update_step = "update_node"
-        plots_step = "mark_buggy_plots"
-        expand_step_prefix = ""
+    load_step = f"load_prior_{node_id8}"
+    update_step = f"update_node_{node_id8}"
+    plots_step = f"mark_buggy_plots_{node_id8}"
+    expand_step_prefix = f"expand_{node_id8}_"
 
     window = (
         prior_attempts_window

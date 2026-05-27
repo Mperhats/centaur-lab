@@ -127,11 +127,10 @@ class ExpandContext:
     # unchanged so seed nodes get the same persisted shape as a
     # normal expansion (metric_json / is_buggy / etc.).
     seed_override: int | None = None
-    # Phase 5a: when multiple ``expand_node`` calls run inside one
-    # ``bfts_tree`` workflow, prefix every ``ctx.step`` name so parallel
-    # siblings do not collide in ``workflow_checkpoints``. Example:
-    # ``expand_a1b2c3d4_draft_propose``. Empty string preserves Phase 4
-    # child-workflow step ids (one expand per workflow run).
+    # Phase 5a: multiple ``expand_node`` calls inside one ``bfts_tree``
+    # workflow prefix every ``ctx.step`` name so parallel siblings do not
+    # collide in ``workflow_checkpoints``. Example:
+    # ``expand_a1b2c3d4_draft_propose``. Set by ``expand_runner``.
     step_prefix: str = ""
 
 

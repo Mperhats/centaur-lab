@@ -72,11 +72,7 @@ ENV_NUM_DRAFTS = "BFTS_NUM_DRAFTS"
 ENV_NUM_WORKERS = "BFTS_NUM_WORKERS"
 ENV_PRIOR_ATTEMPTS_WINDOW = "BFTS_PRIOR_ATTEMPTS_WINDOW"
 ENV_NUM_SEEDS = "BFTS_NUM_SEEDS"
-ENV_EXPAND_MODE = "BFTS_EXPAND_MODE"
 ENV_LLM_MAX_INFLIGHT = "BFTS_LLM_MAX_INFLIGHT"
-
-EXPAND_MODE_CHILD = "child"
-EXPAND_MODE_INLINE = "inline"
 
 
 def _env_knob(name: str) -> str | None:
@@ -445,18 +441,6 @@ def api_key_secret_for_model(model: str) -> str:
 def resolve_api_key_for_model(model: str) -> str:
     """Placeholder API key for a vision/chat model string."""
     return resolve_llm_api_key(api_key_secret_for_model(model))
-
-
-def resolve_expand_mode() -> str:
-    """Return ``child`` (Phase 4 fan-out) or ``inline`` (Phase 5a in-tree).
-
-    Controlled by ``BFTS_EXPAND_MODE``. Unknown values fall back to
-    ``child`` so operators can roll back without redeploying overlay code.
-    """
-    raw = (_env_knob(ENV_EXPAND_MODE) or EXPAND_MODE_CHILD).strip().lower()
-    if raw == EXPAND_MODE_INLINE:
-        return EXPAND_MODE_INLINE
-    return EXPAND_MODE_CHILD
 
 
 def resolve_llm_max_inflight() -> int | None:

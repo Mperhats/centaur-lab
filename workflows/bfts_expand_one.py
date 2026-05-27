@@ -1,14 +1,9 @@
-"""Workflow: expand one BFTS node — child of ``bfts_tree``.
+"""Workflow: expand one BFTS node (standalone / manual replay).
 
-Wraps the existing :func:`packages.bfts_sdk.expand.expand_node` pipeline
-(per-LLM-call ``ctx.step`` checkpoints) in its own workflow run so the
-tree controller can fan out N expansions per iteration via
-``ctx.start_workflow("bfts_expand_one", ..., eager_start=True)`` when
-``BFTS_EXPAND_MODE=child`` (Phase 4).
-
-Phase 5a inline mode runs the same pipeline inside ``bfts_tree`` via
-:func:`packages.bfts_sdk.expand_runner.run_expand_for_node`; this workflow
-remains for manual replay, tests, and ``BFTS_EXPAND_MODE=child`` rollback.
+Wraps :func:`packages.bfts_sdk.expand_runner.run_expand_for_node` in its
+own workflow run. ``bfts_tree`` calls the same runner in-process (Phase 5a);
+this module is for operator replay, tests, and ``POST /workflows/runs`` of a
+single node expansion — not for tree orchestration fan-out.
 
 See ``docs/bfts-phase5-orchestration.md``.
 """
@@ -30,7 +25,7 @@ SCHEDULE: dict[str, Any] = {}
 
 @dataclass(frozen=True)
 class Input:
-    """Per-child workflow input."""
+    """Per-node workflow input for standalone expansion."""
 
     run_id: str
     node_id: str
@@ -76,5 +71,4 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         vlm_model=llm.vlm_model,
         prior_attempts_window=inp.prior_attempts_window,
         seed_override=inp.seed_override,
-        inline=False,
     )
