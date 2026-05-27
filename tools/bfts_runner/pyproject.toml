@@ -1,6 +1,6 @@
 [project]
 name = "bfts-runner"
-description = "Start bfts_research with Slack thread_key/delivery from sandbox JWT claims."
+description = "Start bfts_research with Slack thread_key/delivery from sandbox JWT claims; slack/ subpackage (post, format, stream) for BFTS workflow notifications."
 version = "0.1.0"
 requires-python = ">=3.11"
 license = "Apache-2.0 OR MIT"

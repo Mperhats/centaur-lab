@@ -25,22 +25,24 @@ if TYPE_CHECKING:
     from api.workflow_engine import WorkflowContext
 
 from packages.bfts_sdk.research import build_bfts_run_input
-from packages.bfts_sdk.slack_delivery import (
-    enrich_run_input_from_headers,
-    resolve_slack_delivery,
-)
-from packages.bfts_sdk.slack_stream import (
+from tools.bfts_runner.slack.format import (
     format_bfts_stream_intro,
     format_idea_markdown,
     format_research_brief_thread_message,
-    notify_run_failure,
+)
+from tools.bfts_runner.slack.post import (
+    enrich_run_input_from_headers,
     notify_thread_failure,
-    open_session,
-    post_markdown,
     post_thread_message,
-    streaming_available,
+    resolve_slack_delivery,
     workflow_run_error_text,
     workflow_run_failed,
+)
+from tools.bfts_runner.slack.stream import (
+    notify_run_failure,
+    open_session,
+    post_markdown,
+    streaming_available,
 )
 from workflows.ideation import _child_workflow_output
 

@@ -53,6 +53,11 @@ centaur-scientist/
 │   └── sandbox/SYSTEM_PROMPT.md     # overlay sandbox prompt (when present)
 ├── tools/
 │   ├── bfts_executor/               #   Drives agent-sandbox Sandbox CRs (pyproject + client.py)
+│   ├── bfts_runner/                 #   Enqueue ``bfts_research`` from Slack sandboxes (client.py)
+│   │   └── slack/
+│   │       ├── post.py              #     thread delivery, plain posts, failure notices
+│   │       ├── format.py            #     brief/idea/progress markdown formatters
+│   │       └── stream.py            #     agent-session BFTS progress streaming
 │   ├── bfts_vlm/                    #   VLM plot review (pyproject declares optional A/OAI keys)
 │   └── semantic_scholar/            #   S2 Graph API client + research-brief renderer
 │       ├── client.py + cli.py       #     public tool surface

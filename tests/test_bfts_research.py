@@ -16,13 +16,11 @@ def test_bfts_research_slack_ux_plain_brief_and_bfts_only_stream() -> None:
     """Brief + idea are plain posts; only BFTS uses agent-session streaming."""
     source = Path("workflows/bfts_research.py").read_text(encoding="utf-8")
     assert "open_slack_ideation_stream" not in source
+    assert "tools.bfts_runner.slack.format" in source
+    assert "tools.bfts_runner.slack.post" in source
+    assert "tools.bfts_runner.slack.stream" in source
     assert "post_slack_research_brief" in source
     assert "post_slack_research_idea" in source
     assert "open_slack_bfts_stream" in source
-    assert "post_thread_message" in source
-    assert "format_research_brief_thread_message" in source
     assert "compact_markdown" in source
     assert "SuspendWorkflow" in source
-    assert "notify_thread_failure" in source
-    assert "workflow_run_failed" in source
-    assert "notify_run_failure" in source

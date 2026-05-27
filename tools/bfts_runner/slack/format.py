@@ -1,127 +1,8 @@
-"""Slack delivery helpers for BFTS workflows and workflow run creation."""
+"""Slack message formatting for BFTS workflow notifications."""
 
 from __future__ import annotations
 
 from typing import Any
-
-
-def delivery_from_thread_key(thread_key: str) -> dict[str, Any] | None:
-    """Map a Slack ``thread_key`` to a minimal delivery dict.
-
-    Supports both legacy ``slack:<channel>:<thread_ts>`` and the
-    production ``slack:<team_id>:<channel_id>:<thread_ts>`` shape.
-    """
-    parts = thread_key.strip().split(":")
-    if not parts or parts[0] != "slack":
-        return None
-    if len(parts) == 3 and parts[1] and parts[2]:
-        channel, thread_ts, team_id = parts[1], parts[2], None
-    elif len(parts) >= 4 and parts[1] and parts[2] and parts[3]:
-        team_id, channel, thread_ts = parts[1], parts[2], parts[3]
-    else:
-        return None
-    out: dict[str, Any] = {
-        "platform": "slack",
-        "channel": channel,
-        "thread_ts": thread_ts,
-    }
-    if team_id:
-        out["recipient_team_id"] = team_id
-    return out
-
-
-def build_bfts_research_run_input(
-    *,
-    topic: str,
-    thread_key: str | None = None,
-    delivery: dict[str, Any] | None = None,
-    num_seeds: int | None = None,
-    num_drafts: int | None = None,
-    num_workers: int | None = None,
-) -> dict[str, Any]:
-    """Build enriched ``bfts_research`` workflow input (Slack thread aware)."""
-    run_input: dict[str, Any] = {"topic": topic.strip()}
-    if delivery is not None:
-        run_input["delivery"] = delivery
-    run_input = enrich_run_input_from_headers(
-        header_thread_key=thread_key,
-        run_input=run_input,
-    )
-    for key, val in (
-        ("num_seeds", num_seeds),
-        ("num_drafts", num_drafts),
-        ("num_workers", num_workers),
-    ):
-        if val is not None:
-            run_input[key] = val
-    return run_input
-
-
-def enrich_run_input_from_headers(
-    *,
-    header_thread_key: str | None,
-    run_input: dict[str, Any],
-) -> dict[str, Any]:
-    """Merge ``X-Centaur-Thread-Key`` into workflow input when body omits it.
-
-    Sandboxes send the header on every ``call workflow run``; without this
-    enrichment, ``bfts_root`` cannot post back into the user's Slack thread.
-    """
-    out = dict(run_input)
-    header_tk = (header_thread_key or "").strip()
-    if header_tk and not str(out.get("thread_key") or "").strip():
-        out["thread_key"] = header_tk
-
-    delivery_raw = out.get("delivery")
-    delivery = dict(delivery_raw) if isinstance(delivery_raw, dict) else {}
-    if str(delivery.get("platform") or "").strip().lower() != "slack":
-        delivery = {}
-
-    derived = delivery_from_thread_key(
-        str(out.get("thread_key") or header_tk or ""),
-    )
-    if derived:
-        delivery = {**derived, **delivery}
-
-    if delivery:
-        out["delivery"] = delivery
-    elif "delivery" in out and not delivery:
-        del out["delivery"]
-
-    return out
-
-
-def resolve_slack_delivery(
-    *,
-    explicit_delivery: dict[str, Any] | None,
-    run_input: dict[str, Any],
-    explicit_thread_key: str | None = None,
-) -> dict[str, Any] | None:
-    """Return a Slack delivery dict when the run should notify a thread."""
-    raw = dict(explicit_delivery or run_input.get("delivery") or {})
-    if str(raw.get("platform") or "").strip().lower() != "slack":
-        raw = {}
-    if not raw.get("channel"):
-        for key in (explicit_thread_key, run_input.get("thread_key")):
-            if not key:
-                continue
-            derived = delivery_from_thread_key(str(key))
-            if derived:
-                raw = {**derived, **raw}
-                break
-    channel = raw.get("channel") or raw.get("channel_id")
-    if not channel:
-        return None
-    out: dict[str, Any] = {
-        "platform": "slack",
-        "channel": str(channel),
-    }
-    if raw.get("thread_ts"):
-        out["thread_ts"] = str(raw["thread_ts"])
-    recipient = raw.get("recipient_user_id") or raw.get("user_id")
-    if recipient:
-        out["recipient_user_id"] = str(recipient)
-    return out
 
 
 def slack_mention_prefix(delivery: dict[str, Any] | None) -> str:
@@ -131,6 +12,28 @@ def slack_mention_prefix(delivery: dict[str, Any] | None) -> str:
     if user_id:
         return f"<@{user_id}> "
     return ""
+
+
+def format_failure_thread_message(
+    *,
+    delivery: dict[str, Any],
+    headline: str,
+    orchestrator_run_id: str,
+    error_text: str,
+    child_run_id: str | None = None,
+    child_workflow: str | None = None,
+) -> str:
+    """Plain-thread failure notice (always @-mentions when delivery has user id)."""
+    mention = slack_mention_prefix(delivery)
+    lines = [
+        f"{mention}**{headline}**",
+        f"Run `{orchestrator_run_id}` did not complete successfully.",
+    ]
+    if child_run_id:
+        wf = f" ({child_workflow})" if child_workflow else ""
+        lines.append(f"Child `{child_run_id}`{wf}.")
+    lines.extend(["", f"```\n{error_text.strip()}\n```"])
+    return "\n".join(lines)
 
 
 def _metric_snippet(metric_json: dict[str, Any] | None) -> str:
@@ -199,6 +102,7 @@ def format_search_config_line(
     sources: dict[str, str],
 ) -> str:
     """One-line resolved search config for Slack kickoff (postmortem clarity)."""
+
     def _src(field: str) -> str:
         return sources.get(field) or "?"
 
@@ -246,3 +150,56 @@ def format_progress_message(
         else:
             lines.append(f"• tree {idx}: running…")
     return "\n".join(lines)
+
+
+def format_research_brief_thread_message(
+    *,
+    topic: str,
+    markdown: str,
+    run_id: str | None = None,
+) -> str:
+    """Plain-thread opener: run id + compact lit review (workflow-owned).
+
+    When ``markdown`` is already from ``render_brief_compact`` (starts with
+    ``**Research brief**``), do not wrap a second title block.
+    """
+    body = markdown.strip()
+    if not body:
+        return ""
+    lines: list[str] = []
+    if run_id:
+        lines.extend([f"**Research pipeline** — `{run_id.strip()}`", ""])
+    if body.startswith("**Research brief**"):
+        lines.append(body)
+    else:
+        lines.extend([f"**Research brief** — _{topic.strip()}_", "", body])
+    lines.extend(["", "_Ideation next; BFTS tree search streams separately._"])
+    return "\n".join(lines)
+
+
+def format_bfts_stream_intro(idea_title: str) -> str:
+    """Opening copy for the BFTS-only Slack agent-session stream."""
+    label = idea_title.strip() or "(untitled)"
+    return (
+        f"**BFTS tree search** — **{label}**\n"
+        "Live tree progress below."
+    )
+
+
+def format_idea_markdown(idea: dict[str, Any]) -> str:
+    """Compact structured idea block for a plain thread post."""
+    title = idea.get("Title") or idea.get("Name") or "(untitled)"
+    hypothesis = (idea.get("Short Hypothesis") or "").strip()
+    experiments = idea.get("Experiments") or []
+    exp_lines: list[str] = []
+    if isinstance(experiments, list):
+        exp_lines = [str(x).strip() for x in experiments if x]
+    elif experiments:
+        exp_lines = [str(experiments).strip()]
+    parts = ["**Research idea**", f"**{title}**"]
+    if hypothesis:
+        parts.append(hypothesis)
+    if exp_lines:
+        parts.append("")
+        parts.extend(f"• {line}" for line in exp_lines[:4])
+    return "\n".join(parts)

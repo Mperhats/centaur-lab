@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from centaur_sdk import current_thread_key
-from packages.bfts_sdk.slack_delivery import build_bfts_research_run_input
+from tools.bfts_runner.slack.post import enrich_run_input_from_headers
 
 
 class BftsRunnerClient:
@@ -36,12 +36,17 @@ class BftsRunnerClient:
         except RuntimeError:
             thread_key = ""
 
-        run_input = build_bfts_research_run_input(
-            topic=normalized,
-            thread_key=thread_key or None,
-            num_seeds=num_seeds,
-            num_drafts=num_drafts,
-            num_workers=num_workers,
+        body: dict[str, Any] = {"topic": normalized}
+        for key, val in (
+            ("num_seeds", num_seeds),
+            ("num_drafts", num_drafts),
+            ("num_workers", num_workers),
+        ):
+            if val is not None:
+                body[key] = val
+        run_input = enrich_run_input_from_headers(
+            header_thread_key=thread_key or None,
+            run_input=body,
         )
         if not run_input.get("thread_key"):
             return {
