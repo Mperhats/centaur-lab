@@ -1,9 +1,10 @@
 """Idempotent `bfts-sandbox-egress` NetworkPolicy.
 
-The namespace's baseline default-deny + allow-dns NetworkPolicies block
-all traffic except DNS to kube-dns. K8s NetworkPolicies are union-based,
-so this namespace-scoped Egress-only rule layers on top: pods labeled
-`centaur.ai/bfts-sandbox: "true"` get outbound HTTPS (TCP 443) in
+The chart-shipped default-deny (.centaur/contrib/chart/templates/
+networkpolicy.yaml:9-13) blocks all traffic, and `-allow-dns` (L15-34)
+re-allows kube-dns. K8s NetworkPolicies are union-based, so adding this
+namespace-scoped Egress-only rule on top is additive: pods labeled
+`centaur.ai/bfts-sandbox: "true"` get api:8000 + internet:443 in
 addition to DNS, while ingress remains denied.
 
 We deliberately do NOT add `centaur.ai/managed: "true"` to BFTS pods —
@@ -11,20 +12,9 @@ that label is the podSelector for the chart's `-sandbox` policy at L307-
 327 which restricts egress to api:8000 only and would block PyPI /
 dataset fetches.
 
-API egress (TCP 8000) is intentionally NOT granted. BFTS sandbox pods
-execute Python — they fetch wheels, datasets, and call out to LLM / VLM
-endpoints over HTTPS, but they never call back into the api pod (the
-api drives the executor over the Kubernetes apiserver Exec subresource,
-not the other way around). Cutting the rule removes dead configuration
-and a needless attack surface.
-
-When this module runs in the `centaur-bfts` sandbox namespace (the
-default once `BFTS_SANDBOX_NAMESPACE=centaur-bfts` is set in
-api.extraEnv), the api ServiceAccount's authorization to create
-NetworkPolicies here comes from the namespaced `api-sandbox-manager`
-Role + RoleBinding shipped in `centaur-lab-infra` alongside the
-namespace itself, mirroring the existing centaur-system RBAC from the
-chart's rbac.yaml.
+RBAC: `.centaur/contrib/chart/templates/rbac.yaml:39-41` already grants
+the api service account create/delete/get/list/watch on
+networking.k8s.io/networkpolicies.
 """
 from __future__ import annotations
 
@@ -49,6 +39,18 @@ def _build_body() -> dict[str, Any]:
             "podSelector": {"matchLabels": {"centaur.ai/bfts-sandbox": "true"}},
             "policyTypes": ["Egress"],
             "egress": [
+                {
+                    "to": [
+                        {
+                            "podSelector": {
+                                "matchLabels": {
+                                    "app.kubernetes.io/component": "api",
+                                }
+                            }
+                        }
+                    ],
+                    "ports": [{"protocol": "TCP", "port": 8000}],
+                },
                 {
                     "ports": [{"protocol": "TCP", "port": 443}],
                 },
