@@ -22,5 +22,7 @@ def test_bfts_research_slack_ux_plain_brief_and_bfts_only_stream() -> None:
     assert "post_slack_research_brief" in source
     assert "post_slack_research_idea" in source
     assert "open_slack_bfts_stream" in source
+    assert "post_slack_bfts_started" not in source
+    assert "format_bfts_stream_intro" not in source
     assert "compact_markdown" in source
     assert "SuspendWorkflow" in source

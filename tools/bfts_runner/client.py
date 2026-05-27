@@ -77,6 +77,10 @@ class BftsRunnerClient:
             "idempotent": result.get("idempotent"),
             "thread_key": run_input.get("thread_key"),
             "delivery": run_input.get("delivery"),
+            "agent_reply": (
+                "none — workflow posts literature brief, research idea, "
+                "and BFTS progress to this thread"
+            ),
         }
 
 

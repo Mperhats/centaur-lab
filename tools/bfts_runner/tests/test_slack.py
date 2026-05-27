@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from tools.bfts_runner.slack.format import (
-    format_bfts_stream_intro,
     format_failure_thread_message,
     format_idea_markdown,
     format_progress_message,
@@ -143,36 +142,27 @@ def test_slack_mention_prefix() -> None:
 
 def test_format_research_brief_thread_message_compact() -> None:
     compact = (
-        "**Research brief** — active inference\n"
-        "_3 of 3 top hits_\n\n"
-        "1. **Paper A** (2024) — One-liner."
+        "*Literature* — active inference\n\n"
+        "1. <https://example.com|Paper A> (2024) — One-liner."
     )
     msg = format_research_brief_thread_message(
         topic="active inference",
         markdown=compact,
         run_id="wfr_718932ca5ff74a67",
     )
-    assert msg.count("**Research brief**") == 1
-    assert "wfr_718932ca5ff74a67" in msg
+    assert msg == compact
+    assert "wfr_718932ca5ff74a67" not in msg
     assert "Paper A" in msg
-    assert "# Brief" not in msg
+    assert "Research pipeline" not in msg
 
 
-def test_format_research_brief_thread_message_legacy_markdown() -> None:
+def test_format_research_brief_thread_message_empty_falls_back() -> None:
     msg = format_research_brief_thread_message(
         topic="active inference",
-        markdown="# Brief\n\nBody.",
+        markdown="",
     )
-    assert "Research brief" in msg
-    assert "active inference" in msg
-    assert "# Brief" in msg
-
-
-def test_format_bfts_stream_intro() -> None:
-    intro = format_bfts_stream_intro("My Idea")
-    assert "BFTS tree search" in intro
-    assert "My Idea" in intro
-    assert "Step 2" not in intro
+    assert "*Literature* — active inference" in msg
+    assert "_No papers found._" in msg
 
 
 def test_format_idea_markdown() -> None:
@@ -185,6 +175,7 @@ def test_format_idea_markdown() -> None:
     )
     assert "Research idea" in md
     assert "VFE-NCA" in md
+    assert "*VFE-NCA*" in md
     assert "Free-energy" in md
     assert "• Train 32x32" in md
 

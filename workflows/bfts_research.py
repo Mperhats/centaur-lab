@@ -2,13 +2,12 @@
 
 Slack-driven science entrypoint:
 
-1. **Agent turn** (``slack_thread_turn``): reply once with the ``run_id`` only
-   — do not paste kickoff or brief text (avoids duplicate stream chunks).
-2. **Plain thread posts**: compact ``research_brief`` as the first thread
-   message (run id + ``compact_markdown``), then the research idea after
-   ``ideation`` completes.
-3. **BFTS stream** (one agent-session message): tree-search kickoff and live
-   progress until completion (via ``slack_stream_session_id`` on ``bfts_root``).
+1. **Agent turn** (``slack_thread_turn``): no chat text — the workflow owns
+   thread delivery (avoids duplicate kickoff lines in the agent stream).
+2. **Plain thread posts**: compact ``research_brief`` lit review, then the
+   research idea after ``ideation`` completes.
+3. **BFTS stream** (one agent-session message): live tree progress until
+   completion (via ``slack_stream_session_id`` on ``bfts_root``).
 
 Failures post to the Slack thread (and close the BFTS stream when open).
 ``bfts_root`` runs asynchronously — its errors are also reported from
@@ -26,7 +25,6 @@ if TYPE_CHECKING:
 
 from packages.bfts_sdk.research import build_bfts_run_input
 from tools.bfts_runner.slack.format import (
-    format_bfts_stream_intro,
     format_idea_markdown,
     format_research_brief_thread_message,
 )
@@ -41,7 +39,6 @@ from tools.bfts_runner.slack.post import (
 from tools.bfts_runner.slack.stream import (
     notify_run_failure,
     open_session,
-    post_markdown,
     streaming_available,
 )
 from workflows.ideation import _child_workflow_output
@@ -49,7 +46,7 @@ from workflows.ideation import _child_workflow_output
 WORKFLOW_NAME = "bfts_research"
 SCHEDULE: dict[str, Any] = {}
 
-_DEFAULT_BRIEF_LIMIT = 6
+_DEFAULT_BRIEF_LIMIT = 4
 
 
 @dataclass
@@ -134,7 +131,6 @@ async def _run_research_pipeline(inp: Input, ctx: WorkflowContext) -> dict[str, 
                 text=format_research_brief_thread_message(
                     topic=topic,
                     markdown=brief_markdown,
-                    run_id=ctx.run_id,
                 ),
                 step_name="post_slack_research_brief",
                 log_event="bfts_research_slack_brief_failed",
@@ -241,19 +237,13 @@ async def _run_research_pipeline(inp: Input, ctx: WorkflowContext) -> dict[str, 
                 delivery=delivery,
                 thread_key=thread_key,
                 metadata=metadata,
-                title="BFTS tree search",
-                header="scientist · bfts",
+                title=idea_title or "Tree search",
+                header=None,
                 step_name="open_slack_bfts_stream",
             )
             if bfts_session:
                 slack_stream_session_id = bfts_session.session_id
                 bfts_run_input["slack_stream_session_id"] = slack_stream_session_id
-                await post_markdown(
-                    ctx,
-                    bfts_session,
-                    format_bfts_stream_intro(idea_title),
-                    step_name="stream_bfts_intro",
-                )
 
         bfts_child = await ctx.start_workflow(
             "start_bfts_root",
@@ -263,18 +253,6 @@ async def _run_research_pipeline(inp: Input, ctx: WorkflowContext) -> dict[str, 
             eager_start=True,
         )
         bfts_run_id = str(bfts_child.get("run_id") or "")
-
-        if delivery:
-            await post_thread_message(
-                ctx,
-                delivery=delivery,
-                text=(
-                    f"BFTS tree search started (`{bfts_run_id}`). "
-                    "Progress and errors stream in the **BFTS tree search** message above."
-                ),
-                step_name="post_slack_bfts_started",
-                log_event="bfts_research_slack_bfts_started_failed",
-            )
 
         ctx.log(
             "bfts_research_started",

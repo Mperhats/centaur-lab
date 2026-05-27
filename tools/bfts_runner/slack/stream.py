@@ -169,7 +169,7 @@ async def notify_run_failure(
     await post_markdown(
         ctx,
         stream,
-        f"**{headline}**\n\n```\n{snippet}\n```",
+        f"*{headline}*\n\n```\n{snippet}\n```",
         step_name=f"{thread_step_name}_stream_md",
     )
     await close_session(ctx, stream, step_name=f"{thread_step_name}_stream_done")
