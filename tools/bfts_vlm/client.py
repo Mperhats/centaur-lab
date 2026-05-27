@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-import httpx
+from packages.bfts_sdk.llm import llm_http_client
 
 _MAX_PLOTS = 10
 _VLM_MODEL = "claude-sonnet-4-20250514"
@@ -240,7 +240,7 @@ class VLMReviewer:
                 "function": {"name": "submit_plot_selection"},
             },
         }
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with llm_http_client(60.0) as client:
             resp = await client.post(
                 _OPENAI_CHAT_URL,
                 json=body,
@@ -264,7 +264,7 @@ class VLMReviewer:
             "tools": [tool],
             "tool_choice": {"type": "tool", "name": tool["name"]},
         }
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with llm_http_client(60.0) as client:
             resp = await client.post(
                 _ANTHROPIC_MESSAGES_URL,
                 json=body,
@@ -318,7 +318,7 @@ class VLMReviewer:
             },
         }
 
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with llm_http_client(120.0) as client:
             resp = await client.post(
                 _OPENAI_CHAT_URL,
                 json=body,
@@ -363,7 +363,7 @@ class VLMReviewer:
             "tool_choice": {"type": "tool", "name": tool["name"]},
         }
 
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with llm_http_client(120.0) as client:
             resp = await client.post(
                 _ANTHROPIC_MESSAGES_URL,
                 json=body,

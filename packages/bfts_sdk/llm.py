@@ -23,7 +23,7 @@ from typing import Any
 
 import httpx
 
-from packages.bfts_sdk.config import resolve_llm_max_inflight
+from packages.bfts_sdk.config import resolve_llm_https_proxy
 
 _ANTHROPIC_VERSION = "2023-06-01"
 _OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
@@ -44,42 +44,16 @@ adding the ``backoff`` package as a dep."""
 _RETRY_BASE_DELAY_S = 1.0
 """Initial backoff. Doubles each retry: 1s, 2s, 4s."""
 
-_llm_inflight_semaphore: asyncio.Semaphore | None = None
-_llm_inflight_limit: int | None = None
 
-
-def _llm_inflight_semaphore() -> asyncio.Semaphore | None:
-    """Lazy global cap on concurrent outbound LLM requests (Phase 5a)."""
-    global _llm_inflight_semaphore, _llm_inflight_limit
-    limit = resolve_llm_max_inflight()
-    if limit is None:
-        return None
-    if _llm_inflight_semaphore is None or _llm_inflight_limit != limit:
-        _llm_inflight_semaphore = asyncio.Semaphore(limit)
-        _llm_inflight_limit = limit
-    return _llm_inflight_semaphore
+def llm_http_client(timeout: float) -> httpx.AsyncClient:
+    """Outbound client for provider APIs via iron-proxy."""
+    proxy = resolve_llm_https_proxy()
+    if proxy is None:
+        return httpx.AsyncClient(timeout=timeout)
+    return httpx.AsyncClient(timeout=timeout, proxy=proxy)
 
 
 async def _post_with_retry(
-    client: httpx.AsyncClient,
-    url: str,
-    *,
-    json: dict[str, Any],
-    headers: dict[str, str],
-) -> httpx.Response:
-    """POST with exponential backoff on transient errors."""
-    sem = _llm_inflight_semaphore()
-    if sem is None:
-        return await _post_with_retry_inner(
-            client, url, json=json, headers=headers
-        )
-    async with sem:
-        return await _post_with_retry_inner(
-            client, url, json=json, headers=headers
-        )
-
-
-async def _post_with_retry_inner(
     client: httpx.AsyncClient,
     url: str,
     *,
@@ -212,7 +186,7 @@ async def _call_with_function_openai(
             "function": {"name": function_spec["function"]["name"]},
         },
     }
-    async with httpx.AsyncClient(timeout=call.timeout) as client:
+    async with llm_http_client(call.timeout) as client:
         resp = await _post_with_retry(
             client,
             _OPENAI_CHAT_URL,
@@ -249,7 +223,7 @@ async def _call_with_function_anthropic(
         "tools": [tool],
         "tool_choice": {"type": "tool", "name": tool["name"]},
     }
-    async with httpx.AsyncClient(timeout=call.timeout) as client:
+    async with llm_http_client(call.timeout) as client:
         resp = await _post_with_retry(
             client,
             _ANTHROPIC_MESSAGES_URL,
@@ -280,7 +254,7 @@ async def _call_for_text_openai(call: LLMCall) -> str:
         "max_tokens": call.max_tokens,
         "messages": [{"role": "user", "content": call.prompt}],
     }
-    async with httpx.AsyncClient(timeout=call.timeout) as client:
+    async with llm_http_client(call.timeout) as client:
         resp = await _post_with_retry(
             client,
             _OPENAI_CHAT_URL,
@@ -303,7 +277,7 @@ async def _call_for_text_anthropic(call: LLMCall) -> str:
         "max_tokens": call.max_tokens,
         "messages": [{"role": "user", "content": call.prompt}],
     }
-    async with httpx.AsyncClient(timeout=call.timeout) as client:
+    async with llm_http_client(call.timeout) as client:
         resp = await _post_with_retry(
             client,
             _ANTHROPIC_MESSAGES_URL,

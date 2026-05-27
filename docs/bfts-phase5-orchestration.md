@@ -4,7 +4,7 @@ Design sketch for decoupling **tree control** from **node expansion** so BFTS st
 
 **Context:** Phase 4 (“Design B-lite”) fans each tree node out as a child workflow `bfts_expand_one`. That preserved per-LLM-call durability but multiplied `workflow_runs` rows and worker claims. On a single API pod / Mac dev cluster, `WORKFLOW_WORKER_CONCURRENCY` became the real scheduler — not sandbox count or `num_workers`.
 
-**Status:** proposal / sketch — not implemented.
+**Status:** Phase 5a implemented on branch `feat/bfts-phase5a-inline-expand` (in-tree expand only). Phase 5b/c and batch iron-proxy infra remain follow-ups — see `docs/bfts-batch-iron-proxy.md`.
 
 ---
 
@@ -203,7 +203,7 @@ Child-workflow `ChildWorkflowFailed` path goes away; failures are in-process exc
 
 `num_workers` becomes a **semaphore inside the tree**, not “number of workflow children.” Defaults stay `1` for research; operators can raise to `2` on clusters with higher proxy timeout and Anthropic quota.
 
-Optional: **global LLM semaphore** in `packages/bfts_sdk/llm.py` (env `BFTS_LLM_MAX_INFLIGHT`) across all trees on one API pod — second line of defense against 502 storms.
+Egress backpressure belongs at the **iron-proxy layer** (timeout, replicas, optional batch proxy) and in **`num_workers` / `num_drafts`**, not a global in-process LLM semaphore — see ``docs/bfts-batch-iron-proxy.md``.
 
 ### 5a.5 Tests
 
