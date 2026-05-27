@@ -52,6 +52,8 @@ def test_bfts_research_unified_slack_session_and_artifact_posts() -> None:
     assert "stream_step_ideation_complete" in source
     assert "stream_step_refine_query_in_progress" in source
     assert "close_research_stream_empty_literature" in source
+    assert "enrich_slack_delivery_recipient" in source
+    assert "resolve_slack_recipient" in source or "enrich_slack_delivery_recipient(" in source
     assert "start_ideation" in source
     open_idx = source.index("open_slack_research_stream")
     lit_idx = source.index("stream_step_lit_search_in_progress")
