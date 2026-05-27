@@ -22,6 +22,7 @@ from packages.bfts_sdk.config import resolve_llm_settings, resolve_search_config
 from packages.bfts_sdk.schema import assert_bfts_schema_present
 from packages.bfts_sdk.slack_delivery import (
     format_progress_message,
+    format_search_config_line,
     resolve_slack_delivery,
     slack_mention_prefix,
 )
@@ -285,6 +286,9 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         run_id=ctx.run_id,
         idea=idea,
         num_drafts=search.num_drafts,
+        num_seeds=search.num_seeds,
+        num_workers=search.num_workers,
+        sources=asdict(sources),
         delivery=slack_delivery,
     )
 
@@ -402,11 +406,8 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             summary.update(output)
         tree_summaries.append(summary)
 
-    # Post AFTER the cleanup ``try/finally`` above — a teardown failure
-    # raises, the post is correctly skipped, and the engine surfaces the
-    # original error. Posting *inside* the finally would compete with the
-    # re-raise path and either swallow the teardown error (if Slack
-    # succeeds) or mask it behind a Slack error (if Slack fails).
+    # Post after explicit sandbox teardown — a teardown failure raises and
+    # this post is correctly skipped.
     summary_text = _format_run_summary(
         run_id=ctx.run_id,
         idea=idea,
@@ -535,6 +536,9 @@ async def _post_slack_kickoff(
     run_id: str,
     idea: dict[str, Any],
     num_drafts: int,
+    num_seeds: int,
+    num_workers: int,
+    sources: dict[str, str],
     delivery: dict[str, Any] | None,
 ) -> None:
     """Best-effort kickoff post to the requester's Slack thread."""
@@ -542,9 +546,16 @@ async def _post_slack_kickoff(
         return
     label = idea.get("Title") or idea.get("Name") or "(unnamed)"
     prefix = slack_mention_prefix(delivery)
+    config_line = format_search_config_line(
+        num_drafts=num_drafts,
+        num_seeds=num_seeds,
+        num_workers=num_workers,
+        sources=sources,
+    )
     text = (
         f"{prefix}BFTS run `{run_id}` started "
-        f"({num_drafts} tree{'s' if num_drafts != 1 else ''}). Idea: {label}"
+        f"({num_drafts} tree{'s' if num_drafts != 1 else ''}). Idea: {label}\n"
+        f"{config_line}"
     )
     await _post_slack_message(
         ctx,

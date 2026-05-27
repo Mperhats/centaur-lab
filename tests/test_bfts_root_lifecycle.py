@@ -31,3 +31,8 @@ def test_bfts_root_handler_does_not_teardown_in_try_finally() -> None:
                 "stop_sandbox must not live in try/finally; use explicit "
                 "teardown after all wait_tree_* steps complete"
             )
+        try_src = ast.get_source_segment(source, try_node) or ""
+        assert "wait_for_workflow" not in try_src, (
+            "wait_for_workflow must not be inside try/finally; Centaur replays "
+            "finally on suspend (see wfr_958376d7950c46e8 / wfr_33d0f01a091f4681)"
+        )

@@ -551,8 +551,27 @@ sequenceDiagram
   WF->>WF: start_workflow bfts_tree (child)
   WF->>Tool: exec_python / collect_artifacts
   Tool->>SB: pods/exec runfile.py
-  WF->>Tool: stop_sandbox (finally)
+  WF->>Tool: stop_sandbox (after all wait_tree_* complete)
 ```
+
+### Sandbox lifecycle (do not wrap waits in `try/finally`)
+
+Centaur replays a handler's `finally` block when the workflow **suspends** at
+`wait_for_workflow`, not only on success or failure. If `stop_sandbox` lives in
+`finally` around the tree-wait loop, all executor pods are deleted seconds after
+kickoff while children still run (`stop_sandbox_0..N` checkpoints ~4s after
+start). Runs `wfr_33d0f01a091f4681` and `wfr_958376d7950c46e8` exhibited this.
+
+**Fix (overlay ≥ merge of PR #13):** provision sandboxes in a narrow
+`try/except` (teardown only on provisioning failure), `wait_for_workflow` per
+tree **outside** any `finally`, then explicit `_teardown_sandboxes` once all
+trees finish. Redeploy the overlay image after merging; old SHAs still delete
+pods early.
+
+**Separate failure mode:** sustained `LLM call failed: 502 bad gateway` on
+`bfts_expand_one` (as in `wfr_958376d7950c46e8`) is iron-proxy / provider
+outage — `packages/bfts_sdk/llm.py` already retries 502 with backoff; check
+VictoriaLogs and proxy health if zero good nodes appear with sandboxes still up.
 
 | Step | Code location | Repo |
 |------|---------------|------|

@@ -151,6 +151,24 @@ def format_tree_progress_line(
     return f"• {label}: completed ({', '.join(parts)})"
 
 
+def format_search_config_line(
+    *,
+    num_drafts: int,
+    num_seeds: int,
+    num_workers: int,
+    sources: dict[str, str],
+) -> str:
+    """One-line resolved search config for Slack kickoff (postmortem clarity)."""
+    def _src(field: str) -> str:
+        return sources.get(field) or "?"
+
+    return (
+        f"config: {num_drafts} trees (num_drafts, {_src('num_drafts')}), "
+        f"{num_seeds} seeds/tree (num_seeds, {_src('num_seeds')}), "
+        f"{num_workers} workers (num_workers, {_src('num_workers')})"
+    )
+
+
 def format_progress_message(
     *,
     run_id: str,

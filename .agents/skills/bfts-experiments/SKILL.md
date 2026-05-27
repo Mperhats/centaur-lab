@@ -66,16 +66,26 @@ call workflow run '{
 }'
 ```
 
-Tell the user the `run_id` once. **Do not** start a background poll loop or
-block the agent turn waiting on `call workflow get`. The workflow posts into
-the **same Slack thread** automatically when `thread_key` / `delivery` are set
-(sandbox `call workflow run` sends `X-Centaur-Thread-Key`, which the API
-merges into the run input):
+Tell the user the `run_id` once in chat (one short line). **Do not** post your
+own Slack kickoff/progress/completion messages — `bfts_root` owns thread
+notifications when `thread_key` / `delivery` are set. Do **not** echo long idea
+text into Slack after starting the run (the workflow kickoff already includes
+the title and resolved `num_drafts` / `num_seeds` sources).
 
-- kickoff + periodic progress (per tree finished) + final @-mention summary
+**Do not** start a background poll loop or block the agent turn waiting on
+`call workflow get`. The workflow posts into the **same Slack thread**
+automatically when `thread_key` / `delivery` are set (pass them in run input;
+sandbox `call workflow run` also sends `X-Centaur-Thread-Key`, which the API
+merges when the centaur pin includes the header-enrichment router patch):
+
+- kickoff (with resolved config) + periodic progress + final @-mention summary
 - a one-line mirror on `#bfts-runs` at the end only
 
 Do **not** tell users to watch only `#bfts-runs` unless thread delivery failed.
+
+Pass `num_seeds` (and `num_drafts` if not the default 4) in **run input** when
+the user asks — otherwise `BFTS_NUM_SEEDS` from Helm `api.extraEnv` wins and
+the kickoff line will show `(num_seeds, env)`.
 
 ## Post-run verification (only after a real idea)
 
