@@ -22,6 +22,17 @@ from packages.bfts_sdk.config import resolve_llm_settings, resolve_search_config
 from packages.bfts_sdk.schema import assert_bfts_schema_present
 
 WORKFLOW_NAME = "bfts_root"
+# Auto-copied into schedule metadata by the workflow loader (see
+# ``.centaur/services/api/api/workflow_engine.py:1538-1541``); ``bfts_root``
+# has no ``SCHEDULE`` so the constant only gates the post inside
+# ``handler``. Empty string ⇒ skip the post entirely.
+SLACK_CHANNEL = "bfts-runs"
+
+# Slack-summary cap. The upstream slack tool will happily POST a 4000-char
+# message, but operator-readable means one line on a phone — truncate the
+# idea label past this and append an ellipsis so the run_id + success
+# ratio remain visible.
+_SLACK_SUMMARY_MAX_LEN = 200
 
 
 # Plan-required idea fields — the minimum subset ``_bfts_expand._propose_prompt``
@@ -330,6 +341,20 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             summary.update(output)
         tree_summaries.append(summary)
 
+    # Post AFTER the cleanup ``try/finally`` above — a teardown failure
+    # raises, the post is correctly skipped, and the engine surfaces the
+    # original error. Posting *inside* the finally would compete with the
+    # re-raise path and either swallow the teardown error (if Slack
+    # succeeds) or mask it behind a Slack error (if Slack fails).
+    await _post_slack_summary(
+        ctx,
+        _format_run_summary(
+            run_id=ctx.run_id,
+            idea=idea,
+            tree_summaries=tree_summaries,
+        ),
+    )
+
     return {
         "run_id": ctx.run_id,
         "idea_used": idea,
@@ -338,3 +363,44 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         "sources": asdict(sources),
         "trees": tree_summaries,
     }
+
+
+def _format_run_summary(
+    *,
+    run_id: str,
+    idea: dict[str, Any],
+    tree_summaries: list[dict[str, Any]],
+) -> str:
+    """Build the one-line Slack summary for a completed ``bfts_root`` run.
+
+    Operator-readability targets: ``run_id`` is wrapped in backticks so
+    Slack's mobile UI doesn't line-wrap on the underscore in
+    ``wfr_<hex>``; the idea label falls back through ``Title`` →
+    ``Name`` → a literal ``"(unnamed)"`` so the toy-defaulted case still
+    reads cleanly; the suffix is truncated (not the prefix) so the
+    grep-by-run-id workflow never loses the id.
+    """
+    total = len(tree_summaries)
+    completed = sum(1 for s in tree_summaries if s.get("status") == "completed")
+    label = idea.get("Title") or idea.get("Name") or "(unnamed)"
+    prefix = f"BFTS run `{run_id}`: {completed}/{total} trees completed. Idea: "
+    budget = _SLACK_SUMMARY_MAX_LEN - len(prefix)
+    if budget > 1 and len(label) > budget:
+        label = label[: budget - 1] + "…"
+    return prefix + label
+
+
+async def _post_slack_summary(ctx: WorkflowContext, text: str) -> None:
+    """Best-effort one-line summary to ``#bfts-runs``.
+
+    Slack is auxiliary — a failure to post must not fail the workflow.
+    Skips entirely when ``SLACK_CHANNEL`` is empty so an operator can
+    silence the post by clearing the constant (rather than commenting
+    out the call site).
+    """
+    if not SLACK_CHANNEL:
+        return
+    try:
+        await ctx.post_to_slack(SLACK_CHANNEL, text)
+    except Exception as exc:
+        ctx.log("bfts_root_slack_post_failed", error=repr(exc))

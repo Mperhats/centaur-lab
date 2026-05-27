@@ -1,0 +1,9 @@
+[project]
+name = "scientist"
+description = "Scientific research persona — academic literature, experiment design, BFTS-driven runs"
+version = "0.1.0"
+
+[tool.centaur]
+type = "persona"
+engine = "codex"
+prompt = "PROMPT.md"

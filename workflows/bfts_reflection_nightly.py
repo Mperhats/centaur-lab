@@ -37,6 +37,11 @@ from packages.bfts_sdk.hyperparams import insert_hyperparams, latest_hyperparams
 from packages.bfts_sdk.schema import assert_bfts_schema_present
 
 WORKFLOW_NAME = "bfts_reflection_nightly"
+# Auto-copied by the workflow loader into schedule metadata (see
+# ``.centaur/services/api/api/workflow_engine.py:1538-1541``); do NOT also
+# add a ``slack_channel`` key to the ``SCHEDULE`` dict by hand or the two
+# sources will silently diverge.
+SLACK_CHANNEL = "bfts-runs"
 
 
 async def _load_recent_runs(
@@ -138,6 +143,10 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
 
     if not recent:
         ctx.log("bfts_reflection_skipped", reason="no_completed_runs")
+        await _post_slack_summary(
+            ctx,
+            f"BFTS nightly reflection `{ctx.run_id}`: skipped — no completed runs in lookback window of {inp.lookback_runs}.",
+        )
         return {"inserted": False}
 
     prev = await ctx.step("load_latest", lambda: latest_hyperparams(pool))
@@ -173,4 +182,25 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         recent_runs=len(recent),
         good_count=good_count,
     )
+    await _post_slack_summary(
+        ctx,
+        f"BFTS nightly reflection `{ctx.run_id}`: debug_prob={debug_prob:.2f} "
+        f"(from {len(recent)} recent runs, {good_count} good).",
+    )
     return {"inserted": True, "debug_prob": debug_prob}
+
+
+async def _post_slack_summary(ctx: WorkflowContext, text: str) -> None:
+    """Best-effort one-line summary to ``#bfts-runs``.
+
+    Slack is auxiliary — a failure to post must not fail the workflow.
+    Skips entirely when ``SLACK_CHANNEL`` is empty so an operator can
+    silence the post by clearing the constant (rather than commenting
+    out the call site).
+    """
+    if not SLACK_CHANNEL:
+        return
+    try:
+        await ctx.post_to_slack(SLACK_CHANNEL, text)
+    except Exception as exc:
+        ctx.log("bfts_reflection_slack_post_failed", error=repr(exc))

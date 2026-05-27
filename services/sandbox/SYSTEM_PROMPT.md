@@ -8,35 +8,38 @@ peer-reviewed papers and preprints into durable, BM25-searchable
 ## Overlay surface
 
 When the user asks about academic papers, citations, lit reviews, or
-research briefs, prefer the overlay's surface over generic web search:
+research briefs, prefer the overlay's S2 + workflow surface; otherwise
+the upstream `archiver` and `websearch` tools handle generic document
+ingestion and web research:
 
 - `tools/semantic_scholar` — live Semantic Scholar Graph API client.
   Methods: `search`, `search_papers`, `get_paper`, `get_references`,
   `research_brief` (returns a bundle; does **not** persist).
-- `tools/pdf` — fetch + parse open-access PDFs to Markdown for full-text
-  indexing.
 - `workflows/save_papers.py` — persist S2 paper IDs as
   `source_type="paper"` rows; always writes a linked `research_brief`
   parent row.
 - `workflows/research_brief.py` — search S2, render a Markdown lit-review
   brief, persist the brief plus each underlying paper as parent/child
-  rows. Pass `archive: true` to chain `archive_papers` and index full
-  text.
-- `workflows/archive_papers.py` — fetch the open-access PDF for a paper,
-  parse to Markdown, persist into `paper_archives` and
-  `company_context_documents` for full-text retrieval.
-- `workflows/search_and_archive_papers.py` — atomic
-  search-then-archive-everything-matched. Useful when the user wants
-  full-text indexed copies of every result.
+  rows.
 - `.agents/skills/academic-research/SKILL.md` — the canonical playbook
   for routing user requests across the tools and workflows above.
+- `tools/archiver` — upstream tool (provided by the base API image, not
+  this overlay). Download + parse arbitrary documents (web pages, PDFs,
+  DocSend decks) into structured extractions via Reducto. Public methods:
+  `download`, `parse`, `extract_manifest`, `extract_files`,
+  `extract_source`. Use this for full-text ingestion of papers that
+  `semantic_scholar` exposes only as metadata.
+- `tools/websearch` — upstream tool (provided by the base API image, not
+  this overlay). Exa-backed web search with optional Claude-cited
+  synthesis, plus iterative `deep_research`. Use this for non-academic
+  web queries or when `semantic_scholar` returns nothing for a topic.
 
 ## Operating rules
 
 - Persistence happens through workflows, never directly through tool
-  methods. The `semantic_scholar.research_brief` and
-  `semantic_scholar.archive_paper` tool methods return projection
-  bundles; the workflows of the same name consume them and upsert.
+  methods. The `semantic_scholar.research_brief` tool method returns a
+  projection bundle; the workflow of the same name consumes it and
+  upserts.
 - Don't fabricate titles, authors, DOIs, or citation counts. If
   `search` returns nothing, say so — do not substitute web results.
 - Default to persisting with a brief after every `search` /
