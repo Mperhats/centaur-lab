@@ -6,8 +6,9 @@ Slack-driven science entrypoint:
    thread delivery (avoids duplicate kickoff lines in the agent stream).
 2. **Plain thread posts**: compact ``research_brief`` lit review, then the
    research idea after ``ideation`` completes.
-3. **BFTS stream** (one agent-session message): live tree progress until
-   completion (via ``slack_stream_session_id`` on ``bfts_root``).
+3. **BFTS stream** (one agent-session message): live tree-search snapshots
+   every ~90s while ``bfts_root`` waits on child trees, then completion
+   (via ``slack_stream_session_id`` on ``bfts_root``).
 
 Failures post to the Slack thread (and close the BFTS stream when open).
 ``bfts_root`` runs asynchronously — its errors are also reported from

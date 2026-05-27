@@ -73,6 +73,7 @@ ENV_NUM_WORKERS = "BFTS_NUM_WORKERS"
 ENV_PRIOR_ATTEMPTS_WINDOW = "BFTS_PRIOR_ATTEMPTS_WINDOW"
 ENV_NUM_SEEDS = "BFTS_NUM_SEEDS"
 ENV_LLM_HTTPS_PROXY = "BFTS_LLM_HTTPS_PROXY"
+ENV_LLM_DIRECT_EGRESS = "BFTS_LLM_DIRECT_EGRESS"
 
 
 def _env_knob(name: str) -> str | None:
@@ -443,16 +444,36 @@ def resolve_api_key_for_model(model: str) -> str:
     return resolve_llm_api_key(api_key_secret_for_model(model))
 
 
+def llm_direct_egress_enabled() -> bool:
+    """Whether BFTS LLM calls bypass iron-proxy from the trusted API pod.
+
+    Sandboxes must keep using per-sandbox iron-proxy. Only workflow workers
+    running ``bfts_tree`` / VLM review in the API pod may set
+    ``BFTS_LLM_DIRECT_EGRESS=1`` so Anthropic calls are not subject to
+    iron-proxy's ~30s upstream header timeout (synthetic 502). Real keys
+    still resolve via ``centaur_sdk.secret`` in the control plane.
+    """
+    raw = _env_knob(ENV_LLM_DIRECT_EGRESS)
+    if raw is None:
+        return False
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def resolve_llm_https_proxy() -> str | None:
     """Optional batch iron-proxy URL for BFTS-owned LLM httpx clients.
 
-    When set via ``BFTS_LLM_HTTPS_PROXY`` (Helm ``api.extraEnv``), expand and
-    VLM calls route through a dedicated proxy pool (longer upstream timeout)
-    instead of the pod's default ``HTTPS_PROXY`` interactive pool.
+    When ``BFTS_LLM_DIRECT_EGRESS`` is enabled, returns ``None`` so httpx
+    connects directly with credentials from ``resolve_llm_api_key``.
+
+    Otherwise, when set via ``BFTS_LLM_HTTPS_PROXY`` (Helm ``api.extraEnv``),
+    expand and VLM calls route through a dedicated proxy pool instead of the
+    pod's default ``HTTPS_PROXY`` interactive pool.
 
     Returns ``None`` when unset so callers defer to httpx's normal
     ``HTTPS_PROXY`` env behavior.
     """
+    if llm_direct_egress_enabled():
+        return None
     raw = _env_knob(ENV_LLM_HTTPS_PROXY)
     if raw is None or not str(raw).strip():
         return None
