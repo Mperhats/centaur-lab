@@ -3,14 +3,15 @@
 # registration, entrypoint.sh dep install, workspace ``uv sync``).
 # See ``tools/bfts_executor/pyproject.toml`` for the full pattern.
 #
-# iron-proxy injection: ``[tool.centaur].optional_secrets`` tells the
-# firewall to substitute the resolved value for
-# ``SEMANTIC_SCHOLAR_API_KEY`` on outbound requests to
-# ``api.semanticscholar.org``. ``optional_secrets`` (vs ``secrets``):
-# anonymous calls degrade to S2's 1 req/sec unauthenticated rate
-# limit but still function — we choose to keep the tool visible to
-# the agent and let it backoff rather than hide it when the secret is
-# absent.
+# iron-proxy injection: ``[tool.centaur].secrets`` tells the firewall
+# to substitute the resolved value for ``SEMANTIC_SCHOLAR_API_KEY``
+# on outbound requests to ``api.semanticscholar.org``. Declared as
+# required (not ``optional_secrets``) so ``tool_manager`` hides the
+# tool from the agent when the key is unbound — the BFTS workflows
+# (``gather_citations``, ``ideation``) and the research-brief flow
+# all rely on bulk S2 calls that would saturate the anonymous
+# 1 req/sec rate limit and silently fail mid-run. Aligns with
+# upstream centaur-acme's required-secret contract.
 [project]
 name = "semantic-scholar"
 description = "Semantic Scholar Graph API client (paper search + bulk metadata + research-brief persistence to Postgres)."
@@ -38,6 +39,6 @@ package = false
 
 [tool.centaur]
 module = "client.py"
-optional_secrets = [
+secrets = [
     {type = "http", name = "SEMANTIC_SCHOLAR_API_KEY", match_headers = ["x-api-key"], hosts = ["api.semanticscholar.org"]},
 ]

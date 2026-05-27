@@ -4,6 +4,13 @@
 .env.*.local
 !.env.example
 
+# Local Helm values — per centaur-acme guidance, the overlay repo
+# carries no Helm values. Local laptop overrides live in a gitignored
+# values*.yaml (see README's local-deploy section). Helm values for
+# any cluster live in the sibling centaur-scientist-infra repo
+# instead.
+values*.yaml
+
 # Python detritus (in case anything escapes the .centaur/ submodule)
 __pycache__/
 *.py[cod]
@@ -24,7 +31,8 @@ node_modules/
 .worktrees/
 
 # Local scratch directory. Never ships in the overlay image — also
-# excluded by .dockerignore.
+# excluded by .dockerignore. Pattern (unanchored) so nested ``tmp/``
+# (e.g. ``tools/<name>/tmp/``) is also ignored.
 tmp/
 
 # Ruff + pytest caches

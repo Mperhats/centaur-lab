@@ -1,13 +1,12 @@
 line-length = 100
 target-version = "py311"
 
-# Exclude the vendored upstream submodules and any local scratch dir
+# Exclude the vendored centaur submodule and the local scratch dir
 # from lint — upstream has its own toolchain. uv's managed venv and
 # tmp/ are also skipped explicitly because ruff does not always honor
 # .gitignore for tracked-but-ignored siblings.
 extend-exclude = [
     ".centaur",
-    ".scientist",
     ".venv",
     "tmp",
 ]
@@ -19,9 +18,8 @@ ignore = ["E501"]
 [lint.per-file-ignores]
 # Tool CLIs are standalone entrypoints that use load_dotenv and print
 "*/cli.py" = ["TID251", "T201"]
-# Workflow handlers print() to ctx.log in a few legacy paths; allow
-# T201 for now and tighten when those land on the structured logger.
-"workflows/*.py" = ["T201"]
+# Dev scripts are user-facing CLIs — print is the output channel
+"scripts/*.py" = ["T201"]
 
 [lint.flake8-tidy-imports.banned-api]
 "os.getenv" = { msg = "Use `from centaur_sdk import secret; secret('KEY')` instead of os.getenv(). Secrets come from the secret manager, not environment variables." }

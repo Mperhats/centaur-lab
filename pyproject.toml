@@ -76,14 +76,11 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-# Only integration tests live in-tree right now (see
-# ``tools/semantic_scholar/tests/integration/`` and
-# ``workflows/tests/integration/``); the unit-test suite was moved into
-# the gitignored ``tmp/test-old/`` mirror during the centaur_lab → S2
-# dispersal and will be reinstated incrementally as projections and
-# workflow handlers stabilize. A single ``uv run pytest`` from the
-# repo root walks both integration trees.
-testpaths = ["tools", "workflows"]
+# Overlay-invariant tests + smoke tests live under ``tests/``; the
+# unit-test suite was parked in the gitignored ``tmp/test-old/``
+# mirror during the centaur_lab → S2 dispersal and will be reinstated
+# incrementally as projections and workflow handlers stabilize.
+testpaths = ["tests"]
 # - Repo root on the path so ``from tools.bfts_executor.client import …``
 #   and ``from workflows.bfts_tree import …`` resolve as namespace
 #   packages — byte-identical to how the API pod sets up TOOL_DIRS /
@@ -99,16 +96,12 @@ testpaths = ["tools", "workflows"]
 #   entry there.
 pythonpath = [".", "packages"]
 asyncio_mode = "strict"
-# ``importlib`` is required because we have multiple sibling
-# ``tests/`` packages (one each under ``workflows/`` and
-# ``tools/<name>/``) without ``workflows/__init__.py`` or
-# ``tools/__init__.py`` — those stay as implicit namespace packages
-# so the API pod's runtime ``importlib.import_module("tools.<n>.client")``
-# discovery works without us hard-pinning the package roots here.
-# Pytest's default ``prepend`` import mode would collide the leaf
-# ``tests`` package names across siblings; ``importlib`` mode imports
-# each test file under its unique rootdir-relative module path
-# (e.g. ``workflows.tests.test_bfts_config``,
+# ``importlib`` is required so future per-tool / per-workflow
+# ``tests`` packages can co-exist with the top-level ``tests/`` dir
+# without leaf-name collisions (pytest's default ``prepend`` import
+# mode would clash sibling ``tests`` packages). Imports each test
+# file under its unique rootdir-relative module path
+# (e.g. ``tests.test_overlay_invariants``,
 # ``tools.bfts_executor.tests.test_collect_artifacts``).
 addopts = "--import-mode=importlib"
 

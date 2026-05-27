@@ -14,17 +14,14 @@
 .gitmodules
 .github
 
-# Submodules — vendored upstream source trees, never shipped in the
-# overlay image. ``.centaur`` is the base platform; ``.scientist`` is
-# AI-Scientist-v2 (the BFTS reference implementation we port from).
-# ``packages/centaur_sdk`` is a dev-only symlink into
-# ``.centaur/centaur_sdk`` (see pyproject.toml); the API pod has its
-# own ``/app/centaur_sdk/`` baked into its image so the overlay must
-# not ship a copy. ``packages/bfts_sdk`` IS overlay payload and is
-# shipped — it lands at ``/app/overlay/org/packages/bfts_sdk`` and
+# Submodule — vendored upstream Centaur source tree, never shipped in
+# the overlay image. ``packages/centaur_sdk`` is a dev-only symlink
+# into ``.centaur/centaur_sdk`` (see pyproject.toml); the API pod has
+# its own ``/app/centaur_sdk/`` baked into its image so the overlay
+# must not ship a copy. ``packages/bfts_sdk`` IS overlay payload and
+# is shipped — it lands at ``/app/overlay/org/packages/bfts_sdk`` and
 # resolves through the overlay root that TOOL_DIRS puts on sys.path.
 .centaur
-.scientist
 packages/centaur_sdk
 
 # Dev/ops directories at the repo root that aren't part of the overlay.
@@ -40,6 +37,9 @@ infra
 .worktrees
 
 # Helm values + GitOps configs (consumed at deploy time, not runtime).
+# Helm values for any centaur-scientist cluster live in the sibling
+# centaur-scientist-infra repo — but we keep this rule defensive in
+# case a local user writes their own values*.yaml at the repo root.
 values*.yaml
 
 # Virtual environments
@@ -71,6 +71,10 @@ Dockerfile*
 tests
 **/tests
 tmp
+
+# Dev-only tooling (submodule + venv sync). The API pod has its own
+# /app/centaur_sdk/, so the overlay never runs these.
+scripts
 
 # Environment (secrets — never bake into images)
 **/.env

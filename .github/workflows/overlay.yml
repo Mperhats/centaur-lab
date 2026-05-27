@@ -48,13 +48,8 @@ env:
   IMAGE_SOURCE: https://github.com/${{ github.repository }}
 
 jobs:
-  # No Test step: unit tests are parked under the gitignored
-  # ``tmp/test-old/`` mirror (see ``AGENTS.md`` Conventions). When the
-  # unit suite is reinstated against the new ``projections/`` +
-  # inlined-persistence shape, restore an honest ``pytest tests/ -v``
-  # step here rather than a wrapper that masks exit codes.
-  lint:
-    name: Lint overlay
+  test:
+    name: Lint and test overlay
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -70,15 +65,31 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Install dev deps + aggregated runtime deps
-        run: uv sync --all-packages --python 3.11
+      # ``--all-packages`` aggregates every workspace member's
+      # ``[project].dependencies`` into the root ``.venv`` — without it,
+      # uv only installs the dev group and tool runtime deps are missing.
+      # ``--frozen`` makes CI fail when uv.lock is out of date relative
+      # to any pyproject.toml in the workspace (root or per-tool). Locks
+      # get out of date silently when a contributor edits a per-tool
+      # pyproject without re-running sync and committing the regenerated
+      # lockfile; this is the gate that catches it.
+      - name: Install dev deps + aggregated runtime deps (locked)
+        run: uv sync --frozen --all-packages --python 3.11
 
       - name: Lint
         run: uv run ruff check .
 
+      # Only overlay-invariant + smoke tests live under ``tests/``
+      # right now; the legacy unit suite is parked in the gitignored
+      # ``tmp/test-old/`` mirror and will be reinstated incrementally
+      # as projections + workflow handlers stabilize (see ``AGENTS.md``
+      # Conventions).
+      - name: Test
+        run: uv run pytest tests/ -v
+
   publish:
     name: Build and push overlay image
-    needs: lint
+    needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
@@ -136,7 +147,7 @@ jobs:
   # block the overlay republish, and vice versa.
   publish-bfts-executor:
     name: Build and push bfts-executor image
-    needs: lint
+    needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
