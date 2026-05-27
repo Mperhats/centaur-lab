@@ -545,7 +545,12 @@ Three surfaces in one Slack thread (do not mix them):
 
 Implementation: `workflows/bfts_research.py` + `packages/bfts_sdk/slack_stream.py`. The brief is **not** embedded in an agent-session stream anymore.
 
-**Operator expectation:** the agent posts **once** (`Started bfts_research \`wfr_…\`. Brief and idea post in this thread; BFTS progress streams separately.`), then stays quiet. Duplicate kickoff lines in the agent stream are a known Codex streaming dedupe issue upstream in slackbot.
+**Operator expectation:** the agent replies **once** with only the run id
+(e.g. ``Queued `wfr_…` — see this thread for the literature brief.``) and does
+**not** paste kickoff/brief into the agent stream. The workflow posts the
+**compact** lit review as the **first thread message** (run id + `compact_markdown`),
+then the idea, then the BFTS stream. Long kickoff paragraphs in the agent
+stream duplicate via upstream Codex streaming dedupe if the model ignores this.
 
 Legacy `bfts_root` without `bfts_research` may still use plain `send_message` for kickoff when no stream session is passed.
 

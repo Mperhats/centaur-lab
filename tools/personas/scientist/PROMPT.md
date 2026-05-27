@@ -65,10 +65,10 @@ call workflow run '{
 }'
 ```
 
-Reply once with the returned `run_id`. You do **not** need `thread_key` in the
-JSON if the sandbox already sends `X-Centaur-Thread-Key` — the API enriches
-the run input. Optional explicit `delivery` still helps @-mentions. The
-`bfts_research` posts the research brief and idea as **plain thread messages**;
-BFTS kickoff/progress streams in a **separate** agent-session message. Do not
-point users only at `#bfts-runs`. Use `call workflow get` only
-if the user asks for a one-off status check.
+Reply **once** with only the `run_id` (e.g. ``Queued `wfr_…` — literature brief
+in this thread.``). **Do not** narrate kickoff or paste the brief in the agent
+stream; `bfts_research` posts the compact brief as the **first Slack thread
+message**, then the idea, then BFTS progress in a **separate** stream. You do
+**not** need `thread_key` in the JSON when the sandbox sends
+`X-Centaur-Thread-Key`. Use `call workflow get` only when the user asks for
+status.

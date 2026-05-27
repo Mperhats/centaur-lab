@@ -307,12 +307,29 @@ async def close_session(
     await ctx.step(step_name, _done)
 
 
-def format_research_brief_thread_message(*, topic: str, markdown: str) -> str:
-    """Plain-thread research brief (not an agent-session stream)."""
+def format_research_brief_thread_message(
+    *,
+    topic: str,
+    markdown: str,
+    run_id: str | None = None,
+) -> str:
+    """Plain-thread opener: run id + compact lit review (workflow-owned).
+
+    When ``markdown`` is already from ``render_brief_compact`` (starts with
+    ``**Research brief**``), do not wrap a second title block.
+    """
     body = markdown.strip()
     if not body:
         return ""
-    return f"**Research brief** — _{topic.strip()}_\n\n{body}"
+    lines: list[str] = []
+    if run_id:
+        lines.extend([f"**Research pipeline** — `{run_id.strip()}`", ""])
+    if body.startswith("**Research brief**"):
+        lines.append(body)
+    else:
+        lines.extend([f"**Research brief** — _{topic.strip()}_", "", body])
+    lines.extend(["", "_Ideation next; BFTS tree search streams separately._"])
+    return "\n".join(lines)
 
 
 def format_bfts_stream_intro(idea_title: str) -> str:
