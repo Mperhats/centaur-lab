@@ -1,9 +1,13 @@
 ---
 name: academic-research
-description: "Use when answering questions about academic papers, citations, literature reviews, or research briefs — search Semantic Scholar, build persisted lit-review briefs, surface paper metadata, walk the citation graph. Triggers on peer-reviewed papers, preprints, arXiv, NeurIPS, biology/chemistry journals, ML/AI research topics, \"research brief\", \"lit review\", \"literature review\", or \"what does the literature say about X\"."
+description: "Use when answering questions about academic papers, citations, literature reviews, or research briefs — search Semantic Scholar, build persisted lit-review briefs, surface paper metadata, walk the citation graph. Triggers on peer-reviewed papers, preprints, arXiv, NeurIPS, biology/chemistry journals, ML/AI research topics, \"research brief\", \"lit review\", \"literature review\", or \"what does the literature say about X\". For BFTS / tree-search runs, use the bfts-experiments skill instead."
 ---
 
 # Academic Research
+
+For **BFTS / `bfts_root` / tree-search experiments**, use
+`.agents/skills/bfts-experiments/SKILL.md` — literature tools here do not
+replace a populated `idea` or the `ideation` workflow.
 
 Use the `semantic_scholar` tool whenever the user asks about peer-reviewed
 papers, preprints, citations, or what a specific researcher has published.
@@ -13,9 +17,11 @@ literature: arXiv, NeurIPS, biology/chem journals, etc.
 **Default flow: persist with a research brief.** After finding papers via
 `search`, call `save_papers` (which always writes a linked
 `research_brief` row) or call `semantic_scholar.research_brief` directly
-for a single-query lit review. Skip persistence ONLY when the user
-explicitly says "just search", "don't save", "exploratory only", or
-otherwise signals they don't want the result remembered.
+for a single-query lit review. The **`ideation` workflow always persists**
+its seed papers via `save_papers` — do not treat that as optional. Skip
+persistence on ad-hoc `search` turns ONLY when the user explicitly says
+"just search", "don't save", "exploratory only", or otherwise signals they
+do not want the result remembered.
 
 **Pick the right surface:**
 
@@ -23,6 +29,27 @@ otherwise signals they don't want the result remembered.
 - "Summarize this paper" / DOI / arXiv ID / S2 ID → `semantic_scholar.get_paper` + `save_papers` follow-up (brief + paper)
 - "What does this paper cite?" → `semantic_scholar.get_references`
 - "Build a brief / lit review / writeup on X" → `semantic_scholar.research_brief` (atomic search + render + persist)
+- "Research idea for BFTS" / topic before tree search → `ideation` workflow (always persists seed papers; see below)
+
+## `ideation` workflow (BFTS prep)
+
+Use when the user needs a structured research `idea` for `bfts_root`:
+
+```bash
+call workflow run '{
+  "workflow_name": "ideation",
+  "eager_start": true,
+  "input": {"topic": "<one-sentence research question>"}
+}'
+```
+
+On completion, `output_json` includes:
+
+- `idea` — pass straight into `bfts_root` input
+- `seed_papers` — S2 `paperId` list from the seed search
+- `papers_persisted` — result of an automatic child `save_papers` run (brief + paper rows in `company_context_documents`)
+
+**Do not** call `save_papers` again for the same seed IDs unless the user asks to save additional papers. See `bfts-experiments` for the `bfts_root` kickoff rules.
 
 ## Paper Search (`semantic_scholar.search`)
 
@@ -50,6 +77,27 @@ For a Slack reply, return at most 5 papers unless the user asks for more.
 For each paper include: title, first author + et al., year, citation count,
 and one sentence on the contribution drawn from the abstract. Link to
 `url` (or `openAccessPdf.url` when present) so the human can dive in.
+
+### Optional: attach open-access PDFs in Slack
+
+There is **no** one-shot workflow that bundles PDFs after `ideation` or
+`research_brief` in this overlay. You can still attach PDFs for papers you
+cite using **existing** sandbox tools when the user wants files (not just
+links):
+
+1. From `search` / `get_paper` / saved row metadata, read `openAccessPdf`
+   (or construct an arXiv PDF URL from `externalIds.ArXiv` when present).
+2. Download in the sandbox, e.g. `curl -fsSL -o /home/agent/uploads/paper.pdf '<pdf_url>'`.
+3. Upload to the thread: `slack-upload /home/agent/uploads/paper.pdf 'Short comment'`
+   or `call slack upload_file` with `content_base64` + `thread_ts` (see
+   `call discover slack`).
+
+**Limits:** only papers with a reachable open-access PDF; paywalled PDFs
+get a link only. Cap attachments (e.g. top 3–5 papers the user cares about);
+each file must stay under Slack/API size limits (~10 MB per attachment path).
+`tools/archiver` `download` is for DocSend/Google Drive — **not** arXiv/S2
+PDF URLs. Full-text archive + parse indexing is **not** in this repo today
+(see `tmp/latest` `archive_papers` on other branches for that direction).
 
 Do NOT fabricate titles, authors, or DOIs. If `search` returns
 nothing, say so and offer alternative queries — don't substitute web

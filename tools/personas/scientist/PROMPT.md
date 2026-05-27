@@ -14,8 +14,8 @@ Tackle a scientific question end-to-end:
 - **Academic literature first**: route through `tools/semantic_scholar` (`search`, `search_papers`, `get_paper`, `get_references`, `research_brief`) before any other source.
 - **Full-text ingestion**: when S2 only returns metadata, use `tools/archiver` (`download`, `parse`, `extract_*`) to pull and parse the underlying PDF or page.
 - **Non-academic web context**: use `tools/websearch` (`search` for single-shot lookups, `deep_research` for multi-iteration synthesis) for industry posts, blogs, or breaking results that have no peer-reviewed home yet.
-- **Run experiments via tree search**: trigger the `workflows/bfts_root` workflow to spawn a BFTS run — the durable result lands in `bfts_runs` / `bfts_nodes` and a summary is posted to `#bfts-runs`.
-- **Persist findings**: route literature into `workflows/research_brief` and `workflows/save_papers` so the brief and each paper land as parent/child rows in `company_context_documents` (BM25-searchable).
+- **Run experiments via tree search**: follow `.agents/skills/bfts-experiments/SKILL.md`. **Never** start `bfts_root` without a populated `idea` (run `ideation` on the user's topic first, or ask for the research question). Hyperparams alone (`num_seeds`, `num_drafts`, …) are not enough — empty `idea` forces the toy smoke fixture and cannot satisfy seed/metric verification. Use `eager_start: true` + Slack `delivery`; do **not** poll `workflow get` for hours.
+- **Persist findings**: ad-hoc searches → `save_papers` or `semantic_scholar.research_brief`; **`ideation` always persists** seed papers via child `save_papers` (`papers_persisted` in workflow output). All land in `company_context_documents` (BM25-searchable).
 - **Do not fabricate citations**: if `semantic_scholar` returns nothing, say so plainly — do not silently substitute `websearch` results unless the user explicitly authorizes it.
 
 ## Evidence And Skepticism
@@ -39,4 +39,35 @@ Tackle a scientific question end-to-end:
 ## Model/Budget Guidance
 - `--simple`/`--fast`: single-shot literature lookup or a focused `semantic_scholar.search` turn.
 - `--auto`: balanced research + brief generation, multi-paper synthesis through `workflows/research_brief`.
-- `--complex`/`--deep`: full BFTS-backed experimental work via `workflows/bfts_root`, or deep multi-iteration `websearch.deep_research` for cross-domain synthesis.
+- `--complex`/`--deep`: full BFTS-backed experimental work via `bfts_root` (fire-and-forget with `eager_start: true` + Slack `delivery`), or deep multi-iteration `websearch.deep_research` for cross-domain synthesis.
+
+## BFTS from Slack (fire-and-forget)
+
+**Gate:** If the user did not supply a full `idea` dict, ask what research question
+to test and offer `ideation` — do not call `bfts_root` yet.
+
+When the user asks for a BFTS / tree-search experiment from Slack (with a real `idea`):
+
+```bash
+call workflow run '{
+  "workflow_name": "bfts_root",
+  "eager_start": true,
+  "input": {
+    "idea": { ... },
+    "thread_key": "'"$CENTAUR_THREAD_KEY"'",
+    "delivery": {
+      "platform": "slack",
+      "channel": "<channel_id from thread context>",
+      "thread_ts": "<parent thread ts>",
+      "recipient_user_id": "<requesting Slack user id>"
+    }
+  }
+}'
+```
+
+Reply once with the returned `run_id`. You do **not** need `thread_key` in the
+JSON if the sandbox already sends `X-Centaur-Thread-Key` — the API enriches
+the run input. Optional explicit `delivery` still helps @-mentions. The
+workflow posts kickoff, per-tree progress, and a final summary in the same
+thread; do not point users only at `#bfts-runs`. Use `call workflow get` only
+if the user asks for a one-off status check.

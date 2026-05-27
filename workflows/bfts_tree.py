@@ -481,8 +481,8 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         # best node's code with overridden seeds, so we need the pod
         # awake before fanning out. One unsuffixed step name is fine —
         # there is exactly one seed block per ``bfts_tree`` workflow.
-        # No matching pause after the seed fan-out: ``bfts_root``'s
-        # ``finally`` block calls ``stop_sandbox`` during teardown,
+        # No matching pause after the seed fan-out: ``bfts_root`` calls
+        # ``stop_sandbox`` only after all ``wait_tree_*`` steps finish,
         # which deletes the CR + pod outright; a pause→stop sequence
         # would just waste a CRD patch.
         await ctx.step(
