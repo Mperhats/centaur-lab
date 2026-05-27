@@ -127,6 +127,16 @@ class ExpandContext:
     # unchanged so seed nodes get the same persisted shape as a
     # normal expansion (metric_json / is_buggy / etc.).
     seed_override: int | None = None
+    # Phase 5a: when multiple ``expand_node`` calls run inside one
+    # ``bfts_tree`` workflow, prefix every ``ctx.step`` name so parallel
+    # siblings do not collide in ``workflow_checkpoints``. Example:
+    # ``expand_a1b2c3d4_draft_propose``. Empty string preserves Phase 4
+    # child-workflow step ids (one expand per workflow run).
+    step_prefix: str = ""
+
+
+def _expand_step_name(prefix: str, name: str) -> str:
+    return f"{prefix}{name}" if prefix else name
 
 
 def _branch(parent: dict[str, Any] | None) -> str:
@@ -279,6 +289,10 @@ async def _metric_extract(
 
 async def expand_node(*, ctx: Any, expand_ctx: ExpandContext) -> dict[str, Any]:
     """Run one full expansion. Returns a dict suitable for update_node_metric."""
+    prefix = expand_ctx.step_prefix
+
+    def _step(name: str) -> str:
+        return _expand_step_name(prefix, name)
 
     # F.4: ``seed_override`` short-circuits the LLM propose step but
     # leaves the rest of the pipeline (exec / bug_judge / metric_parse
@@ -287,16 +301,16 @@ async def expand_node(*, ctx: Any, expand_ctx: ExpandContext) -> dict[str, Any]:
     if expand_ctx.seed_override is not None:
         branch = "seed"
         proposed = await ctx.step(
-            "seed_propose", lambda: _seed_propose(expand_ctx)
+            _step("seed_propose"), lambda: _seed_propose(expand_ctx)
         )
     else:
         branch = _branch(expand_ctx.parent_node)
         proposed = await ctx.step(
-            f"{branch}_propose", lambda: _propose_code(expand_ctx)
+            _step(f"{branch}_propose"), lambda: _propose_code(expand_ctx)
         )
 
     exec_res = _coerce_exec_result(await ctx.step(
-        f"{branch}_exec",
+        _step(f"{branch}_exec"),
         lambda: ctx.tools.bfts_executor.exec_python(
             sandbox_id=expand_ctx.sandbox_id,
             code=proposed["code"],
@@ -325,7 +339,7 @@ async def expand_node(*, ctx: Any, expand_ctx: ExpandContext) -> dict[str, Any]:
         }
 
     judge = await ctx.step(
-        "bug_judge",
+        _step("bug_judge"),
         lambda: _bug_judge(
             [proposed["code"], "\n".join(exec_res["term_out"])],
             llm_api_key=expand_ctx.llm_api_key,
@@ -350,12 +364,12 @@ async def expand_node(*, ctx: Any, expand_ctx: ExpandContext) -> dict[str, Any]:
         }
 
     parse_code = await ctx.step(
-        "metric_parse_propose",
+        _step("metric_parse_propose"),
         lambda: _metric_parse_inline(expand_ctx, proposed, exec_res),
     )
 
     parse_exec = _coerce_exec_result(await ctx.step(
-        "metric_parse_exec",
+        _step("metric_parse_exec"),
         lambda: ctx.tools.bfts_executor.exec_python(
             sandbox_id=expand_ctx.sandbox_id,
             code=parse_code,
@@ -365,7 +379,7 @@ async def expand_node(*, ctx: Any, expand_ctx: ExpandContext) -> dict[str, Any]:
     ))
 
     metric = await ctx.step(
-        "metric_extract",
+        _step("metric_extract"),
         lambda: _metric_extract(
             parse_exec["term_out"],
             llm_api_key=expand_ctx.llm_api_key,
@@ -374,12 +388,12 @@ async def expand_node(*, ctx: Any, expand_ctx: ExpandContext) -> dict[str, Any]:
     )
 
     plot_code = await ctx.step(
-        "plot_propose",
+        _step("plot_propose"),
         lambda: _plot_propose_inline(expand_ctx, proposed, metric),
     )
 
     plot_exec = _coerce_exec_result(await ctx.step(
-        "plot_exec",
+        _step("plot_exec"),
         lambda: ctx.tools.bfts_executor.exec_python(
             sandbox_id=expand_ctx.sandbox_id,
             code=plot_code,
@@ -389,7 +403,7 @@ async def expand_node(*, ctx: Any, expand_ctx: ExpandContext) -> dict[str, Any]:
     ))
 
     artifacts = await ctx.step(
-        "collect_artifacts",
+        _step("collect_artifacts"),
         lambda: ctx.tools.bfts_executor.collect_artifacts(
             sandbox_id=expand_ctx.sandbox_id,
             dest_dir=Path(f"/tmp/bfts/{expand_ctx.node_id}"),
@@ -417,7 +431,7 @@ async def expand_node(*, ctx: Any, expand_ctx: ExpandContext) -> dict[str, Any]:
         # restart resumes after the (cached) picker call.
         if len(plot_paths) > _VLM_MAX_PLOTS:
             picked = await ctx.step(
-                "select_best_plots",
+                _step("select_best_plots"),
                 lambda paths=plot_paths, desc=task_desc, m=picker_model: (
                     ctx.tools.bfts_vlm.select_best_n_plots(
                         plot_paths=paths,
@@ -430,7 +444,7 @@ async def expand_node(*, ctx: Any, expand_ctx: ExpandContext) -> dict[str, Any]:
         else:
             picked = plot_paths
         vlm = await ctx.step(
-            "vlm_analyze",
+            _step("vlm_analyze"),
             lambda paths=picked, desc=task_desc, m=vlm_model: (
                 ctx.tools.bfts_vlm.analyze_plots(
                     plot_paths=paths,

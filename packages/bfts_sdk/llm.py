@@ -23,6 +23,8 @@ from typing import Any
 
 import httpx
 
+from packages.bfts_sdk.config import resolve_llm_max_inflight
+
 _ANTHROPIC_VERSION = "2023-06-01"
 _OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
 _ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
@@ -42,8 +44,42 @@ adding the ``backoff`` package as a dep."""
 _RETRY_BASE_DELAY_S = 1.0
 """Initial backoff. Doubles each retry: 1s, 2s, 4s."""
 
+_llm_inflight_semaphore: asyncio.Semaphore | None = None
+_llm_inflight_limit: int | None = None
+
+
+def _llm_inflight_semaphore() -> asyncio.Semaphore | None:
+    """Lazy global cap on concurrent outbound LLM requests (Phase 5a)."""
+    global _llm_inflight_semaphore, _llm_inflight_limit
+    limit = resolve_llm_max_inflight()
+    if limit is None:
+        return None
+    if _llm_inflight_semaphore is None or _llm_inflight_limit != limit:
+        _llm_inflight_semaphore = asyncio.Semaphore(limit)
+        _llm_inflight_limit = limit
+    return _llm_inflight_semaphore
+
 
 async def _post_with_retry(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    json: dict[str, Any],
+    headers: dict[str, str],
+) -> httpx.Response:
+    """POST with exponential backoff on transient errors."""
+    sem = _llm_inflight_semaphore()
+    if sem is None:
+        return await _post_with_retry_inner(
+            client, url, json=json, headers=headers
+        )
+    async with sem:
+        return await _post_with_retry_inner(
+            client, url, json=json, headers=headers
+        )
+
+
+async def _post_with_retry_inner(
     client: httpx.AsyncClient,
     url: str,
     *,
