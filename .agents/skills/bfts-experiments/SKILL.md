@@ -24,22 +24,15 @@ separately in Slack.
 
 ### Start from Slack (required for thread streaming)
 
-Prefer the **`bfts_runner`** tool — it injects `thread_key` + `delivery` from
-the sandbox JWT (the plain `call workflow run` path often omits them on the
-deployed API pin):
+Always use the **`bfts_runner`** tool. It runs in the API process, reads
+`thread_key` from the sandbox JWT, derives the Slack `delivery` dict, and
+enqueues `bfts_research` directly via `create_workflow_run` — bypassing
+`POST /workflows/runs` (which does not merge `X-Centaur-Thread-Key` into
+the run input). Bare `call workflow run` is unsupported for Slack-driven
+BFTS runs and will silently lose thread context.
 
 ```bash
 call bfts_runner start_research '{"topic": "<user research question>"}'
-```
-
-Fallback (injects thread into JSON body):
-
-```bash
-"$CENTAUR_OVERLAY_DIR/services/sandbox/call-workflow-run.sh" '{
-  "workflow_name": "bfts_research",
-  "eager_start": true,
-  "input": {"topic": "<user research question>"}
-}'
 ```
 
 ### Agent reply contract (no redundancy)
