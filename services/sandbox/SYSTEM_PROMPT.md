@@ -70,6 +70,8 @@ call bfts_runner start_research '{"topic": "<research question>"}'
 Do **not** use bare `call workflow run` for `bfts_research` in Slack — the run
 will miss `thread_key` and streaming will not appear in this thread. Reply
 **once** with the returned `run_id`; do not duplicate the same kickoff paragraph.
+The workflow posts the literature brief and research idea as plain thread
+messages; only BFTS tree progress uses a separate streamed message.
 
 After `ideation`, use `output_json.bfts_run_input` for manual `bfts_root` — do not omit
 hyperparams. Do not start BFTS with only `num_seeds` / `num_drafts` — empty `idea` uses the

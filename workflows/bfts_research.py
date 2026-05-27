@@ -1,13 +1,20 @@
-"""Workflow: streamed ideation (brief + idea) → eager ``bfts_root`` with streamed status.
+"""Workflow: research brief + ideation → ``bfts_root`` with BFTS-only Slack stream.
 
 Slack-driven science entrypoint:
 
-1. **Ideation stream** (first Slack agent-session message): literature brief,
-   then structured research idea.
-2. **BFTS stream** (second message): tree-search kickoff and live progress
-   until completion (via ``slack_stream_session_id`` on the child run).
+1. **Agent turn** (``slack_thread_turn``): live stream-of-consciousness only —
+   the sandbox agent posts one short kickoff line; workflows do not open a
+   competing agent-session stream for research.
+2. **Plain thread posts**: full ``research_brief`` markdown, then the
+   structured research idea after the ``ideation`` child completes.
+3. **BFTS stream** (one agent-session message): tree-search kickoff and live
+   progress until completion (via ``slack_stream_session_id`` on ``bfts_root``).
 
-Falls back to plain ``send_message`` when ``SLACKBOT_URL`` is unset.
+Failures post to the Slack thread (and close the BFTS stream when open).
+``bfts_root`` runs asynchronously — its errors are also reported from
+``bfts_root`` via ``notify_run_failure`` (not by re-waiting here).
+
+Falls back to no Slack UI when ``delivery`` / ``SLACKBOT_URL`` are unset.
 """
 from __future__ import annotations
 
@@ -23,14 +30,17 @@ from packages.bfts_sdk.slack_delivery import (
     resolve_slack_delivery,
 )
 from packages.bfts_sdk.slack_stream import (
-    close_session,
     format_bfts_stream_intro,
     format_idea_markdown,
-    format_research_stream_intro,
+    format_research_brief_thread_message,
+    notify_run_failure,
+    notify_thread_failure,
     open_session,
     post_markdown,
-    post_step,
+    post_thread_message,
     streaming_available,
+    workflow_run_error_text,
+    workflow_run_failed,
 )
 from workflows.ideation import _child_workflow_output
 
@@ -60,6 +70,14 @@ def _slack_metadata(ctx: WorkflowContext) -> dict[str, Any]:
     return dict(raw) if isinstance(raw, dict) else {}
 
 
+def _brief_markdown_for_slack(brief_result: dict[str, Any]) -> str:
+    if brief_result.get("status") == "completed":
+        return str(
+            brief_result.get("markdown") or brief_result.get("compact_markdown") or ""
+        ).strip()
+    return ""
+
+
 async def _run_research_brief(
     ctx: WorkflowContext,
     *,
@@ -79,10 +97,7 @@ async def _run_research_brief(
     )
 
 
-async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
-    if not inp.topic or not inp.topic.strip():
-        raise ValueError("topic cannot be empty")
-
+async def _run_research_pipeline(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     topic = inp.topic.strip()
     merged_input = enrich_run_input_from_headers(
         header_thread_key=(
@@ -98,218 +113,204 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         run_input=merged_input,
         explicit_thread_key=thread_key or inp.thread_key,
     )
-    use_stream = streaming_available() and bool(delivery and thread_key)
+    use_bfts_stream = streaming_available() and bool(delivery and thread_key)
     metadata = _slack_metadata(ctx)
-
-    brief_limit = inp.brief_paper_limit or inp.seed_paper_limit or _DEFAULT_BRIEF_LIMIT
-    ideation_session = None
     bfts_session = None
+    brief_limit = inp.brief_paper_limit or inp.seed_paper_limit or _DEFAULT_BRIEF_LIMIT
 
-    if use_stream and delivery:
-        ideation_session = await open_session(
-            ctx,
-            delivery=delivery,
-            thread_key=thread_key,
-            metadata=metadata,
-            title="Research brief & idea",
-            header="scientist · research",
-            step_name="open_slack_ideation_stream",
-        )
-        if ideation_session:
-            await post_markdown(
+    try:
+        brief_result = await _run_research_brief(ctx, topic=topic, limit=brief_limit)
+        if not isinstance(brief_result, dict):
+            msg = f"research_brief returned unexpected type: {type(brief_result).__name__}"
+            raise RuntimeError(msg)
+
+        brief_markdown = _brief_markdown_for_slack(brief_result)
+        if delivery and brief_markdown:
+            await post_thread_message(
                 ctx,
-                ideation_session,
-                format_research_stream_intro(topic),
-                step_name="stream_ideation_intro",
+                delivery=delivery,
+                text=format_research_brief_thread_message(
+                    topic=topic,
+                    markdown=brief_markdown,
+                ),
+                step_name="post_slack_research_brief",
+                log_event="bfts_research_slack_brief_failed",
             )
-            await post_step(
+        elif delivery and str(brief_result.get("status") or "") != "completed":
+            err = workflow_run_error_text(brief_result)
+            await notify_thread_failure(
                 ctx,
-                ideation_session,
-                step_id="literature",
-                title="Literature search",
-                status="in_progress",
-                details=f"Topic: {topic}",
-                step_name="stream_literature_start",
+                delivery=delivery,
+                headline="Research brief failed",
+                orchestrator_run_id=ctx.run_id,
+                error_text=err,
+                step_name="post_slack_research_brief_failed",
+            )
+            raise RuntimeError(f"research_brief did not complete: {err}")
+
+        ideation_input: dict[str, Any] = {"topic": topic}
+        if inp.thread_key:
+            ideation_input["thread_key"] = inp.thread_key
+        if inp.delivery is not None:
+            ideation_input["delivery"] = inp.delivery
+        for key, val in (
+            ("num_seeds", inp.num_seeds),
+            ("num_drafts", inp.num_drafts),
+            ("num_workers", inp.num_workers),
+        ):
+            if val is not None:
+                ideation_input[key] = val
+        if inp.seed_paper_limit is not None:
+            ideation_input["seed_paper_limit"] = inp.seed_paper_limit
+        if inp.critic_retries:
+            ideation_input["critic_retries"] = inp.critic_retries
+        if inp.draft_model is not None:
+            ideation_input["draft_model"] = inp.draft_model
+        if inp.llm_api_key_secret is not None:
+            ideation_input["llm_api_key_secret"] = inp.llm_api_key_secret
+
+        ideation_child = await ctx.start_workflow(
+            "start_ideation",
+            workflow_name="ideation",
+            run_input=ideation_input,
+            trigger_key=f"{ctx.run_id}:ideation",
+            eager_start=True,
+        )
+        ideation_run_id = str(ideation_child.get("run_id") or "")
+        ideation_result = await ctx.wait_for_workflow(
+            "wait_ideation",
+            run_id=ideation_run_id,
+        )
+        if workflow_run_failed(ideation_result):
+            err = workflow_run_error_text(ideation_result)
+            await notify_thread_failure(
+                ctx,
+                delivery=delivery,
+                headline="Ideation failed",
+                orchestrator_run_id=ctx.run_id,
+                error_text=err,
+                step_name="post_slack_ideation_child_failed",
+                child_run_id=ideation_run_id or None,
+                child_workflow="ideation",
+            )
+            raise RuntimeError(f"ideation child failed: {err}")
+
+        ideation_output = _child_workflow_output(ideation_result)
+        idea = ideation_output.get("idea")
+        if not isinstance(idea, dict) or not idea.get("Title"):
+            err = workflow_run_error_text(ideation_result)
+            await notify_thread_failure(
+                ctx,
+                delivery=delivery,
+                headline="Ideation produced no valid idea",
+                orchestrator_run_id=ctx.run_id,
+                error_text=err,
+                step_name="post_slack_ideation_invalid",
+                child_run_id=ideation_run_id or None,
+                child_workflow="ideation",
+            )
+            raise RuntimeError(f"ideation child did not return a valid idea: {err}")
+
+        if delivery:
+            await post_thread_message(
+                ctx,
+                delivery=delivery,
+                text=format_idea_markdown(idea),
+                step_name="post_slack_research_idea",
+                log_event="bfts_research_slack_idea_failed",
             )
 
-    brief_result = await _run_research_brief(ctx, topic=topic, limit=brief_limit)
-    brief_markdown = ""
-    if isinstance(brief_result, dict) and brief_result.get("status") == "completed":
-        brief_markdown = str(
-            brief_result.get("compact_markdown")
-            or brief_result.get("markdown")
-            or ""
+        bfts_run_input = build_bfts_run_input(
+            idea=idea,
+            run_input=ctx.run_input,
+            thread_key=inp.thread_key,
+            delivery=inp.delivery,
+            num_seeds=inp.num_seeds,
+            num_drafts=inp.num_drafts,
+            num_workers=inp.num_workers,
         )
-        if ideation_session:
-            await post_step(
+
+        slack_stream_session_id: str | None = None
+        if use_bfts_stream and delivery:
+            idea_title = str(idea.get("Title") or idea.get("Name") or "")
+            bfts_session = await open_session(
                 ctx,
-                ideation_session,
-                step_id="literature",
-                title="Research brief",
-                status="complete",
-                output=f"{brief_result.get('results_count', 0)} papers",
-                step_name="stream_literature_done",
+                delivery=delivery,
+                thread_key=thread_key,
+                metadata=metadata,
+                title="BFTS tree search",
+                header="scientist · bfts",
+                step_name="open_slack_bfts_stream",
             )
-            if brief_markdown:
+            if bfts_session:
+                slack_stream_session_id = bfts_session.session_id
+                bfts_run_input["slack_stream_session_id"] = slack_stream_session_id
                 await post_markdown(
                     ctx,
-                    ideation_session,
-                    brief_markdown,
-                    step_name="stream_brief_markdown",
+                    bfts_session,
+                    format_bfts_stream_intro(idea_title),
+                    step_name="stream_bfts_intro",
                 )
-    elif ideation_session:
-        await post_step(
-            ctx,
-            ideation_session,
-            step_id="literature",
-            title="Research brief",
-            status="error",
-            output=str(brief_result.get("error") or brief_result.get("status")),
-            step_name="stream_literature_failed",
+
+        bfts_child = await ctx.start_workflow(
+            "start_bfts_root",
+            workflow_name="bfts_root",
+            run_input=bfts_run_input,
+            trigger_key=f"{ctx.run_id}:bfts",
+            eager_start=True,
         )
+        bfts_run_id = str(bfts_child.get("run_id") or "")
 
-    ideation_input: dict[str, Any] = {"topic": topic}
-    if inp.thread_key:
-        ideation_input["thread_key"] = inp.thread_key
-    if inp.delivery is not None:
-        ideation_input["delivery"] = inp.delivery
-    for key, val in (
-        ("num_seeds", inp.num_seeds),
-        ("num_drafts", inp.num_drafts),
-        ("num_workers", inp.num_workers),
-    ):
-        if val is not None:
-            ideation_input[key] = val
-    if inp.seed_paper_limit is not None:
-        ideation_input["seed_paper_limit"] = inp.seed_paper_limit
-    if inp.critic_retries:
-        ideation_input["critic_retries"] = inp.critic_retries
-    if inp.draft_model is not None:
-        ideation_input["draft_model"] = inp.draft_model
-    if inp.llm_api_key_secret is not None:
-        ideation_input["llm_api_key_secret"] = inp.llm_api_key_secret
-
-    if ideation_session:
-        await post_step(
-            ctx,
-            ideation_session,
-            step_id="idea",
-            title="Synthesize research idea",
-            status="in_progress",
-            step_name="stream_ideation_start",
-        )
-
-    ideation_child = await ctx.start_workflow(
-        "start_ideation",
-        workflow_name="ideation",
-        run_input=ideation_input,
-        trigger_key=f"{ctx.run_id}:ideation",
-        eager_start=True,
-    )
-    ideation_result = await ctx.wait_for_workflow(
-        "wait_ideation",
-        run_id=ideation_child["run_id"],
-    )
-    ideation_output = _child_workflow_output(ideation_result)
-    idea = ideation_output.get("idea")
-    if not isinstance(idea, dict) or not idea.get("Title"):
-        if ideation_session:
-            await post_step(
+        if delivery:
+            await post_thread_message(
                 ctx,
-                ideation_session,
-                step_id="idea",
-                title="Ideation failed",
-                status="error",
-                output=str(
-                    ideation_result.get("error_text")
-                    if isinstance(ideation_result, dict)
-                    else ideation_result
+                delivery=delivery,
+                text=(
+                    f"BFTS tree search started (`{bfts_run_id}`). "
+                    "Progress and errors stream in the **BFTS tree search** message above."
                 ),
-                step_name="stream_ideation_failed",
+                step_name="post_slack_bfts_started",
+                log_event="bfts_research_slack_bfts_started_failed",
             )
-            await close_session(ctx, ideation_session, step_name="close_ideation_stream_error")
-        raise RuntimeError(
-            "ideation child did not return a valid idea; "
-            f"status={ideation_result.get('status') if isinstance(ideation_result, dict) else None}"
+
+        ctx.log(
+            "bfts_research_started",
+            ideation_run_id=ideation_run_id,
+            bfts_run_id=bfts_run_id,
+            slack_stream=bool(slack_stream_session_id),
+            num_seeds=bfts_run_input["num_seeds"],
+            num_drafts=bfts_run_input["num_drafts"],
+            num_workers=bfts_run_input["num_workers"],
         )
 
-    if ideation_session:
-        await post_step(
-            ctx,
-            ideation_session,
-            step_id="idea",
-            title="Research idea",
-            status="complete",
-            step_name="stream_ideation_done",
-        )
-        await post_markdown(
-            ctx,
-            ideation_session,
-            format_idea_markdown(idea),
-            step_name="stream_idea_markdown",
-        )
-        await close_session(ctx, ideation_session, step_name="close_ideation_stream")
-
-    bfts_run_input = build_bfts_run_input(
-        idea=idea,
-        run_input=ctx.run_input,
-        thread_key=inp.thread_key,
-        delivery=inp.delivery,
-        num_seeds=inp.num_seeds,
-        num_drafts=inp.num_drafts,
-        num_workers=inp.num_workers,
-    )
-
-    slack_stream_session_id: str | None = None
-    if use_stream and delivery:
-        idea_title = str(idea.get("Title") or idea.get("Name") or "")
-        bfts_session = await open_session(
+        return {
+            "topic": topic,
+            "ideation_run_id": ideation_run_id,
+            "bfts_run_id": bfts_run_id,
+            "idea": idea,
+            "brief_document_id": brief_result.get("brief_document_id"),
+            "brief_results_count": brief_result.get("results_count"),
+            "seed_papers": ideation_output.get("seed_papers"),
+            "papers_persisted": ideation_output.get("papers_persisted"),
+            "bfts_run_input": bfts_run_input,
+            "slack_stream_session_id": slack_stream_session_id,
+            "slack_streaming": bool(slack_stream_session_id),
+        }
+    except Exception as exc:
+        await notify_run_failure(
             ctx,
             delivery=delivery,
-            thread_key=thread_key,
-            metadata=metadata,
-            title="BFTS tree search",
-            header="scientist · bfts",
-            step_name="open_slack_bfts_stream",
+            stream=bfts_session,
+            orchestrator_run_id=ctx.run_id,
+            headline="bfts_research failed",
+            error_text=str(exc),
+            thread_step_name="post_slack_bfts_research_failed",
         )
-        if bfts_session:
-            slack_stream_session_id = bfts_session.session_id
-            bfts_run_input["slack_stream_session_id"] = slack_stream_session_id
-            await post_markdown(
-                ctx,
-                bfts_session,
-                format_bfts_stream_intro(idea_title),
-                step_name="stream_bfts_intro",
-            )
+        raise
 
-    bfts_child = await ctx.start_workflow(
-        "start_bfts_root",
-        workflow_name="bfts_root",
-        run_input=bfts_run_input,
-        trigger_key=f"{ctx.run_id}:bfts",
-        eager_start=True,
-    )
 
-    ctx.log(
-        "bfts_research_started",
-        ideation_run_id=ideation_child["run_id"],
-        bfts_run_id=bfts_child["run_id"],
-        slack_stream=bool(slack_stream_session_id),
-        num_seeds=bfts_run_input["num_seeds"],
-        num_drafts=bfts_run_input["num_drafts"],
-        num_workers=bfts_run_input["num_workers"],
-    )
+async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
+    if not inp.topic or not inp.topic.strip():
+        raise ValueError("topic cannot be empty")
 
-    return {
-        "topic": topic,
-        "ideation_run_id": ideation_child["run_id"],
-        "bfts_run_id": bfts_child["run_id"],
-        "idea": idea,
-        "brief_document_id": brief_result.get("brief_document_id"),
-        "brief_results_count": brief_result.get("results_count"),
-        "seed_papers": ideation_output.get("seed_papers"),
-        "papers_persisted": ideation_output.get("papers_persisted"),
-        "bfts_run_input": bfts_run_input,
-        "slack_stream_session_id": slack_stream_session_id,
-        "slack_streaming": bool(slack_stream_session_id),
-    }
+    return await _run_research_pipeline(inp, ctx)

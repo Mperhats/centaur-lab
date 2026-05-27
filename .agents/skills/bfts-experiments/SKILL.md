@@ -11,10 +11,14 @@ tree search — not hyperparameter knobs alone.
 ## Default path: `bfts_research` (one workflow, Slack streaming)
 
 Use **`bfts_research`** for Slack-driven science. When `SLACKBOT_URL` is
-configured it opens **two streamed Slack messages** in the thread:
+configured the Slack thread gets:
 
-1. **Ideation stream** — compact research brief + synthesized idea
-2. **BFTS stream** — tree-search kickoff and live progress until completion
+1. **Agent turn** — live stream-of-consciousness only (one short kickoff line
+   from the sandbox agent; do not narrate progress).
+2. **Plain thread posts** — full research brief, then the structured research
+   idea (not agent-session streams).
+3. **BFTS stream** — one agent-session message with tree-search kickoff and
+   live progress until completion
 
 It then starts **`bfts_root`** with research defaults (`num_seeds=3`,
 `num_drafts=2`, `num_workers=1`). **Do not** run `ideation` and `bfts_root`
@@ -44,7 +48,7 @@ Fallback (injects thread into JSON body):
 
 After start, reply **once** with a single short line, for example:
 
-`Started bfts_research \`wfr_…\`. Brief, idea, and BFTS progress stream in this thread.`
+`Started bfts_research \`wfr_…\`. Brief and idea post in this thread; BFTS progress streams separately.`
 
 **Do not** repeat the same announcement twice in one message. **Do not** narrate
 kickoff/progress — workflows stream that. **Do not** post parallel Slack

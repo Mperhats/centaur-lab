@@ -61,6 +61,7 @@ centaur-scientist/
 │           ├── paper.py             #       single-paper → row
 │           └── brief.py             #       paper-list → brief-row + markdown render
 └── workflows/                       # auto-discovered durable handlers
+    ├── bfts_research.py             # Slack: plain brief+idea posts, BFTS-only stream
     ├── bfts_root.py                 # entry workflow, takes an `idea` dict
     ├── bfts_tree.py                 # tree-driver dispatcher
     ├── bfts_expand_one.py           # single-node expansion handler
