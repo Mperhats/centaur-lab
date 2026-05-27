@@ -5,6 +5,7 @@ requires-python = ">=3.11"
 [manifest]
 members = [
     "bfts-executor",
+    "bfts-runner",
     "bfts-sdk",
     "bfts-vlm",
     "centaur-scientist-overlay",
@@ -229,6 +230,11 @@ requires-dist = [
     { name = "dataclasses-json", specifier = ">=0.6.0" },
     { name = "kubernetes-asyncio", specifier = ">=29.0.0" },
 ]
+
+[[package]]
+name = "bfts-runner"
+version = "0.1.0"
+source = { virtual = "tools/bfts_runner" }
 
 [[package]]
 name = "bfts-sdk"
