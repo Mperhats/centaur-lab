@@ -61,7 +61,10 @@ Read `.agents/skills/bfts-experiments/SKILL.md` when the user mentions BFTS,
 **Idea required:** run `ideation` (or get a full `idea` from the user) before
 `bfts_root`. `ideation` **automatically** runs child `save_papers` on its seed
 literature (`papers_persisted` in output) — do not treat that save as optional.
-Do not start BFTS with only `num_seeds` / `num_drafts` — empty `idea` uses the
+Prefer **`bfts_research`** (`topic` only) for Slack science runs; it sets
+`num_seeds` / `num_drafts` / `num_workers` on the child `bfts_root` run. After
+`ideation`, use `output_json.bfts_run_input` for `bfts_root` — do not omit
+hyperparams. Do not start BFTS with only `num_seeds` / `num_drafts` — empty `idea` uses the
 toy smoke fixture and cannot produce seed aggregates or `best_node_id`. Slack
 runs without an `idea` are rejected by `bfts_root` when `thread_key` /
 `delivery` is set.

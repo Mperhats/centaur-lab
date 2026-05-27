@@ -29,11 +29,15 @@ do not want the result remembered.
 - "Summarize this paper" / DOI / arXiv ID / S2 ID → `semantic_scholar.get_paper` + `save_papers` follow-up (brief + paper)
 - "What does this paper cite?" → `semantic_scholar.get_references`
 - "Build a brief / lit review / writeup on X" → `semantic_scholar.research_brief` (atomic search + render + persist)
-- "Research idea for BFTS" / topic before tree search → `ideation` workflow (always persists seed papers; see below)
+- "Research idea for BFTS" / kick off tree search → **`bfts_research`** workflow (preferred) or `ideation` then `bfts_root` via `bfts_run_input`
 
-## `ideation` workflow (BFTS prep)
+## BFTS prep (`bfts_research` or `ideation`)
 
-Use when the user needs a structured research `idea` for `bfts_root`:
+**Preferred:** `bfts_research` with only `topic` — runs ideation, persists seed
+papers, starts `bfts_root` with `num_seeds=3`, `num_drafts=2`, `num_workers=1`.
+See `bfts-experiments`.
+
+**Manual:** `ideation` then POST `output_json.bfts_run_input` to `bfts_root`:
 
 ```bash
 call workflow run '{
@@ -45,11 +49,10 @@ call workflow run '{
 
 On completion, `output_json` includes:
 
-- `idea` — pass straight into `bfts_root` input
-- `seed_papers` — S2 `paperId` list from the seed search
-- `papers_persisted` — result of an automatic child `save_papers` run (brief + paper rows in `company_context_documents`)
+- `bfts_run_input` — **use verbatim** for `bfts_root` (idea + hyperparams + thread)
+- `idea`, `seed_papers`, `papers_persisted` — same as before
 
-**Do not** call `save_papers` again for the same seed IDs unless the user asks to save additional papers. See `bfts-experiments` for the `bfts_root` kickoff rules.
+**Do not** call `save_papers` again for the same seed IDs unless the user asks.
 
 ## Paper Search (`semantic_scholar.search`)
 

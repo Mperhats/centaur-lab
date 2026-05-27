@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 
 from packages.bfts_sdk.config import resolve_llm_api_key, resolve_llm_settings
 from packages.bfts_sdk.llm import LLMCall, call_with_function
+from packages.bfts_sdk.research import build_bfts_run_input
 
 WORKFLOW_NAME = "ideation"
 SCHEDULE: dict[str, Any] = {}
@@ -84,6 +85,13 @@ class Input:
     critic_retries: int = 0
     draft_model: str | None = None
     llm_api_key_secret: str | None = None
+    # Optional overrides for ``output_json["bfts_run_input"]``. When omitted,
+    # ``build_bfts_run_input`` applies research defaults (num_seeds=3, …).
+    num_seeds: int | None = None
+    num_drafts: int | None = None
+    num_workers: int | None = None
+    thread_key: str | None = None
+    delivery: dict[str, Any] | None = None
 
 
 # Mirrors Sakana's FinalizeIdea schema verbatim
@@ -412,8 +420,19 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         draft_model=llm.draft_model,
         critic_retries=critic_retries,
     )
+    bfts_run_input = build_bfts_run_input(
+        idea=idea,
+        run_input=ctx.run_input,
+        thread_key=inp.thread_key,
+        delivery=inp.delivery,
+        num_seeds=inp.num_seeds,
+        num_drafts=inp.num_drafts,
+        num_workers=inp.num_workers,
+    )
+
     return {
         "idea": idea,
         "seed_papers": seed_paper_ids,
         "papers_persisted": papers_persisted,
+        "bfts_run_input": bfts_run_input,
     }

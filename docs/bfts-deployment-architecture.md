@@ -569,9 +569,13 @@ trees finish. Redeploy the overlay image after merging; old SHAs still delete
 pods early.
 
 **Separate failure mode:** sustained `LLM call failed: 502 bad gateway` on
-`bfts_expand_one` (as in `wfr_958376d7950c46e8`) is iron-proxy / provider
-outage — `packages/bfts_sdk/llm.py` already retries 502 with backoff; check
-VictoriaLogs and proxy health if zero good nodes appear with sandboxes still up.
+`bfts_expand_one` (as in `wfr_958376d7950c46e8`) is **`centaur-api-proxy`
+timing out at 30s** (`net/http: timeout awaiting response headers`), not
+Anthropic HTTP 502. Mitigations: lower BFTS parallelism (`num_drafts=2`,
+`num_workers=1` in `bfts_research` / `build_bfts_run_input`), reduce
+`WORKFLOW_WORKER_CONCURRENCY`, or raise iron-proxy upstream timeout upstream
+in the Centaur chart. `packages/bfts_sdk/llm.py` retries 502 but cannot
+outrun a hard 30s proxy cap.
 
 | Step | Code location | Repo |
 |------|---------------|------|
