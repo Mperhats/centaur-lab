@@ -12,6 +12,13 @@ def test_research_brief_step_uses_tool_proxy_not_to_thread() -> None:
     assert "lambda: ctx.tools.semantic_scholar.research_brief" in source
 
 
+def test_bfts_root_polls_tree_search_for_slack_stream() -> None:
+    source = Path("workflows/bfts_root.py").read_text(encoding="utf-8")
+    assert "tools.bfts_runner.slack.progress" in source
+    assert "_wait_for_tree_with_slack_progress" in source
+    assert "stream_tree_progress_" in source
+
+
 def test_bfts_research_slack_ux_plain_brief_and_bfts_only_stream() -> None:
     """Brief + idea are plain posts; only BFTS uses agent-session streaming."""
     source = Path("workflows/bfts_research.py").read_text(encoding="utf-8")

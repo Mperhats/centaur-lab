@@ -12,6 +12,7 @@ See docs/superpowers/plans/2026-05-25-bfts-on-centaur.md (Phase 2).
 """
 from __future__ import annotations
 
+import datetime as dt
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -33,6 +34,12 @@ from tools.bfts_runner.slack.post import (
     workflow_run_error_text,
     workflow_run_failed,
 )
+from tools.bfts_runner.slack.progress import (
+    TreeSearchSnapshot,
+    fetch_tree_search_snapshot,
+    fetch_workflow_status,
+    format_tree_search_snapshot,
+)
 from tools.bfts_runner.slack.stream import (
     SlackStreamTarget,
     close_session,
@@ -53,6 +60,8 @@ SLACK_CHANNEL = "bfts-runs"
 # idea label past this and append an ellipsis so the run_id + success
 # ratio remain visible.
 _SLACK_SUMMARY_MAX_LEN = 200
+_TREE_PROGRESS_POLL_INTERVAL = dt.timedelta(seconds=90)
+_TERMINAL_WORKFLOW_STATUSES = frozenset({"completed", "failed", "cancelled"})
 
 
 # Plan-required idea fields — the minimum subset ``_bfts_expand._propose_prompt``
@@ -397,8 +406,12 @@ async def _run_bfts_trees(
     )
 
     for child in children:
-        res = await ctx.wait_for_workflow(
-            f"wait_tree_{child['tree_index']}", run_id=child["run_id"]
+        res = await _wait_for_tree_with_slack_progress(
+            ctx,
+            child=child,
+            delivery=slack_delivery,
+            stream=stream,
+            parent_run_id=ctx.run_id,
         )
         results.append(res)
         await _post_slack_progress(
@@ -520,6 +533,83 @@ def _stream_target(session_id: str | None) -> SlackStreamTarget | None:
     if not session_id:
         return None
     return SlackStreamTarget(session_id=session_id)
+
+
+async def _tree_snapshot_for_checkpoint(
+    pool: Any, *, tree_run_id: str
+) -> dict[str, int | str]:
+    snap = await fetch_tree_search_snapshot(pool, tree_run_id=tree_run_id)
+    return {
+        "workflow_status": snap.workflow_status,
+        "node_count": snap.node_count,
+        "max_step": snap.max_step,
+        "buggy_count": snap.buggy_count,
+        "good_count": snap.good_count,
+    }
+
+
+async def _wait_for_tree_with_slack_progress(
+    ctx: WorkflowContext,
+    *,
+    child: dict[str, Any],
+    delivery: dict[str, Any] | None,
+    stream: SlackStreamTarget | None,
+    parent_run_id: str,
+) -> dict[str, Any]:
+    """Poll a child ``bfts_tree`` and push Slack stream updates while it runs."""
+    tree_index = int(child["tree_index"])
+    child_run_id = str(child["run_id"])
+    poll = 0
+    last_snapshot_text = ""
+
+    while True:
+        child_row = await ctx.step(
+            f"wait_tree_{tree_index}_{poll}",
+            lambda rid=child_run_id: fetch_workflow_status(ctx._pool, run_id=rid),
+        )
+        status = str(child_row.get("status") or "")
+        if status in _TERMINAL_WORKFLOW_STATUSES:
+            return child_row
+
+        snapshot = await ctx.step(
+            f"tree_snapshot_{tree_index}_{poll}",
+            lambda rid=child_run_id: _tree_snapshot_for_checkpoint(
+                ctx._pool, tree_run_id=rid
+            ),
+        )
+        snapshot_text = format_tree_search_snapshot(
+            tree_index=tree_index,
+            tree_run_id=child_run_id,
+            snapshot=TreeSearchSnapshot(**snapshot),
+        )
+        if stream and snapshot_text != last_snapshot_text:
+            await post_step(
+                ctx,
+                stream,
+                step_id=f"tree_{tree_index}",
+                title=f"Tree {tree_index} search",
+                status="in_progress",
+                output=snapshot_text,
+                step_name=f"stream_tree_progress_{tree_index}_{poll}",
+            )
+            last_snapshot_text = snapshot_text
+        elif delivery and not stream and poll == 0:
+            await post_thread_message(
+                ctx,
+                delivery=delivery,
+                text=(
+                    f"*BFTS tree {tree_index}* `{child_run_id}` running under "
+                    f"`{parent_run_id}` — live updates appear in the BFTS stream."
+                ),
+                step_name=f"post_slack_tree_running_{tree_index}",
+                log_event="bfts_root_slack_tree_running_failed",
+            )
+
+        await ctx.sleep(
+            f"wait_tree_{tree_index}_sleep_{poll}",
+            _TREE_PROGRESS_POLL_INTERVAL,
+        )
+        poll += 1
 
 
 async def _post_slack_progress(

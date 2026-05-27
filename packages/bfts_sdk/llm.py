@@ -12,7 +12,8 @@ The provider is implied by the model string:
 
 iron-proxy handles outbound: when this code runs inside the API pod the
 ``ANTHROPIC_API_KEY`` / ``OPENAI_API_KEY`` placeholder is substituted by
-iron-proxy at the header layer (research 03 §Secrets / iron-proxy).
+iron-proxy at the header layer unless ``BFTS_LLM_DIRECT_EGRESS=1`` (trusted
+API workflow workers call providers directly; see ``docs/bfts-batch-iron-proxy.md``).
 """
 from __future__ import annotations
 
@@ -23,7 +24,7 @@ from typing import Any
 
 import httpx
 
-from packages.bfts_sdk.config import resolve_llm_https_proxy
+from packages.bfts_sdk.config import llm_direct_egress_enabled, resolve_llm_https_proxy
 
 _ANTHROPIC_VERSION = "2023-06-01"
 _OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
@@ -46,11 +47,18 @@ _RETRY_BASE_DELAY_S = 1.0
 
 
 def llm_http_client(timeout: float) -> httpx.AsyncClient:
-    """Outbound client for provider APIs via iron-proxy."""
+    """Outbound client for provider APIs.
+
+    When ``BFTS_LLM_DIRECT_EGRESS`` is set, disables ``HTTPS_PROXY`` env so
+    calls leave the API pod directly. When ``BFTS_LLM_HTTPS_PROXY`` is set,
+    routes only through that pool (not the pod's interactive ``HTTPS_PROXY``).
+    """
+    if llm_direct_egress_enabled():
+        return httpx.AsyncClient(timeout=timeout, trust_env=False)
     proxy = resolve_llm_https_proxy()
-    if proxy is None:
-        return httpx.AsyncClient(timeout=timeout)
-    return httpx.AsyncClient(timeout=timeout, proxy=proxy)
+    if proxy is not None:
+        return httpx.AsyncClient(timeout=timeout, proxy=proxy, trust_env=False)
+    return httpx.AsyncClient(timeout=timeout)
 
 
 async def _post_with_retry(

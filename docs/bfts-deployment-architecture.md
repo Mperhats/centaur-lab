@@ -587,8 +587,9 @@ summary when individual trees fail. Partial tree failures still complete
 
 Symptoms on a busy dev cluster:
 
-- `bfts_expand_one` **`LLM call failed: 502 bad gateway`** — `centaur-api-proxy` **`timeout awaiting response headers` at ~30s**, not Anthropic HTTP 502 and not executor OOM.
-- `ideation` / `bfts_research` **`waiting` for minutes** with `available_at` in the past — all `WORKFLOW_WORKER_CONCURRENCY` slots busy on long `bfts_expand_one` runs.
+- **`LLM call failed: 502 bad gateway`** on BFTS expand — iron-proxy **`timeout awaiting response headers` at ~30s**, not Anthropic HTTP 502 (Phase 5a runs expand in-process on `bfts_tree`, not `bfts_expand_one`).
+- `ideation` / `bfts_research` **`waiting` for minutes** — stale long-running `bfts_tree` runs hogging `WORKFLOW_WORKER_CONCURRENCY` slots (cancel zombies; Phase 5a reduces fan-out).
+- Slack BFTS stream shows kickoff then silence — fixed by periodic tree-search snapshots from `bfts_root` (see `tools/bfts_runner/slack/progress.py`).
 
 **Recommended `api.extraEnv` (centaur-lab-infra `centaur.yaml`):**
 
@@ -596,19 +597,22 @@ Symptoms on a busy dev cluster:
 api:
   extraEnv:
     WORKFLOW_WORKER_CONCURRENCY: "4"   # not 16 on laptop/single-node clusters
-    # Optional: route BFTS expand + VLM LLM calls through a batch iron-proxy pool
-    # BFTS_LLM_HTTPS_PROXY: "http://centaur-batch-proxy.centaur-system.svc:8080"
+    # Interim 502 fix: trusted API pod direct egress (no Centaur fork).
+    BFTS_LLM_DIRECT_EGRESS: "1"
+    # Batch pool for future upstream timeout split (ignored while direct egress on).
+    BFTS_LLM_HTTPS_PROXY: "http://centaur-batch-proxy:8080"
     # BFTS parallelism (also defaults in packages/bfts_sdk/research.py):
     # num_drafts=2, num_workers=1, num_seeds=3 via bfts_research / build_bfts_run_input
 ```
 
 **Mitigations (in order):**
 
-1. Lower `WORKFLOW_WORKER_CONCURRENCY` so short workflows (`ideation`, `save_papers`) get slots.
-2. Avoid many overlapping `bfts_root` runs on one API pod.
-3. Raise iron-proxy upstream timeout above 30s in the Centaur chart (infra-owned; overlay cannot fix from centaur-lab alone).
-4. Set `BFTS_LLM_HTTPS_PROXY` to a dedicated batch proxy Service once deployed (see `docs/bfts-batch-iron-proxy.md`).
-5. `packages/bfts_sdk/llm.py` retries 502 but cannot outrun a hard proxy cap.
+1. Enable **`BFTS_LLM_DIRECT_EGRESS=1`** on the API pod (overlay + infra; see `docs/bfts-batch-iron-proxy.md`).
+2. Cancel stale `bfts_tree` / `bfts_root` runs and run `uv run clean` for leaked Slack sandboxes.
+3. Lower `WORKFLOW_WORKER_CONCURRENCY` so short workflows (`ideation`, `save_papers`) get slots.
+4. Avoid many overlapping `bfts_root` runs on one API pod.
+5. Long-term: upstream iron-proxy upstream timeout or [Centaur Apps](https://centaur.ai/extend/apps) for isolated batch egress (no fork).
+6. `packages/bfts_sdk/llm.py` retries 502 but cannot outrun a hard proxy cap.
 
 ---
 
@@ -650,13 +654,12 @@ trees finish. Redeploy the overlay image after merging; old SHAs still delete
 pods early.
 
 **Separate failure mode:** sustained `LLM call failed: 502 bad gateway` on
-`bfts_expand_one` (as in `wfr_958376d7950c46e8`) is **`centaur-api-proxy`
-timing out at 30s** (`net/http: timeout awaiting response headers`), not
-Anthropic HTTP 502. Mitigations: lower BFTS parallelism (`num_drafts=2`,
-`num_workers=1` in `bfts_research` / `build_bfts_run_input`), reduce
-`WORKFLOW_WORKER_CONCURRENCY`, or raise iron-proxy upstream timeout upstream
-in the Centaur chart. `packages/bfts_sdk/llm.py` retries 502 but cannot
-outrun a hard 30s proxy cap.
+BFTS expand is **`centaur-api-proxy` / batch proxy timing out at ~30s**
+(`net/http: timeout awaiting response headers`), not Anthropic HTTP 502.
+**Interim fix:** `BFTS_LLM_DIRECT_EGRESS=1` on the API pod. Long-term:
+upstream iron-proxy timeout knob or [Centaur Apps](https://centaur.ai/extend/apps)
+for batch workloads with independent egress. `packages/bfts_sdk/llm.py` retries
+502 but cannot outrun a hard 30s proxy cap.
 
 | Step | Code location | Repo |
 |------|---------------|------|
