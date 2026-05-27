@@ -630,18 +630,16 @@ async def _post_slack_kickoff(
         sources=sources,
     )
     if stream:
-        prefix = slack_mention_prefix(delivery or {})
-        text = f"{prefix}**BFTS** `{run_id}` — {label}\n{config_line}"
-        await post_markdown(
-            ctx, stream, text, step_name="stream_bfts_kickoff_md",
-        )
         await post_step(
             ctx,
             stream,
             step_id="bfts_trees",
-            title=f"BFTS `{run_id}`",
+            title=label,
             status="in_progress",
-            details="Provisioning sandboxes and launching trees…",
+            details=(
+                f"{num_drafts} tree{'s' if num_drafts != 1 else ''} · "
+                f"{config_line}"
+            ),
             step_name="stream_bfts_kickoff_step",
         )
         return

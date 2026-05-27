@@ -26,7 +26,7 @@ def format_failure_thread_message(
     """Plain-thread failure notice (always @-mentions when delivery has user id)."""
     mention = slack_mention_prefix(delivery)
     lines = [
-        f"{mention}**{headline}**",
+        f"{mention}*{headline}*",
         f"Run `{orchestrator_run_id}` did not complete successfully.",
     ]
     if child_run_id:
@@ -158,32 +158,15 @@ def format_research_brief_thread_message(
     markdown: str,
     run_id: str | None = None,
 ) -> str:
-    """Plain-thread opener: run id + compact lit review (workflow-owned).
-
-    When ``markdown`` is already from ``render_brief_compact`` (starts with
-    ``**Research brief**``), do not wrap a second title block.
-    """
+    """Return compact lit-review mrkdwn for a plain thread post (no wrappers)."""
+    _ = run_id
     body = markdown.strip()
-    if not body:
-        return ""
-    lines: list[str] = []
-    if run_id:
-        lines.extend([f"**Research pipeline** — `{run_id.strip()}`", ""])
-    if body.startswith("**Research brief**"):
-        lines.append(body)
-    else:
-        lines.extend([f"**Research brief** — _{topic.strip()}_", "", body])
-    lines.extend(["", "_Ideation next; BFTS tree search streams separately._"])
-    return "\n".join(lines)
-
-
-def format_bfts_stream_intro(idea_title: str) -> str:
-    """Opening copy for the BFTS-only Slack agent-session stream."""
-    label = idea_title.strip() or "(untitled)"
-    return (
-        f"**BFTS tree search** — **{label}**\n"
-        "Live tree progress below."
-    )
+    if body:
+        return body
+    display_topic = topic.strip()
+    if display_topic:
+        return f"*Literature* — {display_topic}\n\n_No papers found._"
+    return ""
 
 
 def format_idea_markdown(idea: dict[str, Any]) -> str:
@@ -196,7 +179,7 @@ def format_idea_markdown(idea: dict[str, Any]) -> str:
         exp_lines = [str(x).strip() for x in experiments if x]
     elif experiments:
         exp_lines = [str(experiments).strip()]
-    parts = ["**Research idea**", f"**{title}**"]
+    parts = ["*Research idea*", f"*{title}*"]
     if hypothesis:
         parts.append(hypothesis)
     if exp_lines:

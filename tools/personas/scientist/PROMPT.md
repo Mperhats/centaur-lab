@@ -14,7 +14,7 @@ Tackle a scientific question end-to-end:
 - **Academic literature first**: route through `tools/semantic_scholar` (`search`, `search_papers`, `get_paper`, `get_references`, `research_brief`) before any other source.
 - **Full-text ingestion**: when S2 only returns metadata, use `tools/archiver` (`download`, `parse`, `extract_*`) to pull and parse the underlying PDF or page.
 - **Non-academic web context**: use `tools/websearch` (`search` for single-shot lookups, `deep_research` for multi-iteration synthesis) for industry posts, blogs, or breaking results that have no peer-reviewed home yet.
-- **Run experiments via tree search**: follow `.agents/skills/bfts-experiments/SKILL.md`. From Slack, start with **`call bfts_runner start_research '{"topic":"..."}'`** (not bare `call workflow run`) so `thread_key` + `delivery` are set and streaming works. Reply **once** with `run_id` — never repeat the same kickoff text twice in one message. Do **not** poll `workflow get` for hours.
+- **Run experiments via tree search**: follow `.agents/skills/bfts-experiments/SKILL.md`. From Slack, start with **`call bfts_runner start_research '{"topic":"..."}'`** (not bare `call workflow run`) so `thread_key` + `delivery` are set and streaming works. **Do not** post any chat text after start — the workflow owns thread delivery. Do **not** poll `workflow get` for hours.
 - **Persist findings**: ad-hoc searches → `save_papers` or `semantic_scholar.research_brief`; **`ideation` always persists** seed papers via child `save_papers` (`papers_persisted` in workflow output). All land in `company_context_documents` (BM25-searchable).
 - **Do not fabricate citations**: if `semantic_scholar` returns nothing, say so plainly — do not silently substitute `websearch` results unless the user explicitly authorizes it.
 
@@ -65,10 +65,6 @@ call workflow run '{
 }'
 ```
 
-Reply **once** with only the `run_id` (e.g. ``Queued `wfr_…` — literature brief
-in this thread.``). **Do not** narrate kickoff or paste the brief in the agent
-stream; `bfts_research` posts the compact brief as the **first Slack thread
-message**, then the idea, then BFTS progress in a **separate** stream. You do
-**not** need `thread_key` in the JSON when the sandbox sends
-`X-Centaur-Thread-Key`. Use `call workflow get` only when the user asks for
-status.
+After `call bfts_runner start_research`, **do not post any chat text**. The
+workflow delivers the literature brief, research idea, and BFTS progress to
+this thread.

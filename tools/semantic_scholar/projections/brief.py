@@ -24,8 +24,8 @@ from typing import Any
 from tools.semantic_scholar.utils import canonical_json, content_hash
 
 _BRIEF_ABSTRACT_TRUNCATE = 500
-_SLACK_BRIEF_ABSTRACT_CHARS = 120
-_SLACK_BRIEF_MAX_PAPERS = 6
+_SLACK_BRIEF_ABSTRACT_CHARS = 60
+_SLACK_BRIEF_MAX_PAPERS = 4
 _BRIEF_TITLE_QUERY_TRUNCATE = 80
 _BRIEF_ID_HEX_LEN = 16
 _BRIEF_MAX_AUTHORS_INLINE = 3
@@ -65,6 +65,15 @@ def _paper_url(paper: dict[str, Any]) -> str:
     if paper_id:
         return f"https://www.semanticscholar.org/paper/{paper_id}"
     return ""
+
+
+def _slack_paper_title(paper: dict[str, Any]) -> str:
+    """Slack mrkdwn title — hyperlinked when a URL is available."""
+    title = _normalize_oneline(str(paper.get("title") or "Untitled"))
+    url = _paper_url(paper)
+    if url:
+        return f"<{url}|{title}>"
+    return f"*{title}*"
 
 
 def _format_abstract(paper: dict[str, Any]) -> str:
@@ -125,26 +134,23 @@ def render_brief_compact(
     *,
     max_papers: int = _SLACK_BRIEF_MAX_PAPERS,
 ) -> str:
-    """Short Slack-friendly lit review (title + numbered one-liners)."""
+    """Short Slack mrkdwn lit review (linked titles + numbered one-liners)."""
     display_query = _normalize_oneline(query)
     if not papers:
-        return f"**Research brief** — {display_query}\n\n_No papers found._"
+        return f"*Literature* — {display_query}\n\n_No papers found._"
 
-    lines = [
-        f"**Research brief** — {display_query}",
-        f"_{min(len(papers), max_papers)} of {len(papers)} top hits_",
-        "",
-    ]
+    lines = [f"*Literature* — {display_query}", ""]
     for index, paper in enumerate(papers[:max_papers], start=1):
-        title = _normalize_oneline(str(paper.get("title") or "Untitled"))
+        linked_title = _slack_paper_title(paper)
         year = paper.get("year")
         year_text = f" ({year})" if isinstance(year, int) else ""
         abstract = (paper.get("abstract") or "").strip()
         if len(abstract) > _SLACK_BRIEF_ABSTRACT_CHARS:
             abstract = abstract[: _SLACK_BRIEF_ABSTRACT_CHARS - 1].rstrip() + "…"
-        if not abstract:
-            abstract = "_No abstract._"
-        lines.append(f"{index}. **{title}**{year_text} — {abstract}")
+        if abstract:
+            lines.append(f"{index}. {linked_title}{year_text} — {abstract}")
+        else:
+            lines.append(f"{index}. {linked_title}{year_text}")
     return "\n".join(lines)
 
 

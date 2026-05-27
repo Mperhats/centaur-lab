@@ -13,12 +13,10 @@ tree search — not hyperparameter knobs alone.
 Use **`bfts_research`** for Slack-driven science. When `SLACKBOT_URL` is
 configured the Slack thread gets:
 
-1. **Agent turn** — live stream-of-consciousness only (one short kickoff line
-   from the sandbox agent; do not narrate progress).
-2. **Plain thread posts** — full research brief, then the structured research
+1. **Agent turn** — no chat text after start (workflow owns thread delivery).
+2. **Plain thread posts** — compact literature brief, then the structured research
    idea (not agent-session streams).
-3. **BFTS stream** — one agent-session message with tree-search kickoff and
-   live progress until completion
+3. **BFTS stream** — one agent-session message with live tree progress until completion
 
 It then starts **`bfts_root`** with research defaults (`num_seeds=3`,
 `num_drafts=2`, `num_workers=1`). **Do not** run `ideation` and `bfts_root`
@@ -46,15 +44,9 @@ Fallback (injects thread into JSON body):
 
 ### Agent reply contract (no redundancy)
 
-After start, reply **once** with only the run id, for example:
-
-`Queued \`wfr_…\` — see this thread for the literature brief.`
-
-**Do not** post kickoff or brief copy in the agent stream (duplicate + ugly
-formatting). The workflow posts the **compact research brief** as the first
-thread message, then the idea, then BFTS in a separate stream. **Do not**
-repeat the line twice (streaming dedupe still happens upstream if you paste
-long kickoff text).
+After start, **do not post any chat text** in the agent stream. The workflow
+posts the compact literature brief, then the idea, then BFTS progress in a
+separate stream.
 
 After start, run **one** `call workflow get <run_id>` when the user asks for
 status or you need `bfts_run_id` / the idea (~2–5 minutes). Report
