@@ -14,17 +14,20 @@
 .gitmodules
 .github
 
-# Submodule — vendored upstream Centaur source tree, never shipped
-# in the image. ``centaur_sdk`` is a dev-only repo-root symlink into
-# ``.centaur/centaur_sdk`` (see pyproject.toml); the API pod has its
-# own ``/app/centaur_sdk/`` so the overlay must not ship one.
+# Submodule — vendored upstream Centaur source tree, never shipped in
+# the overlay image. ``packages/centaur_sdk`` is a dev-only symlink
+# into ``.centaur/centaur_sdk`` (see pyproject.toml); the API pod has
+# its own ``/app/centaur_sdk/`` baked into its image so the overlay
+# must not ship a copy. ``packages/bfts_sdk`` IS overlay payload and
+# is shipped — it lands at ``/app/overlay/org/packages/bfts_sdk`` and
+# resolves through the overlay root that TOOL_DIRS puts on sys.path.
 .centaur
-centaur_sdk
+packages/centaur_sdk
 
 # Dev/ops directories at the repo root that aren't part of the overlay.
-# ``db``, ``clusters``, and ``infra`` were deleted post-reorg but are
-# kept here as defense-in-depth so a stray local re-creation doesn't
-# silently bloat the image.
+# ``db``, ``clusters``, ``infra``, ``cloudflared``, and ``docs`` were
+# deleted post-reorg but are kept here as defense-in-depth so a stray
+# local re-creation doesn't silently bloat the image.
 db
 cloudflared
 docs
@@ -34,9 +37,9 @@ infra
 .worktrees
 
 # Helm values + GitOps configs (consumed at deploy time, not runtime).
-# Helm values for any centaur-lab cluster live in the sibling
-# centaur-lab-infra repo — but we keep this rule defensive in case a
-# local user writes their own values*.yaml at the repo root.
+# Helm values for any centaur-scientist cluster live in the sibling
+# centaur-scientist-infra repo — but we keep this rule defensive in
+# case a local user writes their own values*.yaml at the repo root.
 values*.yaml
 
 # Virtual environments
@@ -54,10 +57,19 @@ values*.yaml
 
 # Docker
 .dockerignore
+# Both Dockerfiles ride along into ``/overlay`` otherwise but neither is
+# read at runtime — the overlay is data-only (alpine ``COPY . /overlay``)
+# and ``Dockerfile.bfts-executor`` is consumed by its own publish job
+# (see ``.github/workflows/overlay.yml`` ``publish-bfts-executor``), then
+# pulled by tag from ``tools/bfts_executor/client.py``. Excluding keeps
+# ``/app/overlay/org`` minimal and the runtime payload self-evidently
+# code-only.
+Dockerfile*
 
-# Tests (root pytest suite + local scratch dir never run inside the
-# API or sandbox pods)
+# Tests (root pytest suite + tool / workflow test trees never run inside
+# the API or sandbox pods)
 tests
+**/tests
 tmp
 
 # Dev-only tooling (submodule + venv sync). The API pod has its own

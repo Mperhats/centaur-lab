@@ -1,3 +1,6 @@
 [submodule ".centaur"]
 	path = .centaur
 	url = https://github.com/paradigmxyz/centaur.git
+[submodule ".scientist"]
+	path = .scientist
+	url = https://github.com/SakanaAI/AI-Scientist-v2

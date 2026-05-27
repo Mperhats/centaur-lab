@@ -4,15 +4,10 @@ Given a list of Semantic Scholar paper IDs, fetch each paper's metadata
 via the ``semantic_scholar`` tool client and project it into a
 ``source_type="paper"`` row in ``company_context_documents``. Always
 follows up with a ``research_brief`` row linking the saved papers as
-children: the per-paper rows are written twice (first without a parent,
+children: per-paper rows are written twice (first without a parent,
 then with the brief as the parent) and the compound-hash logic in
 ``_upsert_document`` makes the re-parenting an UPDATE rather than a
 noop.
-
-The PDF archival workflow lives separately in ``archive_papers.py``;
-this handler never touches ``paper_archives`` because metadata-only
-``save_papers`` runs are common (the agent batches off arXiv IDs
-without downloading bytes).
 
 Per-paper failures from the upstream API are logged and recorded in the
 result payload, but do not abort the run; unexpected exceptions
@@ -21,26 +16,24 @@ propagate so the run is marked failed.
 The upsert SQL — ``_upsert_document`` and its overlay-specific
 compound-hash idempotency contract — plus the ``vm_metrics`` shim are
 inlined as private helpers below. The same helpers exist verbatim in
-``archive_papers.py`` and ``research_brief.py``; that duplication is
-the upstream pattern (see
+``tools/semantic_scholar/client.py`` (the ``research_brief`` tool
+method); that duplication is the upstream pattern (see
 ``.centaur/workflows/company_context_documents.py``).
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from api.workflow_engine import WorkflowContext
 
-from semanticscholar.Paper import Paper
-
 from tools.semantic_scholar.client import SemanticScholarClient
 from tools.semantic_scholar.projections.brief import build_brief_document, render_brief
 from tools.semantic_scholar.projections.paper import build_paper_document
+from tools.semantic_scholar.utils import canonical_json, content_hash
 
 try:
     from api.vm_metrics import (
@@ -85,33 +78,31 @@ def _record_doc_change(document: dict[str, Any], action: str) -> None:
     )
 
 
-def _canonical_json(value: Any) -> str:
-    """Stable JSON form used for hashing and JSONB metadata serialization."""
-    return json.dumps(value, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
-
-
-def _content_hash(*parts: Any) -> str:
-    """Hash projected document content so future syncs can detect changes cheaply."""
-    return hashlib.sha256(_canonical_json(parts).encode("utf-8")).hexdigest()
-
-
 async def _upsert_document(
     pool: Any,
     document: dict[str, Any],
+    *,
+    parent_document_id: str | None = None,
 ) -> Literal["inserted", "updated", "noop"]:
     """Upsert a projected document; return inserted/updated/noop.
 
-    Mirrors ``_upsert_document`` from the upstream
-    ``company_context_documents`` workflow, with one overlay-specific
-    divergence: the persisted ``content_hash`` is a COMPOUND hash of
-    ``(intrinsic_hash, effective_parent)``. Without the compound, a
-    re-parenting upsert (e.g. a paper first saved without a parent, then
-    surfaced via a research brief) would silently noop because the
-    intrinsic content didn't change — leaving the row's
+    Verbatim duplicate of the same helper in
+    ``tools/semantic_scholar/client.py`` — that duplication is the
+    upstream ``company_context_documents`` convention (see
+    ``.centaur/workflows/company_context_documents.py``), not an
+    oversight. The persisted ``content_hash`` is a COMPOUND hash of
+    ``(intrinsic_hash, effective_parent)``: without the compound, a
+    re-parenting upsert (e.g. a paper first saved without a parent,
+    then surfaced via a research brief) would silently noop because
+    the intrinsic content didn't change — leaving the row's
     ``parent_document_id`` stale.
     """
-    effective_parent = document["parent_document_id"]
-    effective_hash = _content_hash(document["content_hash"], effective_parent)
+    effective_parent = (
+        parent_document_id
+        if parent_document_id is not None
+        else document.get("parent_document_id")
+    )
+    effective_hash = content_hash(document["content_hash"], effective_parent)
 
     existing_hash = await pool.fetchval(
         "SELECT content_hash FROM company_context_documents WHERE document_id = $1",
@@ -161,7 +152,7 @@ async def _upsert_document(
         document["occurred_at"],
         document["source_updated_at"],
         effective_hash,
-        _canonical_json(document["metadata"]),
+        canonical_json(document["metadata"]),
     )
     if not status.endswith(" 1"):
         return "noop"
@@ -189,38 +180,41 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
 
     client = SemanticScholarClient()
     results: list[dict[str, Any]] = []
-    saved_papers: list[Paper] = []
-    for paper_id in inp.paper_ids:
-        try:
-            paper = client.get_paper(paper_id)
-        except RuntimeError as exc:
-            error_message = str(exc)
-            ctx.log(
-                "save_papers_paper_failed",
-                paper_id=paper_id,
-                error=error_message,
-            )
+    saved_papers: list[dict[str, Any]] = []
+    try:
+        for paper_id in inp.paper_ids:
+            try:
+                paper = client.get_paper(paper_id)
+            except RuntimeError as exc:
+                error_message = str(exc)
+                ctx.log(
+                    "save_papers_paper_failed",
+                    paper_id=paper_id,
+                    error=error_message,
+                )
+                results.append(
+                    {
+                        "paperId": paper_id,
+                        "status": "failed",
+                        "error": error_message,
+                    }
+                )
+                continue
+
+            saved_papers.append(paper)
+            document = build_paper_document(paper, query=inp.query)
+            _observe_doc_size(document)
+            action = await _upsert_document(ctx._pool, document)
+            _record_doc_change(document, action)
             results.append(
                 {
                     "paperId": paper_id,
-                    "status": "failed",
-                    "error": error_message,
+                    "document_id": document["document_id"],
+                    "status": action,
                 }
             )
-            continue
-
-        saved_papers.append(paper)
-        document = build_paper_document(paper, query=inp.query)
-        _observe_doc_size(document)
-        action = await _upsert_document(ctx._pool, document)
-        _record_doc_change(document, action)
-        results.append(
-            {
-                "paperId": paper_id,
-                "document_id": document["document_id"],
-                "status": action,
-            }
-        )
+    finally:
+        client.close()
 
     papers_inserted = sum(1 for r in results if r.get("status") == "inserted")
     papers_updated = sum(1 for r in results if r.get("status") == "updated")
@@ -252,15 +246,15 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         # link changed (None → brief_doc["document_id"]).
         for paper in saved_papers:
             try:
-                paper_doc = build_paper_document(
-                    paper,
-                    query=brief_query,
-                    parent_document_id=brief_doc["document_id"],
-                )
+                paper_doc = build_paper_document(paper, query=brief_query)
             except ValueError:
                 continue
             _observe_doc_size(paper_doc)
-            action = await _upsert_document(ctx._pool, paper_doc)
+            action = await _upsert_document(
+                ctx._pool,
+                paper_doc,
+                parent_document_id=brief_doc["document_id"],
+            )
             _record_doc_change(paper_doc, action)
 
         payload.update(

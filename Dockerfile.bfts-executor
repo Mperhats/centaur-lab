@@ -1,0 +1,29 @@
+# Image used by Sandbox pods that the bfts_executor tool creates.
+# Sleeps forever; the tool drives all work via pods/exec.
+# Mirrors the workspace contract from Sakana's Interpreter.run:
+# WORKDIR /workspace so os.path.join(os.getcwd(), 'working') resolves to
+# /workspace/working — the path Sakana's prompts write to (research 02
+# §Code execution contract).
+#
+# Built by `.github/workflows/overlay.yml` (job `publish-bfts-executor`)
+# on every push to `main` and pushed to GHCR alongside the overlay image
+# at `ghcr.io/${repo}/bfts-executor:latest` + `:sha-<commit>`. Excluded
+# from the overlay payload via `.dockerignore` — sandbox pods reference
+# this image by tag (see `tools/bfts_executor/client.py`
+# `_DEFAULT_EXECUTOR_IMAGE`), they never read the file. Local build:
+#
+#   docker build -f Dockerfile.bfts-executor -t bfts-executor:latest .
+FROM python:3.11-slim
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends coreutils \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir \
+        "numpy>=1.26" \
+        "matplotlib>=3.8" \
+        "scikit-learn>=1.4" \
+        "torch>=2.2 ; platform_machine=='x86_64'"
+
+WORKDIR /workspace
+CMD ["sleep", "infinity"]

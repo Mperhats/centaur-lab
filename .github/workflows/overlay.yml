@@ -6,25 +6,31 @@ on:
     paths:
       - tools/**
       - workflows/**
+      - packages/**
       - .agents/**
       - services/**
       - tests/**
       - Dockerfile
+      - Dockerfile.bfts-executor
       - .dockerignore
       - pyproject.toml
       - uv.lock
+      - ruff.toml
       - .github/workflows/overlay.yml
   pull_request:
     paths:
       - tools/**
       - workflows/**
+      - packages/**
       - .agents/**
       - services/**
       - tests/**
       - Dockerfile
+      - Dockerfile.bfts-executor
       - .dockerignore
       - pyproject.toml
       - uv.lock
+      - ruff.toml
       - .github/workflows/overlay.yml
   workflow_dispatch:
 
@@ -71,10 +77,15 @@ jobs:
         run: uv sync --frozen --all-packages --python 3.11
 
       - name: Lint
-        run: uv run --python 3.11 ruff check .
+        run: uv run ruff check .
 
+      # Only overlay-invariant + smoke tests live under ``tests/``
+      # right now; the legacy unit suite is parked in the gitignored
+      # ``tmp/test-old/`` mirror and will be reinstated incrementally
+      # as projections + workflow handlers stabilize (see ``AGENTS.md``
+      # Conventions).
       - name: Test
-        run: uv run --python 3.11 pytest tests/ -v
+        run: uv run pytest tests/ -v
 
   publish:
     name: Build and push overlay image
@@ -125,3 +136,60 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=overlay
           cache-to: type=gha,mode=max,scope=overlay
+
+  # Sibling image to the overlay: the BFTS sandbox runtime that
+  # ``tools/bfts_executor`` spawns Sandbox CRs from (see
+  # ``tools/bfts_executor/client.py`` ``_DEFAULT_EXECUTOR_IMAGE``).
+  # Co-released with the overlay because new BFTS workflows or tool
+  # changes routinely need new executor deps (numpy/matplotlib/sklearn/
+  # torch) and the two images must move in lockstep. Separate job (not
+  # a second step under ``publish``) so a build failure here does not
+  # block the overlay republish, and vice versa.
+  publish-bfts-executor:
+    name: Build and push bfts-executor image
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
+
+      - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6
+        with:
+          images: ghcr.io/${{ github.repository }}/bfts-executor
+          flavor: |
+            latest=false
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha
+          labels: |
+            org.opencontainers.image.title=bfts-executor
+            org.opencontainers.image.source=${{ env.IMAGE_SOURCE }}
+
+      - uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7
+        with:
+          context: .
+          file: Dockerfile.bfts-executor
+          # amd64 only: ``Dockerfile.bfts-executor`` pins
+          # ``torch>=2.2 ; platform_machine=='x86_64'``, so an arm64
+          # build would silently ship without torch and break Sakana's
+          # experiment code at sandbox-run time. Skipping QEMU emulation
+          # also keeps build time bounded (scikit-learn + torch take
+          # minutes under arm64 emulation).
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=bfts-executor
+          cache-to: type=gha,mode=max,scope=bfts-executor

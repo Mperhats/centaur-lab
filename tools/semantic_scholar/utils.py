@@ -1,21 +1,21 @@
-"""Tool-scoped helpers for the ``semantic_scholar`` tool.
+"""Tool-scoped pure helpers for the ``semantic_scholar`` tool.
 
-Three pure helpers shared between the tool's network layer and the
-workflows that consume the tool's typed ``Paper`` objects:
+Two pure helpers used by every projection in
+``tools/semantic_scholar/projections/`` and by the persistence call
+sites that produce ``content_hash`` columns for the
+``company_context_documents`` table:
 
-* :func:`derive_pdf_url` — pick the best PDF URL for a paper, or
-  ``None``. Used by the archive pipeline before download.
 * :func:`canonical_json` — stable JSON serialization for hashing and
   JSONB metadata columns. Byte-identical to upstream's
-  ``api.runtime_control.canonical_json`` so content_hash identity holds
-  across systems.
+  ``api.runtime_control.canonical_json`` so ``content_hash`` identity
+  holds across systems.
 * :func:`content_hash` — SHA-256 over the canonical-JSON form of the
   given parts. Used by every projection that produces a
   ``content_hash`` column for ``company_context_documents``.
 
-These helpers stay tool-scoped (not in ``tools/pdf/utils.py``) because
-they all read or compose Semantic Scholar's typed shapes (``Paper``,
-``externalIds``, ``openAccessPdf``); none of them are domain-agnostic.
+These helpers stay tool-scoped because they compose Semantic Scholar
+projection shapes; nothing here is domain-agnostic enough to live in a
+shared overlay package.
 """
 
 from __future__ import annotations
@@ -23,41 +23,6 @@ from __future__ import annotations
 import hashlib
 import json
 from typing import Any
-
-from semanticscholar.Paper import Paper
-
-
-def derive_pdf_url(paper: Paper) -> str | None:
-    """Pick the best PDF URL for a Semantic Scholar :class:`Paper`, or ``None``.
-
-    Preference order:
-
-    1. ``openAccessPdf["url"]`` (when it's a non-empty stripped string).
-    2. ``https://arxiv.org/pdf/{externalIds.ArXiv}.pdf`` (when an
-       ArXiv ID is present and non-empty).
-
-    Returns ``None`` when neither field is usable.
-
-    The upstream ``semanticscholar`` library exposes ``openAccessPdf``
-    and ``externalIds`` as plain dicts and returns ``None`` (not
-    ``{}``) when the API response omitted the field — every access
-    below normalises that.
-    """
-    open_access_pdf = paper.openAccessPdf or {}
-    open_access_url = open_access_pdf.get("url")
-    if open_access_url:
-        stripped = str(open_access_url).strip()
-        if stripped:
-            return stripped
-
-    external_ids = paper.externalIds or {}
-    arxiv_id = external_ids.get("ArXiv")
-    if arxiv_id:
-        stripped = str(arxiv_id).strip()
-        if stripped:
-            return f"https://arxiv.org/pdf/{stripped}.pdf"
-
-    return None
 
 
 # We intentionally do not import api.runtime_control.canonical_json here so

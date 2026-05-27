@@ -11,25 +11,18 @@ Prefer it over generic web search for anything that lives in the academic
 literature: arXiv, NeurIPS, biology/chem journals, etc.
 
 **Default flow: persist with a research brief.** After finding papers via
-`search`, run the `save_papers` workflow (which always writes a linked
-`research_brief` row) or, for a single-query lit review, run the
-`research_brief` workflow directly. **The `semantic_scholar` tool
-methods do not write to Postgres** — they only ever return projection
-bundles. Persistence always happens through one of the three workflows
-(`save_papers`, `research_brief`, `archive_papers`). Skip persistence
-ONLY when the user explicitly says "just search", "don't save",
-"exploratory only", or otherwise signals they don't want the result
-remembered.
+`search`, call `save_papers` (which always writes a linked
+`research_brief` row) or call `semantic_scholar.research_brief` directly
+for a single-query lit review. Skip persistence ONLY when the user
+explicitly says "just search", "don't save", "exploratory only", or
+otherwise signals they don't want the result remembered.
 
 **Pick the right surface:**
 
-- "Find papers about X" → `semantic_scholar.search` (tool) + `save_papers` workflow follow-up (brief + papers)
-- "Find papers about X and read them" / "search and grab the PDFs" → `search_and_archive_papers` workflow (atomic search + full-text archive). One call, one parent `run_id`, the child `archive_papers` run is observable via `GET /workflows/runs/<parent>/children`.
-- "Summarize this paper" / DOI / arXiv ID / S2 ID → `semantic_scholar.get_paper` (tool) + `save_papers` workflow follow-up (brief + paper)
-- "What does this paper cite?" → `semantic_scholar.get_references` (tool, no persistence needed)
-- "Build a brief / lit review / writeup on X" → `research_brief` workflow (atomic search + render + persist). Do NOT use the `semantic_scholar.research_brief` tool method for this — it returns a bundle and writes nothing.
-- "Deep dive on X / index the bodies / I want everything" → `research_brief` workflow with `"archive": true` — runs the brief, then chains `archive_papers` as a child workflow so every matched paper's full text is also indexed. One agent call, one parent `run_id`, observable as a child run via `GET /workflows/runs/<brief>/children`.
-- "Read the actual paper / quote from the body / I need more than the abstract" → `archive_papers` workflow — fetches the open-access PDF, parses to Markdown, and indexes the full text for BM25 search. (The `semantic_scholar.archive_paper` tool method is read-only: it returns a preview of what the workflow would persist, not a persisted row.)
+- "Find papers about X" → `semantic_scholar.search` + `save_papers` follow-up (brief + papers)
+- "Summarize this paper" / DOI / arXiv ID / S2 ID → `semantic_scholar.get_paper` + `save_papers` follow-up (brief + paper)
+- "What does this paper cite?" → `semantic_scholar.get_references`
+- "Build a brief / lit review / writeup on X" → `semantic_scholar.research_brief` (atomic search + render + persist)
 
 ## Paper Search (`semantic_scholar.search`)
 
@@ -70,30 +63,26 @@ results.
   `search_papers` first and only fetch full metadata for the few you'll
   cite.
 - Don't manually concatenate paper summaries into a Slack reply when the
-  user asked for a brief / lit review / writeup — invoke the
-  `research_brief` workflow so the brief is also persisted in
-  `company_context_documents` for future retrieval via `company_context`
-  or RAG.
-- Don't call the `semantic_scholar.research_brief` tool method when the
-  user wants a *persisted* brief — that method returns a projection
-  bundle and writes nothing. The `research_brief` workflow is the
-  persistence path; it calls the tool method internally and then
-  upserts the bundle. Use the tool method directly only when you need
-  the raw bundle (e.g. inspection, debugging, dry-run).
+  user asked for a brief / lit review / writeup — use
+  `semantic_scholar.research_brief` so the brief is also persisted in
+  `company_context_documents` for future retrieval via `company_context` or
+  RAG. Use `semantic_scholar.research_brief` when the user asked for a
+  brief / lit review / writeup.
+- Don't fall back to `call workflow run` for `research_brief` — the
+  workflow handler is now a thin back-compat wrapper around the tool method.
+  External `/workflows/runs` callers (Justfile cluster smoke, etc.) still
+  work, but in-Slack agent turns should always go through the tool.
 
 ## Persisting Research
 
-Two on-demand workflows turn ad-hoc Semantic Scholar lookups into
-durable knowledge by upserting rows into `company_context_documents`:
-the `save_papers` workflow and the `research_brief` workflow. Both are
-content-hash idempotent — re-running with the same input is safe and
-cheap (returns `noop` actions), so you don't have to track whether
-you've already saved something. **Neither tool method
-(`semantic_scholar.research_brief`, `semantic_scholar.archive_paper`)
-persists anything**; they return projection bundles that the workflow
-handlers consume.
+Two on-demand surfaces turn ad-hoc Semantic Scholar lookups into durable
+knowledge by upserting rows into `company_context_documents`: the
+`save_papers` workflow and the `semantic_scholar.research_brief` tool
+method. Both are content-hash idempotent — re-running with the same input
+is safe and cheap (returns `noop` actions), so you don't have to track
+whether you've already saved something.
 
-### `save_papers` workflow — Remember Specific Papers (+ brief)
+### `save_papers` — Remember Specific Papers (+ brief)
 
 The implicit default after every `search` / `search_papers` / `get_paper`
 turn (see "Default flow" above). Also fires on explicit asks: "save these
@@ -113,162 +102,25 @@ Idempotency means the save call is cheap to make even when the agent
 isn't sure whether the papers are already cached: re-saving an unchanged
 paper returns `noop` and writes nothing.
 
-### `research_brief` workflow — Synthesized Lit Review, Persisted
+### `research_brief` — Synthesized Lit Review, Persisted
 
 Use when the user wants a writeup, not just a list. Trigger phrases:
-"build a research brief", "give me a literature summary", "do a lit
-review on X", "summary of what's known about X", "what does the
-literature say about Y". Prefer this over chaining `search` +
-`save_papers` — it does both atomically: searches S2, renders a
-structured Markdown brief, upserts the brief as one row, and upserts
-each underlying paper as a child row pointing at the brief.
+"build a research brief", "give me a literature summary", "do a lit review
+on X", "summary of what's known about X", "what does the literature say
+about Y". Prefer this over chaining `search_papers` + `save_papers` — it
+does both atomically: searches S2, renders a structured Markdown brief,
+upserts the brief as one row, and upserts each underlying paper as a child
+row pointing at the brief.
 
-```bash
-call workflow run '{"workflow_name":"research_brief","input":{"query":"active inference world models","limit":5}}'
-```
+The tool method is what `call discover semantic_scholar` surfaces; invoke
+it directly via the tool surface (no `call workflow run` needed):
 
-`year_from` is optional (no lower bound when omitted). Returns
-`{status, brief_document_id, brief_action, results_count,
-papers_inserted, papers_updated, papers_noop}`.
+`semantic_scholar.research_brief(query="active inference world models", limit=5)`
 
-**`archive: true` — same workflow, full-text indexing too.** Setting
-the `archive` flag chains the `archive_papers` workflow as a child
-after the brief is persisted, so every matched paper's PDF is
-downloaded, parsed to Markdown, and indexed for BM25 alongside the
-brief — all under one parent `run_id`. Use this when the user wants
-substantive coverage of the literature, not just an abstract-level
-overview:
-
-```bash
-call workflow run '{"workflow_name":"research_brief","input":{"query":"active inference world models","limit":5,"archive":true}}'
-```
-
-With `archive=true`, the return shape gains `archive_run_id` and
-`archive` (the child run's `output_json`: `{status, papers_archived,
-papers_skipped, papers_failed, ...}`). The child run is independently
-visible in `/workflows/runs/<brief_run_id>/children`. Off by default
-because PDF fetch + parse is bandwidth- and CPU-heavy — opt in only
-when the user has asked for depth (not just discovery).
-
-To get the rendered Markdown for the Slack reply, either:
-
-1. Read the brief row's `body` from `company_context_documents` by
-   `brief_document_id` (canonical source of truth), or
-2. Call the tool method directly (`semantic_scholar.research_brief(...)`)
-   for a no-write preview that includes the `markdown` field — useful
-   when you want to show the brief inline without waiting on a
-   workflow run.
-
+Returns `{status, brief_document_id, brief_action, results_count,
+papers_inserted, papers_updated, papers_noop, markdown}`. The `markdown`
+field is the full rendered brief — post that back to Slack as your reply.
 The `brief_document_id` is stable for the same query + `year_from`
-(case-insensitive), so re-running the workflow updates the same row
-instead of accruing duplicates; surface it for traceability so a future
-turn (or a RAG retrieval over `company_context_documents`) can pivot
-back to the exact brief.
-
-## Archiving Full-Text PDFs
-
-`save_papers` and `research_brief` only ever index the abstract — useful
-for ranking and discovery, not for substantive quoting or methodology
-review. When the user wants more than the abstract ("read the paper",
-"quote from the methods section", "what does this paper actually
-report?"), reach for the archive surface.
-
-Three surfaces:
-
-- `semantic_scholar.archive_paper(paper_id)` — single paper, agent-facing
-  tool method. **Read-only**: returns a projection bundle dict
-  (`paper_doc`, `fulltext_doc`, `archive_row`) describing what *would*
-  be persisted, plus `pdf_sha256` / `size_bytes` / `parser_used`. Safe
-  to call from a Slack turn for inspection; does NOT write to Postgres.
-- `archive_papers` workflow — batch over a list of paper IDs you
-  already have. **This is what actually persists** rows to
-  `paper_archives` and `company_context_documents`. Use this whenever
-  the user wants the body indexed for future retrieval, even for a
-  single paper.
-- `search_and_archive_papers` workflow — when the user describes a
-  topic (not specific IDs) and wants the full text indexed. Searches
-  Semantic Scholar live, then chains `archive_papers` as a child
-  workflow over the matched IDs. Returns the child's run_id and full
-  payload (`{status, query, results_count, archive_run_id, archive}`)
-  so per-paper archive results are observable in one place. Prefer
-  this over a manual `search` → `archive_papers` two-call dance.
-
-Pipeline (both surfaces):
-
-1. Resolves the PDF URL from `openAccessPdf.url`, falling back to
-   `https://arxiv.org/pdf/{externalIds.ArXiv}.pdf` when present.
-2. Streams the PDF with a 50 MiB hard cap. Paywalled / oversized papers
-   return `{"status": "skipped", "reason": "no_pdf_url" | "too_large"}` —
-   not an error, just unfetchable. Surface this to the user verbatim
-   instead of retrying.
-3. Parses through a `pymupdf4llm` → `pymupdf` → `pypdf` fallback chain
-   with a 100-char min-size guard between tiers. The first tier produces
-   real Markdown (preserves headings, tables, reading order); the
-   later tiers are plain-text fallbacks for image-only or restricted-env
-   PDFs.
-4. **(workflow only)** Persists three rows. The `archive_paper` tool
-   method returns a projection bundle and stops here; the
-   `archive_papers` workflow consumes that bundle and writes:
-   - raw bytes + parsed text in `paper_archives` (overlay-owned, keyed
-     by paperId — source of truth, lets us re-parse without re-fetching)
-   - the metadata row in `company_context_documents` with
-     `source_type="paper"` (same shape as `save_papers` writes)
-   - the parsed Markdown body in `company_context_documents` with
-     `source_type="paper_fulltext"`, `parent_document_id` pointing at
-     the metadata row
-
-Idempotent on `(paper_id, pdf_sha256)` — re-running on an unchanged PDF
-returns `{"status": "noop", "archive_action": "noop", ...}` without
-re-parsing or rewriting. Safe to call without checking whether the
-paper has been archived before.
-
-When ranking or filtering search results downstream, the
-`paper_fulltext` rows make the body searchable via BM25. The `paper`
-rows remain unchanged so abstract-level queries keep their existing
-recall and idempotency contracts.
-
-Examples:
-
-```bash
-# Inspect what would be archived (read-only — no DB write)
-call discover semantic_scholar
-call run semantic_scholar archive_paper '{"paper_id":"173ba8ae4582b6f9f6919aa3f813579a5349f1f9"}'
-
-# Actually persist — single paper or batch (same workflow)
-call workflow run '{"workflow_name":"archive_papers","input":{"paper_ids":["173ba8ae4582b6f9f6919aa3f813579a5349f1f9"]}}'
-call workflow run '{"workflow_name":"archive_papers","input":{"paper_ids":["173ba8ae...","abcd1234..."]}}'
-
-# Search + archive in one call when the user described a topic, not IDs
-call workflow run '{"workflow_name":"search_and_archive_papers","input":{"query":"diffusion models protein design","limit":5}}'
-```
-
-Don't archive a paper just to read its abstract — the abstract is
-already in the metadata row. Archive only when the user actually needs
-the body. Don't call `archive_paper` to "save" a paper — that tool
-method does not persist; always go through the `archive_papers`
-workflow when persistence is the goal.
-
-### Known limitation: Cloudflare-protected publishers
-
-The HTTP fetch path is plain `urllib`-style — no headless browser. Any
-publisher that gates PDFs behind a Cloudflare JavaScript challenge
-returns HTTP 403 with an HTML body starting `<!DOCTYPE html><html
-lang="en-US"><head><title>Just a moment...</title>`. The workflow
-records this as `{status: "error", stage: "fetch", reason:
-"http_error"}` for the affected paper and continues with the rest of
-the batch — one Cloudflare-blocked paper never aborts a multi-paper
-archive. Concretely:
-
-- **arXiv** (`arxiv.org/pdf/...`) — always works (no JS challenge).
-- **biorxiv / medrxiv** — Cloudflare-protected, will 403 every time.
-- **Most journal sites** — usually Cloudflare-protected or paywalled.
-- **Publisher-hosted open-access PDFs** (PLOS, MDPI, eLife, etc.) —
-  mostly fine, occasional 403.
-
-When the user asks to archive a paper and you see this failure mode in
-the workflow's `results[]`, surface it plainly: "I couldn't fetch the
-PDF from biorxiv — they require a browser-level challenge. The
-abstract is still indexed under `<brief_document_id>`, and the open
-access page is at `<url>` if you want to pull the body manually." Do
-NOT retry — the same call will get the same 403. Don't fabricate
-content as a workaround.
+(case-insensitive), so re-running updates the same row instead of accruing
+duplicates; surface it for traceability so a future turn (or a RAG retrieval
+over `company_context_documents`) can pivot back to the exact brief.

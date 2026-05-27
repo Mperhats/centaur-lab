@@ -6,8 +6,9 @@
 
 # Local Helm values — per centaur-acme guidance, the overlay repo
 # carries no Helm values. Local laptop overrides live in a gitignored
-# values*.yaml (see README's local-deploy section). Helm values for any
-# cluster live in clusters/<name>/argocd/values/ instead.
+# values*.yaml (see README's local-deploy section). Helm values for
+# any cluster live in the sibling centaur-scientist-infra repo
+# instead.
 values*.yaml
 
 # Python detritus (in case anything escapes the .centaur/ submodule)
@@ -26,17 +27,17 @@ workflows/uv.lock
 # Node detritus
 node_modules/
 
-# Cloudflare Tunnel credentials — defensive; real ones live in ~/.cloudflared/
-cloudflared/*.json
-cloudflared/cert.pem
-
 # Git worktrees (subagent-driven-development isolation)
 .worktrees/
 
-# Local scratch directory (ad-hoc notebooks, anything you don't want
-# to commit). Never ships in the overlay image — also excluded by
-# .dockerignore.
-/tmp/
+# Local scratch directory. Never ships in the overlay image — also
+# excluded by .dockerignore. Pattern (unanchored) so nested ``tmp/``
+# (e.g. ``tools/<name>/tmp/``) is also ignored.
+tmp/
+
+# Ruff + pytest caches
+.ruff_cache/
+.pytest_cache/
 
 # Editor / OS
 .idea/

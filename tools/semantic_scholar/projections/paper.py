@@ -1,15 +1,15 @@
-"""Project a typed Semantic Scholar :class:`Paper` into a paper-metadata row.
+"""Project a Semantic Scholar paper into a ``company_context_documents`` row.
 
-Produces the ``source_type="paper"`` shape of ``company_context_documents``
-— author/year/venue/DOI/etc. summarised into a Markdown body, with the
-raw fields preserved in a JSONB ``metadata`` column for downstream
-filtering. PDF bytes and parsed full-text are *not* read here; those
-live in the sibling :mod:`semantic_scholar.projections.fulltext` and
-:mod:`semantic_scholar.projections.archive` modules.
+``build_paper_document`` is pure — it takes a paper dict (as returned
+by the Semantic Scholar Graph API or proxied via this tool's
+``SemanticScholarClient``) and produces a row dict whose shape matches
+the ``company_context_documents`` table.
 
-Pure function: typed S2 input in, plain ``dict`` out. No DB, no
-``await``. The workflow's inlined ``_upsert_document`` consumes the
-dict shape directly.
+Persistence lives in the call site (``tools/semantic_scholar/client.py``
+for the ``research_brief`` tool method, ``workflows/save_papers.py``
+for the durable workflow handler); both inline the ``_upsert_document``
+SQL and the ``vm_metrics`` shim that mirrors upstream's
+``company_context_documents`` convention.
 """
 
 from __future__ import annotations
@@ -17,74 +17,69 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from semanticscholar.Paper import Paper
-
 from tools.semantic_scholar.utils import content_hash
 
 
-def build_paper_document(
-    paper: Paper,
-    *,
-    query: str | None = None,
-    parent_document_id: str | None = None,
-) -> dict[str, Any]:
-    """Project a Semantic Scholar :class:`Paper` into a ``company_context_documents`` row.
+def build_paper_document(paper: dict, *, query: str | None = None) -> dict:
+    """Project a Semantic Scholar paper dict into a company_context_documents row.
 
     Args:
-        paper: A typed :class:`Paper` parsed from the Graph API response.
+        paper: A paper dict as returned by the Semantic Scholar Graph API
+            (`paperId`, `title`, `authors`, `year`, `abstract`, `citationCount`,
+            `url`, `openAccessPdf`, `venue`, `externalIds`, ...).
         query: Optional free-text query that produced this paper; persisted
-            in ``metadata.query`` for downstream attribution.
-        parent_document_id: Optional parent row id (e.g. the research-brief
-            ``document_id`` for papers surfaced by ``research_brief``).
-            Persisted directly into the returned dict's
-            ``parent_document_id`` field; the workflow's inlined
-            ``_upsert_document`` reads it from there.
+            in `metadata.query` for downstream attribution.
 
     Returns:
-        A dict shaped for the canonical ``_upsert_document`` SQL in
-        ``company_context_documents.py``.
+        A dict shaped for the ``_upsert_document`` SQL in
+        ``tools/semantic_scholar/client.py`` /
+        ``workflows/save_papers.py`` (mirrors the canonical
+        ``_upsert_document`` from upstream's
+        ``company_context_documents`` workflow).
 
     Raises:
-        ValueError: If ``paper.paperId`` is missing — we cannot synthesize a
-            stable primary key without it.
+        ValueError: If `paper` has no `paperId` — we cannot synthesize a stable
+            primary key without it.
     """
-    if not paper.paperId:
+    paper_id = paper.get("paperId")
+    if not paper_id:
         raise ValueError("paper.paperId is required to build a paper document.")
-    paper_id_str = str(paper.paperId)
+    paper_id_str = str(paper_id)
 
-    title = paper.title or "Untitled"
+    title = paper.get("title") or "Untitled"
 
-    # ``paper.authors`` is ``None`` when the S2 response omitted the key.
-    # Normalise to an empty list once so every downstream comprehension
-    # can stay free of the None-guard.
-    authors = paper.authors or []
-    display_names = [a.name for a in authors if a.name]
-    first_author = authors[0] if authors else None
+    authors_raw = paper.get("authors") or []
+    author_dicts = [a for a in authors_raw if isinstance(a, dict)]
+    display_names = [str(a.get("name")) for a in author_dicts if a.get("name")]
+
+    first_author = author_dicts[0] if author_dicts else None
     author_id = ""
     author_name = ""
     if first_author is not None:
-        author_id = str(first_author.authorId) if first_author.authorId else ""
-        author_name = str(first_author.name or "")
+        raw_author_id = first_author.get("authorId")
+        author_id = str(raw_author_id) if raw_author_id else ""
+        author_name = str(first_author.get("name") or "")
 
-    year_int = paper.year
-    venue = paper.venue
-    citation_count = int(paper.citationCount or 0)
+    year = paper.get("year")
+    year_int = year if isinstance(year, int) else None
+    venue = paper.get("venue")
+    citation_count = int(paper.get("citationCount") or 0)
 
-    external_ids = paper.externalIds or {}
+    external_ids_raw = paper.get("externalIds")
+    external_ids = external_ids_raw if isinstance(external_ids_raw, dict) else {}
     doi = external_ids.get("DOI")
     arxiv_id = external_ids.get("ArXiv")
 
-    # ``paper.openAccessPdf`` is a plain dict from the upstream library
-    # (not a typed object); ``None`` when the field is absent or null.
+    open_access_pdf_raw = paper.get("openAccessPdf")
     open_access_pdf_url: str | None = None
-    open_access_pdf = paper.openAccessPdf
-    if open_access_pdf and open_access_pdf.get("url"):
-        open_access_pdf_url = str(open_access_pdf["url"])
+    if isinstance(open_access_pdf_raw, dict):
+        pdf_url = open_access_pdf_raw.get("url")
+        open_access_pdf_url = str(pdf_url) if pdf_url else None
 
     canonical_s2_url = f"https://www.semanticscholar.org/paper/{paper_id_str}"
-    url = paper.url or canonical_s2_url
+    url = paper.get("url") or canonical_s2_url
 
-    abstract = paper.abstract or "No abstract available."
+    abstract = paper.get("abstract") or "No abstract available."
     body = "\n".join(
         [
             f"# {title}",
@@ -108,15 +103,19 @@ def build_paper_document(
 
     metadata_authors = [
         {
-            "authorId": str(a.authorId) if a.authorId else None,
-            "name": str(a.name or ""),
+            "authorId": (str(a["authorId"]) if a.get("authorId") else None),
+            "name": str(a.get("name") or ""),
         }
-        for a in authors
+        for a in author_dicts
     ]
 
     # OVERLAY: include all metadata keys with explicit nulls (instead of
     # filtering ``None`` out) so JSONB key-presence checks behave the
     # same way for ``semantic_scholar`` rows as for Slack rows upstream.
+    # Upstream's channel-day / thread projections list every key
+    # unconditionally; dropping ``None`` keys here meant downstream
+    # ``metadata ? 'doi'`` checks reported ``false`` rather than
+    # ``true`` for papers without a DOI.
     metadata: dict[str, Any] = {
         "paperId": paper_id_str,
         "year": year_int,
@@ -133,15 +132,17 @@ def build_paper_document(
     # observed the row), not publication time. The Semantic Scholar
     # Graph API does not expose a per-paper update timestamp, so the
     # nearest analog is ``datetime.now(UTC)`` — taken at projection
-    # time. ``occurred_at`` itself stays anchored to the publication
-    # year for chronological surfacing.
+    # time. Setting this to ``occurred_at`` (paper-publication year)
+    # would report multi-year ETL lag to downstream freshness
+    # dashboards. ``occurred_at`` itself stays anchored to the
+    # publication year for chronological surfacing.
     return {
         "document_id": f"semantic_scholar:paper:{paper_id_str}",
         "source": "semantic_scholar",
         "source_type": "paper",
         "source_document_id": paper_id_str,
         "source_chunk_id": "",
-        "parent_document_id": parent_document_id,
+        "parent_document_id": None,
         "title": title,
         "body": body,
         "url": url,

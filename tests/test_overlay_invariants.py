@@ -38,14 +38,21 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 _MODULE_TO_DIST: dict[str, str] = {}
 
 # Names available on the API pod's ``sys.path`` without any pyproject
-# dep declaration. Three kinds:
+# dep declaration. Four kinds:
 #
 #   * Our own repo-root namespace packages: ``tools``, ``workflows``,
 #     ``services`` (mounted at ``/app/overlay/org/`` via ``TOOL_DIRS`` /
 #     ``WORKFLOW_DIRS``).
-#   * ``centaur_sdk``: in dev via the repo-root symlink, in the API
-#     pod via upstream's Dockerfile ``COPY centaur_sdk/ centaur_sdk/``
-#     into ``/app/centaur_sdk/``.
+#   * ``packages``: the in-repo non-tool namespace (``packages/bfts_sdk``,
+#     ``packages/centaur_sdk`` symlink). The API pod's ``app.py`` adds
+#     ``Path(tool_dir).parent`` to ``sys.path`` for every ``TOOL_DIRS``
+#     entry, which lands ``/app/overlay/org`` on ``sys.path``, so
+#     ``from packages.bfts_sdk.X import …`` resolves alongside
+#     ``from tools.<name>.X import …``. Same name-resolution mechanism
+#     as ``tools``/``workflows``/``services``, so listed alongside them.
+#   * ``centaur_sdk``: in dev via the ``packages/centaur_sdk`` symlink,
+#     in the API pod via upstream's Dockerfile ``COPY centaur_sdk/
+#     centaur_sdk/`` into ``/app/centaur_sdk/``.
 #   * ``api``: upstream's own server package at ``/app/api/`` in the
 #     API pod. NOT importable in dev/test, but the existing smoke
 #     tests catch dev-only breakage there — if a workflow ever moves
@@ -53,7 +60,7 @@ _MODULE_TO_DIST: dict[str, str] = {}
 #     ``try: … except ImportError:`` guard, the smoke test fails on
 #     ``import workflows.<name>``.
 _API_POD_AVAILABLE_NAMES = frozenset(
-    {"tools", "workflows", "services", "centaur_sdk", "api"}
+    {"tools", "workflows", "services", "packages", "centaur_sdk", "api"}
 )
 
 

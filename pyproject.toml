@@ -1,37 +1,67 @@
 [project]
-name = "centaur-lab-overlay"
+name = "centaur-scientist-overlay"
 version = "0.1.0"
-description = "centaur-lab organization overlay for Centaur (academic research domain)"
+description = "centaur-scientist organization overlay for Centaur (BFTS / AI-Scientist-v2 driver workflows, execution sandbox tooling, and academic-research helpers)"
 requires-python = ">=3.11"
 license = "Apache-2.0 OR MIT"
 
-# Tool runtime deps live in ``tools/<name>/pyproject.toml`` — that's the
-# file upstream's API entrypoint (.centaur/services/api/entrypoint.sh)
-# scans on pod startup to ``uv pip install`` every overlay tool's deps
-# before launching uvicorn. The workspace glob below makes the same
-# per-tool ``[project].dependencies`` blocks discoverable to uv, so
-# ``uv sync --all-packages`` aggregates them into the dev ``.venv`` —
-# byte-for-byte the same set the API pod ends up with, with no
-# duplicated dep lists in this file to drift.
+# Shape B: the root only declares a uv workspace; ``uv sync
+# --all-packages`` walks every member's ``[project].dependencies``
+# into the dev ``.venv``. We do NOT re-list each tool in a root
+# ``[project].dependencies`` or ``[tool.uv.sources]`` table — the
+# workspace glob is the single source of truth for membership, and
+# the per-tool pyproject is the single source of truth for what each
+# tool needs at runtime.
 #
-# Each tool opts out of being built as a wheel
-# (``[tool.uv].package = false`` in its own pyproject) — the repo is a
-# Docker image build context, not a Python distribution.
+# Why this matters: a per-tool ``pyproject.toml`` is non-negotiable
+# regardless of root-pyproject shape. Two upstream-owned things
+# require it:
 #
-# ``centaur_sdk`` is intentionally not declared anywhere: upstream's
-# ``centaur_sdk/pyproject.toml`` declares ``packages = ["."]`` which
-# flattens module files into the wheel root, so a normal ``pip install``
-# / ``uv add`` does not expose ``from centaur_sdk import …``. We expose
-# the SDK via a ``centaur_sdk`` → ``.centaur/centaur_sdk`` symlink at
-# the repo root, which lets every Python entrypoint that already has
-# the repo root on ``sys.path`` (pytest, ``uv run python -m …``, IDEs,
-# mypy / pyright) resolve the package directly. Bumping the
-# ``.centaur`` submodule pin updates the SDK in lockstep with the API.
-# Note: the SDK declares its own runtime deps (currently ``rich``);
-# those land in the ``.venv`` via ``rich`` being a per-tool dep, which
-# matches what the API pod sees too.
+#   1. API pod runtime install — ``.centaur/services/api/entrypoint.sh``
+#      walks ``TOOL_DIRS`` at pod startup and ``uv pip install``s
+#      each tool's ``[project].dependencies``. No per-tool
+#      pyproject → tool deps don't land in the pod venv → tool code
+#      ``ImportError``s at request time.
+#   2. Tool discovery + secret injection — ``tool_manager`` reads
+#      ``[tool.centaur].secrets`` / ``optional_secrets`` from each
+#      tool's pyproject to decide whether to expose the tool to the
+#      agent and which env vars iron-proxy should inject.
+#
+# Workflows + ``packages/bfts_sdk`` are NOT scanned by
+# ``entrypoint.sh``. The invariant that keeps prod working is that
+# every dep imported by overlay code outside ``tools/`` is also
+# declared by some tool's ``[project].dependencies`` (today
+# ``bfts_sdk`` needs only ``asyncpg + httpx``, both already declared
+# by ``tools/semantic_scholar/`` and ``tools/bfts_vlm/``). This is a
+# code-review invariant, not a CI string-equality check — the latter
+# would only catch one kind of drift while masking the real problem,
+# which is "did we add a new transitive import without giving it a
+# tool home?".
+#
+# ``packages/bfts_sdk`` is a workspace member but does NOT need a
+# ``[tool.uv.sources]`` redirect because Shape B never names it as
+# a root ``[project].dependencies`` entry — the ``members`` glob is
+# the only thing referencing it, and that already binds it to the
+# workspace.
+#
+# ``centaur_sdk`` is intentionally not declared anywhere as a dep:
+# upstream's ``centaur_sdk/pyproject.toml`` declares
+# ``packages = ["."]`` which flattens module files into the wheel
+# root, so ``pip install`` / ``uv add`` does not expose
+# ``from centaur_sdk import …``. We expose the SDK via a
+# ``packages/centaur_sdk`` → ``.centaur/centaur_sdk`` symlink (with
+# ``packages/`` on ``pythonpath`` below), which lets every dev-side
+# Python entrypoint resolve the package directly. The API pod ships
+# its own ``/app/centaur_sdk/`` installed as a real venv package, so
+# prod never reads the symlink. ``packages/centaur_sdk`` is
+# explicitly NOT a workspace member because the upstream pyproject
+# there is not opted out of building and would confuse uv.
+
 [tool.uv.workspace]
-members = ["tools/*"]
+members = [
+    "tools/*",
+    "packages/bfts_sdk",
+]
 
 # This repo is a Docker image build context, not a publishable Python
 # distribution — tell uv not to build the overlay itself.
@@ -46,15 +76,34 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
+# Overlay-invariant tests + smoke tests live under ``tests/``; the
+# unit-test suite was parked in the gitignored ``tmp/test-old/``
+# mirror during the centaur_lab → S2 dispersal and will be reinstated
+# incrementally as projections and workflow handlers stabilize.
 testpaths = ["tests"]
-# Repo root on the path so ``from tools.semantic_scholar.client import …``
-# and ``from workflows.research_brief import …`` resolve as namespace
-# packages — byte-identical to how the API pod sets up TOOL_DIRS /
-# WORKFLOW_DIRS at startup. ``centaur_sdk`` resolves through the
-# repo-root symlink (see the comment near the top of this file), so we
-# don't need ``.centaur`` on the path here anymore.
-pythonpath = ["."]
+# - Repo root on the path so ``from tools.bfts_executor.client import …``
+#   and ``from workflows.bfts_tree import …`` resolve as namespace
+#   packages — byte-identical to how the API pod sets up TOOL_DIRS /
+#   WORKFLOW_DIRS at startup.
+# - ``packages/`` on the path so ``from centaur_sdk import secret``
+#   resolves through the ``packages/centaur_sdk`` → ``.centaur/centaur_sdk``
+#   symlink during local dev (the API pod has ``centaur_sdk`` installed
+#   as a real venv package via its own Dockerfile and ignores the
+#   symlink). BFTS callers stay namespaced as
+#   ``from packages.bfts_sdk.config import …`` so the same imports
+#   resolve in the API pod where TOOL_DIRS already puts the overlay
+#   root on ``sys.path``; we don't need a separate ``bfts_sdk``-on-path
+#   entry there.
+pythonpath = [".", "packages"]
 asyncio_mode = "strict"
+# ``importlib`` is required so future per-tool / per-workflow
+# ``tests`` packages can co-exist with the top-level ``tests/`` dir
+# without leaf-name collisions (pytest's default ``prepend`` import
+# mode would clash sibling ``tests`` packages). Imports each test
+# file under its unique rootdir-relative module path
+# (e.g. ``tests.test_overlay_invariants``,
+# ``tools.bfts_executor.tests.test_collect_artifacts``).
+addopts = "--import-mode=importlib"
 
 # ruff config lives in ./ruff.toml so it can also be used by per-tool
 # `uvx ruff check .` invocations from inside `tools/<name>/` — keeping

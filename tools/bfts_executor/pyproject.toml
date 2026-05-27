@@ -1,0 +1,43 @@
+# Single source of truth for the BFTS executor tool's runtime deps,
+# read by three consumers (matches the canonical overlay tool
+# pyproject shape upstream uses):
+#
+#   1. ``tool_manager`` (.centaur/services/api/api/tool_manager.py)
+#      scans every ``TOOL_DIRS`` entry for ``pyproject.toml`` on API
+#      pod startup, reading ``[tool.centaur]`` for ``module`` and
+#      ``secrets`` to register the tool.
+#   2. The API pod's ``entrypoint.sh`` walks the same files and
+#      ``uv pip install``s the union of every ``[project].dependencies``
+#      before launching uvicorn.
+#   3. The repo-root ``uv`` workspace pulls this dir in via
+#      ``[tool.uv.workspace] members``; ``uv sync`` from the repo
+#      root installs these deps into the local ``.venv`` so dev/test
+#      matches what the API pod sees with no duplicated dep lists.
+#
+# No ``[tool.centaur].secrets`` — the executor authenticates to the
+# Kubernetes apiserver via the in-cluster ServiceAccount (mounted at
+# ``/var/run/secrets/kubernetes.io/serviceaccount/``); no
+# iron-proxy-injected HTTP secret is needed.
+[project]
+name = "bfts-executor"
+description = "Best-First Tree Search executor: drives a Sandbox CR through the experiment-exec contract (Sakana AI Scientist-v2 parity)."
+version = "0.1.0"
+requires-python = ">=3.11"
+license = "Apache-2.0 OR MIT"
+dependencies = [
+    "dataclasses-json>=0.6.0",
+    "kubernetes-asyncio>=29.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# Tool manifest, not a publishable wheel — opt out of building so uv
+# treats this as a workspace member that only contributes its
+# ``[project].dependencies`` to the root ``.venv``.
+[tool.uv]
+package = false
+
+[tool.centaur]
+module = "client.py"

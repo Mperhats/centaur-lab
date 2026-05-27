@@ -10,7 +10,6 @@ Run from the repo root:
     uv run python -m tools.semantic_scholar.cli search "diffusion models" -n 5
 """
 
-import asyncio
 import json
 
 import typer
@@ -20,7 +19,7 @@ from rich.console import Console
 from centaur_sdk import Table
 from tools.semantic_scholar.client import SemanticScholarClient
 
-# Walk up from CWD to find a `.env` so an isolated tool session still
+# Walk up from CWD to find a ``.env`` so an isolated tool session still
 # picks up the same secrets the root .env feeds into the cluster Secret.
 # Tool clients running in Centaur ignore .env entirely and resolve
 # secrets through the manager sidecar instead.
@@ -34,14 +33,11 @@ def _make_client() -> SemanticScholarClient:
     return SemanticScholarClient()
 
 
-def _format_authors(authors, max_authors: int = 3) -> str:
-    """Format a list of :class:`Author` (or empty/None) into a human-readable string."""
-    # ``paper.authors`` from the upstream library is ``None`` when the
-    # S2 response omitted the key entirely; accept that here so the CLI
-    # doesn't have to spell out the None guard at every call site.
+def _format_authors(authors: list[dict] | None, max_authors: int = 3) -> str:
     if not authors:
         return ""
-    names = [a.name for a in authors if a.name]
+    names = [a.get("name", "") for a in authors if isinstance(a, dict)]
+    names = [n for n in names if n]
     if len(names) > max_authors:
         return ", ".join(names[:max_authors]) + f" +{len(names) - max_authors}"
     return ", ".join(names)
@@ -55,16 +51,7 @@ def _truncate(text: str | None, length: int = 80) -> str:
     return text[: length - 1] + "…"
 
 
-def _papers_to_json(papers) -> str:
-    """Dump a ``list[Paper]`` to a JSON string, preserving the wire shape.
-
-    ``Paper(data)`` stores ``data`` by reference; ``raw_data`` is the
-    byte-for-byte original API response.
-    """
-    return json.dumps([p.raw_data for p in papers], indent=2)
-
-
-def _render_papers(papers, title: str) -> None:
+def _render_papers(papers: list[dict], title: str) -> None:
     if not papers:
         console.print("[yellow]No results.[/]")
         raise typer.Exit()
@@ -75,10 +62,10 @@ def _render_papers(papers, title: str) -> None:
     table.add_column("Cites", style="dim", justify="right")
     for paper in papers:
         table.add_row(
-            _truncate(paper.title, 60),
-            _format_authors(paper.authors, max_authors=2),
-            str(paper.year or ""),
-            str(paper.citationCount or ""),
+            _truncate(paper.get("title"), 60),
+            _format_authors(paper.get("authors"), max_authors=2),
+            str(paper.get("year") or ""),
+            str(paper.get("citationCount") or ""),
         )
     console.print(table)
 
@@ -93,10 +80,10 @@ def search(
     json_output: bool = typer.Option(False, "--json", help="Output as JSON."),
 ):
     """Search papers by query."""
-    client = _make_client()
-    papers = client.search_papers(query=query, limit=limit, year_from=year_from)
+    with _make_client() as client:
+        papers = client.search_papers(query=query, limit=limit, year_from=year_from)
     if json_output:
-        print(_papers_to_json(papers))
+        print(json.dumps(papers, indent=2))
         return
     _render_papers(papers, title=f"Semantic Scholar: '{query}'")
 
@@ -107,19 +94,20 @@ def paper(
     json_output: bool = typer.Option(False, "--json", help="Output as JSON."),
 ):
     """Fetch metadata for a single paper."""
-    client = _make_client()
-    data = client.get_paper(paper_id)
+    with _make_client() as client:
+        data = client.get_paper(paper_id)
     if json_output:
-        print(json.dumps(data.raw_data, indent=2))
+        print(json.dumps(data, indent=2))
         return
-    console.print(f"[bold cyan]{data.title or '(no title)'}[/]")
-    console.print(f"[yellow]{_format_authors(data.authors, max_authors=10)}[/]")
-    console.print(f"Year: {data.year or '?'}  |  Cites: {data.citationCount or 0}")
-    if data.url:
-        console.print(f"URL: {data.url}")
-    if data.abstract:
+    console.print(f"[bold cyan]{data.get('title', '(no title)')}[/]")
+    console.print(f"[yellow]{_format_authors(data.get('authors'), max_authors=10)}[/]")
+    console.print(f"Year: {data.get('year') or '?'}  |  Cites: {data.get('citationCount') or 0}")
+    if data.get("url"):
+        console.print(f"URL: {data['url']}")
+    abstract = data.get("abstract") or ""
+    if abstract:
         console.print()
-        console.print(data.abstract)
+        console.print(abstract)
 
 
 @app.command()
@@ -129,10 +117,10 @@ def references(
     json_output: bool = typer.Option(False, "--json", help="Output as JSON."),
 ):
     """List the papers cited by the given paper."""
-    client = _make_client()
-    refs = client.get_references(paper_id=paper_id, limit=limit)
+    with _make_client() as client:
+        refs = client.get_references(paper_id=paper_id, limit=limit)
     if json_output:
-        print(_papers_to_json(refs))
+        print(json.dumps(refs, indent=2))
         return
     _render_papers(refs, title=f"References of {paper_id}")
 
@@ -142,12 +130,12 @@ def _render_research_brief_summary(query: str, result: dict) -> None:
     table.add_column("Field", style="cyan")
     table.add_column("Value", style="white")
     table.add_row("status", str(result.get("status", "")))
-    brief_doc = result.get("brief_doc") or {}
-    table.add_row("brief_document_id", str(brief_doc.get("document_id", "")))
+    table.add_row("brief_document_id", str(result.get("brief_document_id", "")))
+    table.add_row("brief_action", str(result.get("brief_action", "")))
     table.add_row("results_count", str(result.get("results_count", 0)))
-    table.add_row("paper_docs", str(len(result.get("paper_docs") or [])))
-    table.add_row("limit", str(result.get("limit", "")))
-    table.add_row("year_from", str(result.get("year_from", "")))
+    table.add_row("papers_inserted", str(result.get("papers_inserted", 0)))
+    table.add_row("papers_updated", str(result.get("papers_updated", 0)))
+    table.add_row("papers_noop", str(result.get("papers_noop", 0)))
     console.print(table)
 
 
@@ -163,29 +151,40 @@ def research_brief_cmd(
         "-y",
         help="Restrict results to papers published from this year onward.",
     ),
-    json_output: bool = typer.Option(False, "--json", help="Print the full result dict as JSON."),
-    pretty: bool = typer.Option(False, "--pretty", help="Print only the rendered Markdown brief."),
+    json_output: bool = typer.Option(
+        False, "--json", help="Print the full result dict as JSON."
+    ),
+    pretty: bool = typer.Option(
+        False, "--pretty", help="Print only the rendered Markdown brief."
+    ),
 ) -> None:
-    """Build a research brief and print the projection bundle.
+    """Build and persist a research brief on a topic.
 
-    Calls ``SemanticScholarClient.research_brief``, which searches
-    Semantic Scholar, renders a Markdown lit review, and projects the
-    brief plus its citing papers into ``company_context_documents`` row
-    dicts. This command does NOT persist — run the ``research_brief``
-    workflow if you need rows in the database.
+    Calls SemanticScholarClient.research_brief, which searches Semantic
+    Scholar, renders a Markdown lit review, and writes the brief plus
+    its citing papers to company_context_documents for future RAG
+    retrieval. Idempotent on (query, year_from) — re-running with the
+    same inputs updates the existing rows in place.
     """
     # Mutual exclusion: ``--pretty`` strips everything but the markdown,
-    # ``--json`` prints the full bundle — they describe two different
+    # ``--json`` prints the full result dict — they describe two different
     # output modes, so accepting both would silently let one win and mask
     # the operator's intent. Mirror upstream's deep-research pattern of
     # explicit single-flag selection.
     if pretty and json_output:
-        raise typer.BadParameter("--pretty and --json are mutually exclusive; pick one.")
+        raise typer.BadParameter(
+            "--pretty and --json are mutually exclusive; pick one."
+        )
 
-    client = _make_client()
-    result = asyncio.run(client.research_brief(query=query, limit=limit, year_from=year_from))
+    with _make_client() as client:
+        result = client.research_brief(query=query, limit=limit, year_from=year_from)
 
     if result.get("status") == "error":
+        # The tool method's error envelope is the canonical place for
+        # operator-actionable messages (empty query, missing DATABASE_URL,
+        # S2 outage). Surface it verbatim and exit non-zero so callers
+        # piping through ``glow`` or scripting around the CLI can branch
+        # on exit code instead of parsing stdout.
         console.print(f"[red]research_brief failed:[/] {result.get('error', '')}")
         raise typer.Exit(1)
 
@@ -198,59 +197,10 @@ def research_brief_cmd(
         return
 
     if json_output:
-        print(json.dumps(result, indent=2, default=str))
+        print(json.dumps(result, indent=2))
         return
 
     _render_research_brief_summary(query, result)
-
-
-@app.command("archive")
-def archive_cmd(
-    paper_id: str = typer.Argument(..., help="Paper ID (S2, DOI:..., arXiv:...)."),
-    source_url: str | None = typer.Option(
-        None,
-        "--source-url",
-        help="Override PDF URL (defaults to openAccessPdf.url with arxiv fallback).",
-    ),
-    json_output: bool = typer.Option(
-        False, "--json", help="Emit the raw bundle as JSON instead of a summary."
-    ),
-) -> None:
-    """Download, parse, and project a paper PDF into row-shaped dicts.
-
-    Calls ``SemanticScholarClient.archive_paper``, which fetches the
-    PDF, parses it, and returns ``paper_doc`` / ``fulltext_doc`` /
-    ``archive_row`` dicts. This command does NOT persist — run the
-    ``archive_papers`` workflow if you need rows in the database.
-    """
-    client = _make_client()
-    result = asyncio.run(client.archive_paper(paper_id, source_url=source_url))
-
-    if json_output:
-        print(json.dumps(result, indent=2, default=str))
-        return
-
-    status = str(result.get("status", "unknown"))
-    color_for_status = {
-        "ok": "green",
-        "skipped": "yellow",
-        "error": "red",
-    }
-    color = color_for_status.get(status, "white")
-    console.print(f"[{color}]status={status}[/]")
-    for key in (
-        "paper_id",
-        "source_url",
-        "parser_used",
-        "pdf_sha256",
-        "size_bytes",
-        "mime_type",
-        "stage",
-        "reason",
-        "error",
-    ):
-        if key in result:
-            console.print(f"  {key} = {result[key]}")
 
 
 if __name__ == "__main__":

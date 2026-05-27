@@ -1,41 +1,29 @@
-# Single source of truth for the Semantic Scholar tool's runtime deps,
-# read by three different consumers:
+# Single source of truth for the Semantic Scholar tool's runtime
+# deps; same three consumers as the other tools (tool_manager
+# registration, entrypoint.sh dep install, workspace ``uv sync``).
+# See ``tools/bfts_executor/pyproject.toml`` for the full pattern.
 #
-#   1. ``tool_manager`` (.centaur/services/api/api/tool_manager.py)
-#      — the API pod scans every ``TOOL_DIRS`` entry for
-#      ``pyproject.toml`` and registers each as a tool; it reads
-#      ``[tool.centaur]`` for ``module`` and ``secrets``.
-#   2. The API pod's ``entrypoint.sh`` — walks the same files at pod
-#      startup and ``uv pip install``s the union of every
-#      ``[project].dependencies``. So everything ``client.py`` imports
-#      (transitively) MUST be declared here or in another overlay tool's
-#      pyproject; deps get unioned before install.
-#   3. The repo-root ``uv`` workspace — this directory is a workspace
-#      member (see ``../../pyproject.toml``), so ``uv sync --all-packages``
-#      from the repo root installs the same set into the local ``.venv``.
-#      That's what makes the dev/test environment match the API pod with
-#      no duplicated dependency lists.
-#
-# iron-proxy injection: ``[tool.centaur].secrets`` tells the firewall to
-# substitute the resolved value for ``SEMANTIC_SCHOLAR_API_KEY`` on
-# outbound requests to ``api.semanticscholar.org``.
-#
-# ``secrets`` (required, not ``optional_secrets``): the agent only sees
-# this tool when the cluster Secret resolves SEMANTIC_SCHOLAR_API_KEY.
-# Anonymous calls would degrade silently to S2's tight 1 req/sec
-# unauthenticated rate limit — better to hide the tool than have the
-# agent burn turns on rate-limit errors.
+# iron-proxy injection: ``[tool.centaur].secrets`` tells the firewall
+# to substitute the resolved value for ``SEMANTIC_SCHOLAR_API_KEY``
+# on outbound requests to ``api.semanticscholar.org``. Declared as
+# required (not ``optional_secrets``) so ``tool_manager`` hides the
+# tool from the agent when the key is unbound — the BFTS workflows
+# (``gather_citations``, ``ideation``) and the research-brief flow
+# all rely on bulk S2 calls that would saturate the anonymous
+# 1 req/sec rate limit and silently fail mid-run. Aligns with
+# upstream centaur-acme's required-secret contract.
 [project]
 name = "semantic-scholar"
+description = "Semantic Scholar Graph API client (paper search + bulk metadata + research-brief persistence to Postgres)."
 version = "0.1.0"
-description = "Search Semantic Scholar, fetch paper metadata, walk the citation graph, and build research-brief bundles."
 requires-python = ">=3.11"
 license = "Apache-2.0 OR MIT"
 dependencies = [
+    "asyncpg>=0.30.0",
     "httpx>=0.27.0",
     "python-dotenv>=1.0.0",
     "rich>=13.0.0",
-    "semanticscholar>=0.12.0",
+    "tenacity>=8.0.0",
     "typer>=0.12.0",
 ]
 
@@ -43,10 +31,9 @@ dependencies = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-# This is a tool manifest, not a publishable wheel — opt out of building
-# so uv treats it as a workspace member that contributes its
-# ``[project].dependencies`` to the root ``.venv`` without trying to
-# install the tool itself.
+# Tool manifest, not a publishable wheel — opt out of building so uv
+# treats this as a workspace member that only contributes its
+# ``[project].dependencies`` to the root ``.venv``.
 [tool.uv]
 package = false
 

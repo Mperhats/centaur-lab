@@ -1,81 +1,56 @@
-"""Semantic Scholar tool client.
-
-Three sync network methods that delegate to the upstream
-``semanticscholar`` PyPI package — ``search_papers``, ``get_paper``,
-``get_references`` — plus three agent-facing convenience methods
-(``search``, ``research_brief``, ``archive_paper``) that wrap them
-with the ``{"status": ...}`` envelope contract the Slack/sandbox tool
-runtime depends on.
-
-This module is read-only with respect to Postgres. ``research_brief``
-and ``archive_paper`` return *projection bundles* — dicts shaped for
-the inlined ``_upsert_document`` / ``_upsert_paper_archive`` helpers in
-each workflow handler — and never open a pool of their own. Workflow
-handlers in ``workflows/`` own all DB writes; the agent-facing
-contract is "tool returns the rows, caller persists them".
-
-The typed objects returned by ``search_papers`` / ``get_paper`` /
-``get_references`` are the upstream library's
-``semanticscholar.Paper.Paper``. Wire-shape consumers (``search``
-envelope, CLI ``--json``) recover the original JSON dict via
-``Paper.raw_data``; ``Paper(data)`` stores ``data`` by reference so a
-freshly-constructed paper round-trips byte-for-byte.
-"""
+"""Semantic Scholar Graph API client with live search and research-brief generation."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Final
+import os
+import time
+from typing import Any
 
-from semanticscholar import SemanticScholar
-from semanticscholar.Paper import Paper
-from semanticscholar.SemanticScholarException import SemanticScholarException
+import asyncpg
+import httpx
 
 from centaur_sdk import secret
-from tools.pdf.fetch.http import (
-    PdfFetchError,
-    PdfHttpError,
-    PdfNetworkError,
-    PdfNotPdfError,
-    PdfTooLargeError,
-    download_pdf,
-)
-from tools.pdf.parse.markdown import (
-    PdfInsufficientTextError,
-    PdfParseError,
-    parse_pdf,
-)
-from tools.pdf.utils import compute_pdf_sha256
-from tools.semantic_scholar.projections.archive import build_paper_archive_row
 from tools.semantic_scholar.projections.brief import build_brief_document, render_brief
-from tools.semantic_scholar.projections.fulltext import build_fulltext_document
 from tools.semantic_scholar.projections.paper import build_paper_document
-from tools.semantic_scholar.utils import derive_pdf_url
+from tools.semantic_scholar.utils import canonical_json, content_hash
+
+# vm_metrics shim. Inside the API pod ``api.vm_metrics`` resolves
+# cleanly and emission lands in real Prometheus counters; outside the
+# pod (local pytest, ``uvx ruff``, the bare ``python -m`` smoke test)
+# the import fails and the fallback no-op stubs take over so this file
+# imports without `ImportError`. Mirrors the convention used by
+# upstream's ``company_context_documents`` workflow and (verbatim) by
+# the sibling ``workflows/save_papers.py`` handler — that duplication
+# is the upstream pattern (see
+# ``.centaur/workflows/company_context_documents.py``).
+try:
+    from api.vm_metrics import (
+        observe_company_context_document_size as _observe_document_size,
+    )
+    from api.vm_metrics import (
+        record_company_context_documents_changed as _record_document_change,
+    )
+except ImportError:
+
+    def _observe_document_size(source: str, source_type: str, chars: int) -> None: ...
+
+    def _record_document_change(
+        source: str, source_type: str, action: str, count: int = 1
+    ) -> None: ...
+
 
 log = logging.getLogger(__name__)
 
-DEFAULT_PAPER_FIELDS: list[str] = [
-    "title",
-    "authors",
-    "year",
-    "abstract",
-    "citationCount",
-    "url",
-    "openAccessPdf",
-    # Needed so derive_pdf_url's arxiv fallback (which reads
-    # externalIds["ArXiv"]) actually fires for non-OA papers — without
-    # this, the Graph API omits externalIds and the fallback was dead
-    # code on every real call.
-    "externalIds",
-]
-DEFAULT_REFERENCE_FIELDS: list[str] = [
-    "title",
-    "authors",
-    "year",
-    "citationCount",
-    "url",
-]
+DEFAULT_PAPER_FIELDS = "title,authors,year,abstract,citationCount,url,openAccessPdf"
+DEFAULT_REFERENCE_FIELDS = "title,authors,year,citationCount,url"
+# Sakana's writeup pipeline (mirrored in workflows/gather_citations.py)
+# needs S2-provided BibTeX strings, returned under the ``citationStyles`` field
+# as ``{"bibtex": "@article{...}"}``. Kept narrow on purpose — abstract /
+# openAccessPdf aren't needed for citation rendering and would inflate every
+# response.
+BIBTEX_PAPER_FIELDS = "title,authors,year,citationCount,url,citationStyles"
 
 DEFAULT_SEARCH_LIMIT = 10
 MAX_SEARCH_LIMIT = 50
@@ -83,117 +58,385 @@ MAX_SEARCH_LIMIT = 50
 DEFAULT_RESEARCH_BRIEF_LIMIT = 5
 MAX_RESEARCH_BRIEF_LIMIT = 20
 
-# Archive-pipeline knobs. Held on the client (not the workflow) so the
-# agent-facing ``archive_paper`` method ships sensible defaults without
-# forcing every caller to repeat the constants.
-MAX_PDF_BYTES: Final[int] = 50 * 1024 * 1024
-PDF_DOWNLOAD_TIMEOUT_S: Final[float] = 60.0
-PDF_USER_AGENT: Final[str] = "centaur-scientist/0.1 (paper-archive; +https://centaur.run)"
-ARCHIVE_PARSER_MIN_SIZE: Final[int] = 100
+# Input-validation error strings emitted by ``research_brief``. Promoted to
+# module-level constants so the workflow wrapper at
+# ``workflows/research_brief.py`` can key its
+# ``error → skipped`` translation table on them by import — any future
+# reword surfaces as an ``ImportError`` rather than a silent contract drift
+# that strands external callers (Justfile smoke recipes, direct posters to
+# ``/workflows/runs``) on the wrong envelope shape.
+RESEARCH_BRIEF_EMPTY_QUERY_ERROR = "query cannot be empty"
+RESEARCH_BRIEF_INVALID_LIMIT_ERROR = "limit must be positive"
+
+# Brief markdown rendering lives in ``projections/brief.py``; paper
+# projection lives in ``projections/paper.py``. Input-validation error
+# strings above are imported by ``workflows/research_brief.py`` for its
+# error → skipped table.
 
 
 def _clamp(value: int, *, minimum: int, maximum: int) -> int:
+    """Clamp integer tool inputs to predictable output bounds."""
     return max(minimum, min(int(value), maximum))
 
 
+def _observe_doc_size(document: dict[str, Any]) -> None:
+    """Forward a doc's body size to the API pod's Prometheus counter."""
+    _observe_document_size(
+        str(document.get("source", "")),
+        str(document.get("source_type", "")),
+        len(str(document.get("body") or "")),
+    )
+
+
+def _record_doc_change(document: dict[str, Any], action: str) -> None:
+    """Forward a doc's inserted/updated/noop verdict to the API pod's counter."""
+    _record_document_change(
+        str(document.get("source", "")),
+        str(document.get("source_type", "")),
+        action,
+    )
+
+
+async def _upsert_document(
+    conn: Any,
+    document: dict[str, Any],
+    *,
+    parent_document_id: str | None = None,
+) -> str:
+    """Upsert a projected document; return ``inserted`` / ``updated`` / ``noop``.
+
+    Verbatim duplicate of the same helper in ``workflows/save_papers.py``
+    — that duplication is upstream's ``company_context_documents``
+    convention (see ``.centaur/workflows/company_context_documents.py``)
+    and is deliberate, not an oversight. The compound-hash logic
+    (intrinsic hash + ``effective_parent``) ensures a paper first saved
+    without a parent and later surfaced via a brief becomes an
+    ``UPDATE`` rather than a silent noop, even when the intrinsic
+    content hasn't changed.
+
+    ``conn`` is an ``asyncpg.Connection`` (this tool opens a fresh
+    connection per call rather than sharing a pool, so concurrent
+    invocations don't fight over a single workflow-pool slot during S2
+    round trips).
+    """
+    effective_parent = (
+        parent_document_id
+        if parent_document_id is not None
+        else document.get("parent_document_id")
+    )
+    effective_hash = content_hash(document["content_hash"], effective_parent)
+
+    existing_hash = await conn.fetchval(
+        "SELECT content_hash FROM company_context_documents WHERE document_id = $1",
+        document["document_id"],
+    )
+    if existing_hash == effective_hash:
+        return "noop"
+
+    status = await conn.execute(
+        "INSERT INTO company_context_documents ("
+        "document_id, source, source_type, source_document_id, source_chunk_id, "
+        "parent_document_id, title, body, url, author_id, author_name, access_scope, "
+        "occurred_at, source_updated_at, content_hash, metadata, updated_at"
+        ") VALUES ("
+        "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, "
+        "$15, $16::jsonb, NOW()"
+        ") ON CONFLICT (document_id) DO UPDATE SET "
+        "source = EXCLUDED.source, "
+        "source_type = EXCLUDED.source_type, "
+        "source_document_id = EXCLUDED.source_document_id, "
+        "source_chunk_id = EXCLUDED.source_chunk_id, "
+        "parent_document_id = EXCLUDED.parent_document_id, "
+        "title = EXCLUDED.title, "
+        "body = EXCLUDED.body, "
+        "url = EXCLUDED.url, "
+        "author_id = EXCLUDED.author_id, "
+        "author_name = EXCLUDED.author_name, "
+        "access_scope = EXCLUDED.access_scope, "
+        "occurred_at = EXCLUDED.occurred_at, "
+        "source_updated_at = EXCLUDED.source_updated_at, "
+        "content_hash = EXCLUDED.content_hash, "
+        "metadata = EXCLUDED.metadata, "
+        "updated_at = NOW() "
+        "WHERE company_context_documents.content_hash IS DISTINCT FROM EXCLUDED.content_hash",
+        document["document_id"],
+        document["source"],
+        document["source_type"],
+        document["source_document_id"],
+        document["source_chunk_id"],
+        effective_parent,
+        document["title"],
+        document["body"],
+        document["url"],
+        document["author_id"],
+        document["author_name"],
+        document["access_scope"],
+        document["occurred_at"],
+        document["source_updated_at"],
+        effective_hash,
+        canonical_json(document["metadata"]),
+    )
+    if not status.endswith(" 1"):
+        return "noop"
+    return "updated" if existing_hash else "inserted"
+
+
 class SemanticScholarClient:
-    """Search papers, fetch metadata, walk the citation graph, build research-brief bundles.
+    """Search papers, fetch metadata, walk the citation graph, and build research briefs.
 
-    Wraps the upstream ``semanticscholar`` library against the Graph
-    API. Anonymous calls work (heavy rate limits); pass
-    ``SEMANTIC_SCHOLAR_API_KEY`` via the secret sidecar for production
-    quotas. The library handles HTTP, retries, and typed-object parsing.
-
-    The two persistence-adjacent methods (``research_brief``,
-    ``archive_paper``) return projection bundles — pure dicts shaped for
-    the workflow-owned upsert SQL. They never open a pool of their own.
+    Wraps the Semantic Scholar Graph API
+    (https://api.semanticscholar.org/api-docs/graph), which is callable
+    anonymously (heavily rate-limited) or with an ``x-api-key`` for
+    higher quotas — the header is sent only when the secret is set so
+    anonymous calls don't accidentally hit a 401 on a stale placeholder.
     """
 
-    def __init__(self, api_key: str | None = None, timeout: float = 30.0) -> None:
-        # API key is resolved lazily on first ``self.client`` access; the
-        # tool manager's ``_collect_methods()`` pass instantiates this
-        # class while ``ToolContext.secrets`` is still empty.
+    BASE_URL = "https://api.semanticscholar.org/graph/v1"
+
+    # Anonymous Semantic Scholar IPs hit 429 quickly. A small bounded backoff
+    # smooths over the common case without masking real failures.
+    MAX_RETRIES = 4
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        timeout: float = 30.0,
+        database_url: str | None = None,
+    ) -> None:
+        # Store the constructor-injected key as-is; resolve any fallback
+        # lazily at request time. Eager resolution here runs during the
+        # ToolManager's _collect_methods() pass when ToolContext.secrets
+        # is still empty, so the per-call secret never lands in the header.
         self._api_key = api_key
         self._timeout = timeout
-        self._client: SemanticScholar | None = None
+        self._client: httpx.Client | None = None
+        # DATABASE_URL is owned by the API process, not an agent-facing
+        # secret; mirror the resolution chain upstream company_context uses
+        # so a constructor arg can override env or secret for tests.
+        env_database_url = os.getenv("DATABASE_URL")  # noqa: TID251
+        self._database_url = (
+            database_url or env_database_url or secret("DATABASE_URL", default="")
+        ).strip()
+
+    def _require_database_url(self) -> str:
+        if not self._database_url:
+            raise RuntimeError(
+                "DATABASE_URL is required for semantic_scholar database access"
+            )
+        return self._database_url
+
+    async def _connect(self) -> asyncpg.Connection:
+        return await asyncpg.connect(self._require_database_url(), command_timeout=30)
 
     def _get_api_key(self) -> str | None:
+        """Get API key from instance or env var."""
+        # The tool works anonymously; default to "" so callers don't have to
+        # branch on None. Iron-proxy only injects the real value when the
+        # header is actually present, so an empty string keeps requests
+        # anonymous instead of breaking them.
         if self._api_key:
             return self._api_key
-        return secret("SEMANTIC_SCHOLAR_API_KEY", "") or None
+        return secret("SEMANTIC_SCHOLAR_API_KEY", "")
 
     @property
-    def client(self) -> SemanticScholar:
-        """Lazy-initialized upstream library client."""
+    def client(self) -> httpx.Client:
         if self._client is None:
-            self._client = SemanticScholar(
-                timeout=int(self._timeout),
-                api_key=self._get_api_key(),
-                retry=True,
-            )
+            self._client = httpx.Client(timeout=self._timeout)
         return self._client
+
+    def _headers(self) -> dict[str, str]:
+        api_key = self._get_api_key()
+        if api_key:
+            return {"x-api-key": api_key}
+        return {}
+
+    def _request(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        url = f"{self.BASE_URL}{path}"
+        last_exc: Exception | None = None
+        for attempt in range(self.MAX_RETRIES):
+            try:
+                response = self.client.get(url, params=params, headers=self._headers())
+                # 429 is the dominant failure mode for anonymous use; retry with
+                # exponential backoff. 5xx is also transient. Anything else is
+                # raised immediately (4xx errors are usually our fault).
+                if response.status_code in (429, 502, 503, 504):
+                    last_exc = httpx.HTTPStatusError(
+                        f"transient {response.status_code}", request=response.request, response=response
+                    )
+                    if attempt < self.MAX_RETRIES - 1:
+                        time.sleep(min(8.0, 2**attempt))
+                        continue
+                response.raise_for_status()
+                return response.json()
+            except httpx.HTTPStatusError as exc:
+                body = exc.response.text if exc.response is not None else ""
+                status = exc.response.status_code if exc.response is not None else "?"
+                raise RuntimeError(f"Semantic Scholar API error ({status}): {body}") from exc
+            except httpx.RequestError as exc:
+                last_exc = exc
+                if attempt < self.MAX_RETRIES - 1:
+                    time.sleep(min(8.0, 2**attempt))
+                    continue
+                raise RuntimeError(f"Semantic Scholar request failed: {exc}") from exc
+        raise RuntimeError(
+            f"Semantic Scholar request failed after {self.MAX_RETRIES} attempts: {last_exc}"
+        )
+
+    async def _request_async(
+        self, path: str, params: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Async sibling of ``_request`` — ``await asyncio.sleep`` for backoff.
+
+        Mirrors the retry policy of the sync ``_request`` (transient 429/5xx
+        gets exponential backoff up to 8s; any other 4xx raises immediately)
+        but uses an ``httpx.AsyncClient`` and ``await asyncio.sleep`` so the
+        retry sleeps don't block the asyncio event loop the way ``time.sleep``
+        does. Mirrors ``_exa_search_async`` in
+        ``.centaur/tools/research/websearch/client.py``.
+
+        The ``AsyncClient`` is created per-call rather than cached on the
+        instance (Option A in the review): ``research_brief`` drives its own
+        ``asyncio.run`` loop, and ``httpx.AsyncClient`` binds its internal
+        anyio primitives to the event loop it's instantiated under — so a
+        cached client would crash on the second ``asyncio.run`` with "Future
+        attached to a different loop". Per-call ``async with`` keeps lifecycle
+        trivial (no ``aclose`` to wire through ``__exit__``) and matches
+        upstream websearch's pattern exactly.
+        """
+        url = f"{self.BASE_URL}{path}"
+        last_exc: Exception | None = None
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            for attempt in range(self.MAX_RETRIES):
+                try:
+                    response = await client.get(
+                        url, params=params, headers=self._headers()
+                    )
+                    if response.status_code in (429, 502, 503, 504):
+                        last_exc = httpx.HTTPStatusError(
+                            f"transient {response.status_code}",
+                            request=response.request,
+                            response=response,
+                        )
+                        if attempt < self.MAX_RETRIES - 1:
+                            await asyncio.sleep(min(8.0, 2**attempt))
+                            continue
+                    response.raise_for_status()
+                    return response.json()
+                except httpx.HTTPStatusError as exc:
+                    body = exc.response.text if exc.response is not None else ""
+                    status = exc.response.status_code if exc.response is not None else "?"
+                    raise RuntimeError(
+                        f"Semantic Scholar API error ({status}): {body}"
+                    ) from exc
+                except httpx.RequestError as exc:
+                    last_exc = exc
+                    if attempt < self.MAX_RETRIES - 1:
+                        await asyncio.sleep(min(8.0, 2**attempt))
+                        continue
+                    raise RuntimeError(
+                        f"Semantic Scholar request failed: {exc}"
+                    ) from exc
+        raise RuntimeError(
+            f"Semantic Scholar request failed after {self.MAX_RETRIES} attempts: {last_exc}"
+        )
 
     def search_papers(
         self,
         query: str,
         limit: int = 10,
         year_from: int | None = None,
-        fields: list[str] | None = None,
-    ) -> list[Paper]:
-        """Search papers by free-text query. Raises on API error."""
+        fields: str = DEFAULT_PAPER_FIELDS,
+    ) -> list[dict]:
+        """Search papers by free-text query.
+
+        Args:
+            query: Free-text search query (e.g. "diffusion models protein design").
+            limit: Max results, 1..100.
+            year_from: Optional inclusive lower bound on publication year.
+            fields: Comma-separated list of fields per the Graph API spec.
+
+        Returns:
+            A list of paper dicts (already unwrapped from the ``data`` envelope).
+        """
         if not query or not query.strip():
             raise ValueError("query cannot be empty.")
-        try:
-            results = self.client.search_paper(
-                query.strip(),
-                limit=max(1, min(limit, 100)),
-                fields=list(fields) if fields is not None else list(DEFAULT_PAPER_FIELDS),
-                year=f"{year_from}-" if year_from is not None else None,
-            )
-        except SemanticScholarException as exc:
-            raise RuntimeError(f"Semantic Scholar API error: {exc}") from exc
-        return list(results.items)
+        params: dict[str, Any] = {
+            "query": query.strip(),
+            "limit": max(1, min(limit, 100)),
+            "fields": fields,
+        }
+        if year_from is not None:
+            params["year"] = f"{year_from}-"
+        payload = self._request("/paper/search", params=params)
+        results = payload.get("data", [])
+        return [item for item in results if isinstance(item, dict)]
+
+    async def search_papers_async(
+        self,
+        query: str,
+        limit: int = 10,
+        year_from: int | None = None,
+        fields: str = DEFAULT_PAPER_FIELDS,
+    ) -> list[dict]:
+        """Async variant of ``search_papers`` for use inside coroutines.
+
+        Identical input validation and query-parameter shaping as
+        ``search_papers``; delegates to ``_request_async`` so retry backoff
+        awaits instead of blocking the event loop. Use this whenever the
+        caller is already running inside a coroutine (e.g.
+        ``_research_brief_async``); call the sync ``search_papers`` from
+        sync code paths.
+        """
+        if not query or not query.strip():
+            raise ValueError("query cannot be empty.")
+        params: dict[str, Any] = {
+            "query": query.strip(),
+            "limit": max(1, min(limit, 100)),
+            "fields": fields,
+        }
+        if year_from is not None:
+            params["year"] = f"{year_from}-"
+        payload = await self._request_async("/paper/search", params=params)
+        results = payload.get("data", [])
+        return [item for item in results if isinstance(item, dict)]
 
     def get_paper(
         self,
         paper_id: str,
-        fields: list[str] | None = None,
-    ) -> Paper:
-        """Fetch metadata for a single paper. Accepts S2/DOI/arXiv IDs."""
+        fields: str = DEFAULT_PAPER_FIELDS,
+    ) -> dict:
+        """Fetch metadata for a single paper.
+
+        ``paper_id`` accepts any of the IDs the Graph API understands —
+        Semantic Scholar IDs, DOIs (``DOI:10.x/y``), arXiv IDs (``arXiv:1234.5678``),
+        and a few others. See the upstream docs for the full list.
+        """
         if not paper_id or not paper_id.strip():
             raise ValueError("paper_id cannot be empty.")
-        try:
-            return self.client.get_paper(
-                paper_id.strip(),
-                fields=list(fields) if fields is not None else list(DEFAULT_PAPER_FIELDS),
-            )
-        except SemanticScholarException as exc:
-            raise RuntimeError(f"Semantic Scholar API error: {exc}") from exc
+        return self._request(f"/paper/{paper_id.strip()}", params={"fields": fields})
 
     def get_references(
         self,
         paper_id: str,
         limit: int = 20,
-        fields: list[str] | None = None,
-    ) -> list[Paper]:
-        """List papers cited by the given paper.
-
-        Returns a flat ``list[Paper]``; the
-        :class:`semanticscholar.Reference.Reference` wrapper (citation
-        context / intent) is stripped to keep the shape symmetric with
-        ``search_papers``.
-        """
+        fields: str = DEFAULT_REFERENCE_FIELDS,
+    ) -> list[dict]:
+        """List the papers that the given paper cites."""
         if not paper_id or not paper_id.strip():
             raise ValueError("paper_id cannot be empty.")
-        try:
-            refs = self.client.get_paper_references(
-                paper_id.strip(),
-                limit=max(1, min(limit, 100)),
-                fields=list(fields) if fields is not None else list(DEFAULT_REFERENCE_FIELDS),
-            )
-        except SemanticScholarException as exc:
-            raise RuntimeError(f"Semantic Scholar API error: {exc}") from exc
-        return [ref.paper for ref in refs.items if ref.paper is not None]
+        params = {"limit": max(1, min(limit, 100)), "fields": fields}
+        payload = self._request(f"/paper/{paper_id.strip()}/references", params=params)
+        items = payload.get("data", [])
+        # Each reference entry wraps the cited paper under "citedPaper"; flatten
+        # so callers get a list of paper dicts directly.
+        out: list[dict] = []
+        for entry in items:
+            if not isinstance(entry, dict):
+                continue
+            cited = entry.get("citedPaper")
+            if isinstance(cited, dict):
+                out.append(cited)
+        return out
 
     def search(
         self,
@@ -201,18 +444,42 @@ class SemanticScholarClient:
         limit: int = DEFAULT_SEARCH_LIMIT,
         year_from: int | None = None,
     ) -> dict:
-        """Agent-facing search wrapper: never raises; returns an envelope.
+        """Search papers via the live Semantic Scholar Graph API.
 
-        Returns ``{"status": "ok", "results": [<dict>...], ...}`` on
-        success, ``{"status": "error", "error": ...}`` otherwise. Does
-        not query ``company_context_documents``; use ``save_papers`` or
-        ``research_brief`` to persist results.
+        Agent-facing wrapper around ``search_papers`` that never raises —
+        returns ``{"status": "error", "error": ...}`` on failure. Does not
+        query ``company_context_documents``; use ``save_papers`` or
+        ``research_brief`` to persist results for later retrieval.
+
+        Args:
+            query: Free-text search query.
+            limit: Max results, 1..``MAX_SEARCH_LIMIT``.
+            year_from: Optional inclusive lower bound on publication year.
+
+        Returns:
+            On success::
+
+                {
+                    "status": "ok",
+                    "query": "<normalized query>",
+                    "limit": <int>,
+                    "year_from": <int | null>,
+                    "count": <int>,
+                    "results": [<S2 paper dict>, ...],
+                }
+
+            On failure, ``{"status": "error", "error": "<message>"}``.
         """
         normalized_query = query.strip() if query else ""
         if not normalized_query:
             return {"status": "error", "error": "query cannot be empty"}
 
-        clamped_limit = _clamp(limit, minimum=1, maximum=MAX_SEARCH_LIMIT)
+        clamped_limit = _clamp(
+            limit,
+            minimum=1,
+            maximum=MAX_SEARCH_LIMIT,
+        )
+
         try:
             papers = self.search_papers(
                 normalized_query,
@@ -225,243 +492,175 @@ class SemanticScholarClient:
                 "limit": clamped_limit,
                 "year_from": year_from,
                 "count": len(papers),
-                "results": [p.raw_data for p in papers],
+                "results": papers,
             }
         except Exception as exc:
             log.warning("semantic_scholar search failed", exc_info=True)
             return {"status": "error", "error": str(exc)}
 
-    async def research_brief(
+    def research_brief(
         self,
         query: str,
         limit: int = DEFAULT_RESEARCH_BRIEF_LIMIT,
         year_from: int | None = None,
     ) -> dict[str, Any]:
-        """Search Semantic Scholar, render a Markdown brief, project to DB-row dicts.
+        """Build a persisted research brief on a topic — searches Semantic Scholar,
+        renders a Markdown lit review, and writes the brief plus its citing papers
+        to ``company_context_documents`` for future RAG retrieval.
 
-        Returns a bundle the workflow handler persists; never opens a
-        pool or writes to Postgres. Idempotent inputs produce identical
-        bundles — the workflow's ``_upsert_document`` short-circuits on
-        unchanged ``content_hash``.
+        Use this when a user asks for a literature review, a research summary,
+        or "what does the literature say about X" — typical Slack prompts
+        include "build a research brief on diffusion models", "lit review on
+        active inference", "summarize recent work on retrieval-augmented
+        generation". The rendered Markdown is returned as the ``markdown``
+        field so the caller (e.g. a Slack agent) can post it directly.
 
-        Bundle shape on success::
+        Idempotent: re-running with the same ``(query, year_from)`` updates
+        the existing brief row in place (matched on a stable hash of the
+        normalized query) instead of duplicating it. Each underlying paper
+        is upserted under ``source_type="paper"`` with ``parent_document_id``
+        stamped to the brief's document id, so downstream tools can pivot
+        from a paper back to the brief that surfaced it.
 
-            {
-                "status": "ok",
-                "query": str,
-                "year_from": int | None,
-                "limit": int,
-                "results_count": int,
-                "markdown": str,
-                "brief_doc": dict,          # company_context_documents row
-                "paper_docs": list[dict],   # each parent_document_id ==
-                                            # brief_doc["document_id"]
-            }
+        Never raises — returns an ``{"status": "error", "error": ...}`` dict
+        on any failure (empty query, non-positive limit, missing
+        ``DATABASE_URL``, S2 outage, DB failure). ``limit`` above the
+        per-call ceiling is clamped, not rejected.
 
-        On error::
+        Args:
+            query: Free-text topic to brief (e.g. "diffusion models
+                protein design").
+            limit: Max underlying papers, 1..``MAX_RESEARCH_BRIEF_LIMIT``.
+                Values above the ceiling are clamped.
+            year_from: Optional inclusive lower bound on publication year.
 
-            {"status": "error", "query": ..., "error": "..."}
+        Returns:
+            On success, a dict shaped::
 
-        Never raises. ``limit`` above
-        :data:`MAX_RESEARCH_BRIEF_LIMIT` is clamped, not rejected.
+                {
+                    "status": "completed",
+                    "brief_document_id": "semantic_scholar:research_brief:<hex>",
+                    "brief_action": "inserted" | "updated" | "noop",
+                    "results_count": <int>,
+                    "papers_inserted": <int>,
+                    "papers_updated": <int>,
+                    "papers_noop": <int>,
+                    "markdown": "<full rendered brief>",
+                }
+
+            On failure, ``{"status": "error", "error": "<message>"}``.
         """
         normalized_query = query.strip() if query else ""
         if not normalized_query:
-            return {"status": "error", "query": query, "error": "query cannot be empty"}
+            return {"status": "error", "error": RESEARCH_BRIEF_EMPTY_QUERY_ERROR}
+
         if limit <= 0:
+            return {"status": "error", "error": RESEARCH_BRIEF_INVALID_LIMIT_ERROR}
+
+        if not self._database_url:
             return {
                 "status": "error",
-                "query": normalized_query,
-                "error": "limit must be positive",
+                "error": "DATABASE_URL is required for semantic_scholar.research_brief",
             }
 
-        clamped_limit = _clamp(limit, minimum=1, maximum=MAX_RESEARCH_BRIEF_LIMIT)
+        clamped_limit = _clamp(
+            limit,
+            minimum=1,
+            maximum=MAX_RESEARCH_BRIEF_LIMIT,
+        )
 
         try:
-            papers = await asyncio.to_thread(
-                self.search_papers,
-                normalized_query,
-                limit=clamped_limit,
-                year_from=year_from,
+            return asyncio.run(
+                self._research_brief_async(
+                    query=query,
+                    limit=clamped_limit,
+                    year_from=year_from,
+                )
             )
         except Exception as exc:
-            log.warning("semantic_scholar research_brief search failed", exc_info=True)
-            return {"status": "error", "query": normalized_query, "error": str(exc)}
+            log.warning("semantic_scholar research_brief failed", exc_info=True)
+            return {"status": "error", "error": str(exc)}
 
-        markdown = render_brief(normalized_query, year_from, papers)
-        brief_doc = build_brief_document(
-            normalized_query, year_from, clamped_limit, papers, markdown
-        )
-
-        paper_docs: list[dict[str, Any]] = []
-        for paper in papers:
-            try:
-                paper_docs.append(
-                    build_paper_document(
-                        paper,
-                        query=normalized_query,
-                        parent_document_id=brief_doc["document_id"],
-                    )
-                )
-            except ValueError:
-                # Mirrors the pre-bundle behaviour: a paper missing paperId
-                # cannot be projected (no stable primary key), so we drop
-                # it from the bundle and let the brief itself carry the
-                # un-projectable paper's metadata via ``paper_ids``.
-                continue
-
-        return {
-            "status": "ok",
-            "query": normalized_query,
-            "year_from": year_from,
-            "limit": clamped_limit,
-            "results_count": len(papers),
-            "markdown": markdown,
-            "brief_doc": brief_doc,
-            "paper_docs": paper_docs,
-        }
-
-    async def archive_paper(
+    async def _research_brief_async(
         self,
-        paper_id: str,
         *,
-        source_url: str | None = None,
+        query: str,
+        limit: int,
+        year_from: int | None,
     ) -> dict[str, Any]:
-        """Fetch metadata + PDF for a paper, project to DB-row dicts. No DB.
-
-        Returns a bundle the caller persists. Never raises.
-
-        Bundle shape on success::
-
-            {
-                "status": "ok",
-                "paper_id": str,
-                "pdf_sha256": str,
-                "source_url": str,
-                "size_bytes": int,
-                "mime_type": str,
-                "parser_used": str,
-                "paper_doc": dict,          # company_context_documents row
-                "fulltext_doc": dict,       # company_context_documents row
-                "archive_row": dict,        # paper_archives row
-            }
-
-        Skipped / error shapes::
-
-            {"status": "skipped", "paper_id", "reason": "no_pdf_url"}
-            {"status": "skipped", "paper_id", "source_url",
-             "reason": "too_large", "max_bytes", "received_bytes"}
-            {"status": "error",   "paper_id", "stage": "metadata"|"fetch"|"parse",
-             "reason": "<code>", "source_url"?: str, "error": str, ...}
-        """
-        normalized_id = (paper_id or "").strip()
-        if not normalized_id:
-            return {
-                "status": "error",
-                "paper_id": paper_id,
-                "stage": "metadata",
-                "reason": "empty_paper_id",
-                "error": "paper_id cannot be empty",
-            }
-
-        try:
-            paper = await asyncio.to_thread(self.get_paper, normalized_id)
-        except (RuntimeError, ValueError) as exc:
-            return {
-                "status": "error",
-                "paper_id": normalized_id,
-                "stage": "metadata",
-                "reason": "fetch_failed",
-                "error": str(exc),
-            }
-
-        url = source_url or derive_pdf_url(paper)
-        if not url:
-            return {
-                "status": "skipped",
-                "paper_id": normalized_id,
-                "reason": "no_pdf_url",
-            }
-
-        try:
-            data, mime = await asyncio.to_thread(
-                download_pdf,
-                url,
-                timeout=PDF_DOWNLOAD_TIMEOUT_S,
-                max_bytes=MAX_PDF_BYTES,
-                user_agent=PDF_USER_AGENT,
-            )
-        except PdfTooLargeError as exc:
-            return {
-                "status": "skipped",
-                "paper_id": normalized_id,
-                "source_url": url,
-                "reason": "too_large",
-                "max_bytes": exc.max_bytes,
-                "received_bytes": exc.received_bytes,
-            }
-        except (PdfHttpError, PdfNetworkError, PdfNotPdfError, PdfFetchError) as exc:
-            return {
-                "status": "error",
-                "paper_id": normalized_id,
-                "source_url": url,
-                "stage": "fetch",
-                "reason": exc.reason,
-                "error": str(exc),
-            }
-
-        pdf_sha256 = compute_pdf_sha256(data)
-
-        try:
-            parsed_text, parser_used = await asyncio.to_thread(
-                parse_pdf,
-                data,
-                min_size=ARCHIVE_PARSER_MIN_SIZE,
-            )
-        except (PdfInsufficientTextError, PdfParseError) as exc:
-            return {
-                "status": "error",
-                "paper_id": normalized_id,
-                "source_url": url,
-                "stage": "parse",
-                "reason": exc.reason,
-                "error": str(exc),
-            }
-
-        paper_doc = build_paper_document(paper)
-        fulltext_doc = build_fulltext_document(
-            paper,
-            parsed_text=parsed_text,
-            parser_used=parser_used,
-            truncated=False,
-            pdf_sha256=pdf_sha256,
-            source_url=url,
-        )
-        archive_row = build_paper_archive_row(
-            paper,
-            data=data,
-            mime=mime,
-            pdf_sha256=pdf_sha256,
-            parsed_text=parsed_text,
-            parser_used=parser_used,
-            source_url=url,
-            truncated=False,
+        # Run the (retry-prone) S2 call and the pure rendering before
+        # opening a DB connection. The brief has no data dependency on
+        # the DB before S2 returns, so holding a real Postgres connection
+        # idle through httpx retries (up to ~15s) is pure cost.
+        # Postgres ``max_connections`` is finite; we open a fresh
+        # connection per call, so concurrent invocations would otherwise
+        # pin one connection each for the duration of the S2 round trip.
+        #
+        # Async-aware retry: ``search_papers_async`` → ``_request_async``
+        # awaits ``asyncio.sleep`` on backoff instead of blocking the
+        # event loop with ``time.sleep``. See review.md A5.
+        papers = await self.search_papers_async(
+            query=query,
+            limit=limit,
+            year_from=year_from,
         )
 
-        return {
-            "status": "ok",
-            "paper_id": normalized_id,
-            "pdf_sha256": pdf_sha256,
-            "source_url": url,
-            "size_bytes": len(data),
-            "mime_type": mime,
-            "parser_used": parser_used,
-            "paper_doc": paper_doc,
-            "fulltext_doc": fulltext_doc,
-            "archive_row": archive_row,
-        }
+        effective_limit = limit if limit is not None else len(papers)
+        markdown = render_brief(query, year_from, papers)
+        brief_doc = build_brief_document(query, year_from, effective_limit, papers, markdown)
+
+        conn = await self._connect()
+        try:
+            _observe_doc_size(brief_doc)
+            brief_action = await _upsert_document(conn, brief_doc)
+            _record_doc_change(brief_doc, brief_action)
+
+            papers_inserted = 0
+            papers_updated = 0
+            papers_noop = 0
+            for paper in papers:
+                try:
+                    paper_doc = build_paper_document(paper, query=query)
+                except ValueError:
+                    continue
+                _observe_doc_size(paper_doc)
+                action = await _upsert_document(
+                    conn, paper_doc, parent_document_id=brief_doc["document_id"]
+                )
+                _record_doc_change(paper_doc, action)
+                if action == "inserted":
+                    papers_inserted += 1
+                elif action == "updated":
+                    papers_updated += 1
+                else:
+                    papers_noop += 1
+
+            return {
+                "status": "completed",
+                "brief_document_id": brief_doc["document_id"],
+                "brief_action": brief_action,
+                "results_count": len(papers),
+                "papers_inserted": papers_inserted,
+                "papers_updated": papers_updated,
+                "papers_noop": papers_noop,
+                "markdown": markdown,
+            }
+        finally:
+            await conn.close()
+
+    def close(self) -> None:
+        """Close the HTTP client."""
+        if self._client is not None:
+            self._client.close()
+            self._client = None
+
+    def __enter__(self) -> SemanticScholarClient:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
 
 
 def _client() -> SemanticScholarClient:
-    """Factory for the tool loader."""
+    """Factory for tool loader."""
     return SemanticScholarClient()

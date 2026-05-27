@@ -7,9 +7,7 @@
 # ``services/sandbox/SYSTEM_PROMPT.md``, future ``services/<name>/...``
 # bolt-ons) ships automatically. Per-directory ``COPY`` lines are an
 # anti-pattern: every time upstream adds a new overlay-extensible
-# surface our image silently drops it, which is exactly how
-# ``services/api/db/migrations`` went missing and broke
-# ``paper_archives`` in the cluster (see docs/overlay-db-migrations.md).
+# surface our image silently drops it.
 #
 # Build context exclusions live in ``.dockerignore`` — that file is the
 # single point of truth for "what does the overlay image NOT ship"
@@ -26,10 +24,12 @@
 # ``tools/<name>/pyproject.toml`` and installed by the API pod's
 # ``entrypoint.sh`` at startup (which scans ``TOOL_DIRS`` for
 # ``[project].dependencies`` blocks). The repo-root ``pyproject.toml``
-# is a uv workspace whose members are those same per-tool files, so
-# the dev/test ``.venv`` resolves the same dep set with no duplicated
-# manifest. CI publishes this image to GHCR on pushes to main (see
-# ``.github/workflows/overlay.yml``).
+# is a uv workspace whose members are those same per-tool files plus
+# ``packages/bfts_sdk`` (the BFTS controller library), so the dev/test
+# ``.venv`` resolves the same dep set with no duplicated manifest.
+# CI publishes this image to GHCR on pushes to main; the BFTS sandbox
+# runtime image is built separately from ``Dockerfile.bfts-executor``
+# by the same workflow (see ``.github/workflows/overlay.yml``).
 FROM alpine:3.20
 WORKDIR /overlay
 COPY . /overlay

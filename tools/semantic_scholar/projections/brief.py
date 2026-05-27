@@ -1,35 +1,32 @@
-"""Render a research-brief Markdown body and project it into a document row.
+"""Project a Semantic Scholar paper list into a research-brief row.
 
-Two public entry points work together:
+Two pure projection helpers:
 
-* :func:`render_brief` produces the rendered Markdown body from a list
-  of :class:`Paper` results. It does no DB work and emits no metadata.
-* :func:`build_brief_document` wraps that body in a ``company_context_documents``
-  row shaped for the canonical ``_upsert_document`` SQL, with a stable
-  ``document_id`` derived from :func:`brief_id_for`.
+* :func:`render_brief` — Markdown view over a paper list. Re-used by
+  both the ``research_brief`` tool method (returned to the agent in the
+  response) and ``save_papers`` (persisted as ``body``).
+* :func:`build_brief_document` — assemble the ``company_context_documents``
+  row dict for the brief.
 
-The two are split because the workflow handler logs and persists each
-brief independently of rendering — keeping the renderer pure makes it
-trivially testable without standing up the document shape.
-
-Pure functions: no DB, no ``await``.
+Persistence lives in the call site
+(``tools/semantic_scholar/client.research_brief`` and
+``workflows/save_papers.handler``); both inline the ``_upsert_document``
+SQL + ``vm_metrics`` shim that mirrors upstream's
+``company_context_documents`` convention.
 """
 
 from __future__ import annotations
 
 import hashlib
 from datetime import UTC, datetime
-from typing import Any, Final
-
-from semanticscholar.Author import Author
-from semanticscholar.Paper import Paper
+from typing import Any
 
 from tools.semantic_scholar.utils import canonical_json, content_hash
 
-_BRIEF_ABSTRACT_TRUNCATE: Final[int] = 500
-_BRIEF_TITLE_QUERY_TRUNCATE: Final[int] = 80
-_BRIEF_ID_HEX_LEN: Final[int] = 16
-_BRIEF_MAX_AUTHORS_INLINE: Final[int] = 3
+_BRIEF_ABSTRACT_TRUNCATE = 500
+_BRIEF_TITLE_QUERY_TRUNCATE = 80
+_BRIEF_ID_HEX_LEN = 16
+_BRIEF_MAX_AUTHORS_INLINE = 3
 
 
 def brief_id_for(query: str, year_from: int | None) -> str:
@@ -42,8 +39,14 @@ def _normalize_oneline(text: str) -> str:
     return " ".join(text.split())
 
 
-def _format_authors(authors: list[Author]) -> str:
-    names = [a.name for a in authors if a.name]
+def _format_authors(authors: list[Any]) -> str:
+    names: list[str] = []
+    for entry in authors or []:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if name:
+            names.append(str(name))
     if not names:
         return "Unknown"
     if len(names) <= _BRIEF_MAX_AUTHORS_INLINE:
@@ -52,23 +55,27 @@ def _format_authors(authors: list[Author]) -> str:
     return f"{head} +{len(names) - _BRIEF_MAX_AUTHORS_INLINE} more"
 
 
-def _paper_url(paper: Paper) -> str:
-    if paper.url:
-        return str(paper.url)
-    if paper.paperId:
-        return f"https://www.semanticscholar.org/paper/{paper.paperId}"
+def _paper_url(paper: dict[str, Any]) -> str:
+    url = paper.get("url")
+    if url:
+        return str(url)
+    paper_id = paper.get("paperId")
+    if paper_id:
+        return f"https://www.semanticscholar.org/paper/{paper_id}"
     return ""
 
 
-def _format_abstract(paper: Paper) -> str:
-    if not paper.abstract:
+def _format_abstract(paper: dict[str, Any]) -> str:
+    abstract = paper.get("abstract")
+    if not abstract:
         return "No abstract available."
-    if len(paper.abstract) > _BRIEF_ABSTRACT_TRUNCATE:
-        return paper.abstract[:_BRIEF_ABSTRACT_TRUNCATE] + "..."
-    return paper.abstract
+    text = str(abstract)
+    if len(text) > _BRIEF_ABSTRACT_TRUNCATE:
+        return text[:_BRIEF_ABSTRACT_TRUNCATE] + "..."
+    return text
 
 
-def render_brief(query: str, year_from: int | None, papers: list[Paper]) -> str:
+def render_brief(query: str, year_from: int | None, papers: list[dict[str, Any]]) -> str:
     """Render the brief Markdown. Pure; no I/O."""
     display_query = _normalize_oneline(query)
     year_label = str(year_from) if year_from is not None else "any"
@@ -88,14 +95,17 @@ def render_brief(query: str, year_from: int | None, papers: list[Paper]) -> str:
 
     lines: list[str] = [*header, "## Papers", ""]
     for index, paper in enumerate(papers, start=1):
-        display_title = _normalize_oneline(paper.title or "Untitled")
-        year_text = str(paper.year) if paper.year is not None else "Unknown"
-        citations = int(paper.citationCount or 0)
+        display_title = _normalize_oneline(str(paper.get("title") or "Untitled"))
+        year = paper.get("year")
+        year_text = str(year) if isinstance(year, int) else "Unknown"
+        citations = int(paper.get("citationCount") or 0)
+        authors_value = paper.get("authors")
+        authors_list = authors_value if isinstance(authors_value, list) else []
         lines.extend(
             [
                 f"### {index}. {display_title}",
                 "",
-                f"- Authors: {_format_authors(paper.authors)}",
+                f"- Authors: {_format_authors(authors_list)}",
                 f"- Year: {year_text}",
                 f"- Citations: {citations}",
                 f"- URL: {_paper_url(paper)}",
@@ -111,14 +121,14 @@ def build_brief_document(
     query: str,
     year_from: int | None,
     limit: int,
-    papers: list[Paper],
+    papers: list[dict[str, Any]],
     markdown: str,
 ) -> dict[str, Any]:
     """Project the rendered brief into a ``company_context_documents`` row."""
     suffix = brief_id_for(query, year_from)
     truncated_query = query[:_BRIEF_TITLE_QUERY_TRUNCATE]
     title = f"Research Brief: {truncated_query}"
-    paper_ids = [str(p.paperId) for p in papers if p.paperId]
+    paper_ids = [str(p["paperId"]) for p in papers if p.get("paperId")]
     metadata: dict[str, Any] = {
         "query": query,
         "year_from": year_from,
