@@ -94,11 +94,29 @@ class Input:
     delivery: dict[str, Any] | None = None
 
 
-# Mirrors Sakana's FinalizeIdea schema verbatim
-# (.scientist/ai_scientist/perform_ideation_temp_free.py:26-39). Field
-# descriptions are condensed but preserve the constraints the prompt
-# relies on (lowercase ``Name`` with underscores, conference-format
-# abstract, feasible experiments).
+# Anthropic tool schemas require property keys matching ``^[a-zA-Z0-9_.-]{1,64}$``
+# (no spaces). Sakana's display labels (``Short Hypothesis``, etc.) are mapped
+# back in ``_normalize_idea_from_tool`` for ``_bfts_expand`` markdown headers.
+_IDEA_TOOL_PROPERTY_KEYS: tuple[str, ...] = (
+    "name",
+    "title",
+    "short_hypothesis",
+    "related_work",
+    "abstract",
+    "experiments",
+    "risk_factors_and_limitations",
+)
+
+_TOOL_KEY_TO_IDEA_LABEL: dict[str, str] = {
+    "name": "Name",
+    "title": "Title",
+    "short_hypothesis": "Short Hypothesis",
+    "related_work": "Related Work",
+    "abstract": "Abstract",
+    "experiments": "Experiments",
+    "risk_factors_and_limitations": "Risk Factors and Limitations",
+}
+
 _IDEA_FUNCTION_SPEC: dict[str, Any] = {
     "type": "function",
     "function": {
@@ -107,50 +125,69 @@ _IDEA_FUNCTION_SPEC: dict[str, Any] = {
         "parameters": {
             "type": "object",
             "properties": {
-                "Name": {
+                "name": {
                     "type": "string",
                     "description": (
                         "Short descriptor. Lowercase, no spaces, underscores allowed."
                     ),
                 },
-                "Title": {
+                "title": {
                     "type": "string",
                     "description": "Catchy informative title for the proposal.",
                 },
-                "Short Hypothesis": {
+                "short_hypothesis": {
                     "type": "string",
                     "description": (
                         "Concise main hypothesis or research question; justify "
                         "why this is the best setting to investigate it."
                     ),
                 },
-                "Related Work": {
+                "related_work": {
                     "type": "string",
                     "description": (
                         "Most relevant related work and how the proposal "
                         "distinguishes from it (not a trivial extension)."
                     ),
                 },
-                "Abstract": {
+                "abstract": {
                     "type": "string",
                     "description": "Conference-format abstract (~250 words).",
                 },
-                "Experiments": {
-                    "type": "string",
+                "experiments": {
+                    "type": "array",
+                    "items": {"type": "string"},
                     "description": (
                         "Experiments to validate the proposal — specific, "
                         "feasible at academic scale, with evaluation metrics."
                     ),
                 },
-                "Risk Factors and Limitations": {
+                "risk_factors_and_limitations": {
                     "type": "string",
                     "description": "Potential risks and limitations of the proposal.",
                 },
             },
-            "required": list(_REQUIRED_IDEA_FIELDS),
+            "required": list(_IDEA_TOOL_PROPERTY_KEYS),
         },
     },
 }
+
+
+def _normalize_idea_from_tool(raw: dict[str, Any]) -> dict[str, Any]:
+    """Map provider-safe tool keys to canonical idea labels for BFTS prompts."""
+    if not raw:
+        return {}
+    out: dict[str, Any] = {}
+    for tool_key, label in _TOOL_KEY_TO_IDEA_LABEL.items():
+        if tool_key in raw and raw[tool_key] not in (None, ""):
+            out[label] = raw[tool_key]
+        elif label in raw and raw[label] not in (None, ""):
+            out[label] = raw[label]
+    experiments = out.get("Experiments")
+    if isinstance(experiments, str) and experiments.strip():
+        out["Experiments"] = [experiments.strip()]
+    elif isinstance(experiments, list):
+        out["Experiments"] = [str(x).strip() for x in experiments if str(x).strip()]
+    return out
 
 
 _SYSTEM_PROMPT = (
@@ -252,7 +289,7 @@ async def _synthesize(
     topic: str,
     papers: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    return await call_with_function(
+    raw = await call_with_function(
         LLMCall(
             model=draft_model,
             temperature=_IDEATION_TEMP,
@@ -261,6 +298,7 @@ async def _synthesize(
         ),
         function_spec=_IDEA_FUNCTION_SPEC,
     )
+    return _normalize_idea_from_tool(raw)
 
 
 async def _critique(
@@ -271,7 +309,7 @@ async def _critique(
     idea: dict[str, Any],
     round_index: int,
 ) -> dict[str, Any]:
-    return await call_with_function(
+    raw = await call_with_function(
         LLMCall(
             model=draft_model,
             temperature=_CRITIC_TEMP,
@@ -282,6 +320,7 @@ async def _critique(
         ),
         function_spec=_IDEA_FUNCTION_SPEC,
     )
+    return _normalize_idea_from_tool(raw)
 
 
 def _child_workflow_output(result: dict[str, Any] | None) -> dict[str, Any]:
