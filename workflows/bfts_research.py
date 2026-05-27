@@ -1,21 +1,25 @@
-"""Workflow: research brief + ideation → ``bfts_root`` with BFTS-only Slack stream.
+"""Workflow: research brief + ideation → ``bfts_root`` on one Slack agent-session.
 
 Slack-driven science entrypoint:
 
 1. **Agent turn** (``slack_thread_turn``): no chat text — the workflow owns
    thread delivery (avoids duplicate kickoff lines in the agent stream).
-2. **Plain thread posts**: compact ``research_brief`` lit review (with LLM
-   query refinement when Semantic Scholar returns zero hits), then the
-   research idea after ``ideation`` completes.
-3. **BFTS stream** (one agent-session message): live tree-search snapshots
-   every ~90s while ``bfts_root`` waits on child trees, then completion
-   (via ``slack_stream_session_id`` on ``bfts_root``).
+2. **Research agent-session** (one Slack message, opened by ``bfts_research``):
+   step-by-step plan view rendered via ``chat.startStream`` / ``task_update``
+   — ``literature_search``, optional ``query_refinement``, ``ideation``,
+   then handed off to ``bfts_root`` which keeps updating ``bfts_trees`` /
+   ``tree_{i}`` on the same session.
+3. **Plain thread posts** (deliverables only): the rendered research brief
+   markdown and the structured idea block. The agent-session shows
+   *status*; the thread posts carry the *content*.
 
-Failures post to the Slack thread (and close the BFTS stream when open).
-``bfts_root`` runs asynchronously — its errors are also reported from
-``bfts_root`` via ``notify_run_failure`` (not by re-waiting here).
+Failures post to the Slack thread and transition the open session to an
+``error`` step + ``chat.stopStream``. ``bfts_root`` runs asynchronously —
+its errors are also reported from ``bfts_root`` via ``notify_run_failure``
+(not by re-waiting here).
 
-Falls back to no Slack UI when ``delivery`` / ``SLACKBOT_URL`` are unset.
+Falls back to plain thread posts (no agent-session) when ``delivery`` /
+``SLACKBOT_URL`` are unset.
 """
 from __future__ import annotations
 
@@ -47,8 +51,11 @@ from tools.bfts_runner.slack.post import (
     workflow_run_failed,
 )
 from tools.bfts_runner.slack.stream import (
+    SlackStreamTarget,
+    close_session,
     notify_run_failure,
     open_session,
+    post_step,
     streaming_available,
 )
 from workflows.ideation import _child_workflow_output
@@ -57,6 +64,10 @@ WORKFLOW_NAME = "bfts_research"
 SCHEDULE: dict[str, Any] = {}
 
 _DEFAULT_BRIEF_LIMIT = 4
+
+_STEP_LITERATURE = "literature_search"
+_STEP_QUERY_REFINEMENT = "query_refinement"
+_STEP_IDEATION = "ideation"
 
 
 class _ResearchPipelineStop(RuntimeError):
@@ -102,8 +113,14 @@ async def _resolve_literature_brief(
     brief_limit: int,
     draft_model: str | None,
     llm_api_key_secret: str | None,
+    stream: SlackStreamTarget | None = None,
 ) -> tuple[str, dict[str, Any], list[str]]:
-    """Search S2 for a literature brief, refining the query when needed."""
+    """Search S2 for a literature brief, refining the query when needed.
+
+    Transitions the ``query_refinement`` Slack step (when the planner runs)
+    inline so the user sees live status during the (potentially 30s+) refine
+    loop without extra thread posts.
+    """
     llm = resolve_llm_settings(
         draft_model=draft_model,
         llm_api_key_secret=llm_api_key_secret,
@@ -129,6 +146,15 @@ async def _resolve_literature_brief(
         return topic, brief_result, prior_queries
 
     prior_gaps.append("Semantic Scholar returned zero papers for the original query.")
+    await post_step(
+        ctx,
+        stream,
+        step_id=_STEP_QUERY_REFINEMENT,
+        title="Refine literature query",
+        status="in_progress",
+        details="Zero papers for the original wording — trying shorter keyword queries…",
+        step_name="stream_step_refine_query_in_progress",
+    )
 
     for plan_round in range(1, DEFAULT_MAX_PLANNER_ROUNDS + 1):
         planner = await ctx.step(
@@ -178,6 +204,16 @@ async def _resolve_literature_brief(
                     plan_round=plan_round,
                     queries_tried=prior_queries,
                 )
+                await post_step(
+                    ctx,
+                    stream,
+                    step_id=_STEP_QUERY_REFINEMENT,
+                    title="Refine literature query",
+                    status="complete",
+                    details=f"Found {_brief_results_count(brief_result)} papers "
+                    f"with `{query}`.",
+                    step_name="stream_step_refine_query_complete",
+                )
                 return query, brief_result, prior_queries
 
         prior_gaps.append(
@@ -185,6 +221,15 @@ async def _resolve_literature_brief(
             "all returned zero papers."
         )
 
+    await post_step(
+        ctx,
+        stream,
+        step_id=_STEP_QUERY_REFINEMENT,
+        title="Refine literature query",
+        status="error",
+        details=f"Tried {len(prior_queries)} queries; all returned zero papers.",
+        step_name="stream_step_refine_query_error",
+    )
     return topic, brief_result, prior_queries
 
 
@@ -216,22 +261,11 @@ def _brief_markdown_for_slack(brief_result: dict[str, Any]) -> str:
     return ""
 
 
-async def _run_research_brief(
-    ctx: WorkflowContext,
-    *,
-    topic: str,
-    limit: int,
-    draft_model: str | None,
-    llm_api_key_secret: str | None,
-) -> tuple[str, dict[str, Any], list[str]]:
-    """Persisted research brief via checkpointed ``ctx.tools`` (async proxy)."""
-    return await _resolve_literature_brief(
-        ctx,
-        topic=topic,
-        brief_limit=limit,
-        draft_model=draft_model,
-        llm_api_key_secret=llm_api_key_secret,
-    )
+def _session_title(topic: str) -> str:
+    label = topic.strip() or "Research pipeline"
+    if len(label) > 80:
+        return label[:77].rstrip() + "…"
+    return label
 
 
 async def _run_research_pipeline(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
@@ -250,25 +284,56 @@ async def _run_research_pipeline(inp: Input, ctx: WorkflowContext) -> dict[str, 
         run_input=merged_input,
         explicit_thread_key=thread_key or inp.thread_key,
     )
-    use_bfts_stream = streaming_available() and bool(delivery and thread_key)
+    use_research_stream = streaming_available() and bool(delivery and thread_key)
     metadata = _slack_metadata(ctx)
-    bfts_session = None
+    research_session: SlackStreamTarget | None = None
     brief_limit = inp.brief_paper_limit or inp.seed_paper_limit or _DEFAULT_BRIEF_LIMIT
 
     try:
-        literature_query, brief_result, queries_tried = await _run_research_brief(
+        if use_research_stream and delivery:
+            research_session = await open_session(
+                ctx,
+                delivery=delivery,
+                thread_key=thread_key,
+                metadata=metadata,
+                title=_session_title(topic),
+                header=None,
+                step_name="open_slack_research_stream",
+            )
+
+        await post_step(
+            ctx,
+            research_session,
+            step_id=_STEP_LITERATURE,
+            title="Search the literature",
+            status="in_progress",
+            details=f"Querying Semantic Scholar for: {topic}",
+            step_name="stream_step_lit_search_in_progress",
+        )
+
+        literature_query, brief_result, queries_tried = await _resolve_literature_brief(
             ctx,
             topic=topic,
-            limit=brief_limit,
+            brief_limit=brief_limit,
             draft_model=inp.draft_model,
             llm_api_key_secret=inp.llm_api_key_secret,
+            stream=research_session,
         )
 
         brief_markdown = _brief_markdown_for_slack(brief_result)
-        if (
-            str(brief_result.get("status") or "") == "completed"
-            and _brief_results_count(brief_result) == 0
-        ):
+        results_count = _brief_results_count(brief_result)
+        is_completed = str(brief_result.get("status") or "") == "completed"
+
+        if is_completed and results_count == 0:
+            await post_step(
+                ctx,
+                research_session,
+                step_id=_STEP_LITERATURE,
+                title="Search the literature",
+                status="error",
+                details=f"No papers found across {len(queries_tried)} queries.",
+                step_name="stream_step_lit_search_empty",
+            )
             if delivery:
                 await post_thread_message(
                     ctx,
@@ -280,10 +345,52 @@ async def _run_research_pipeline(inp: Input, ctx: WorkflowContext) -> dict[str, 
                     step_name="post_slack_empty_literature",
                     log_event="bfts_research_slack_empty_literature_failed",
                 )
+            await close_session(
+                ctx, research_session,
+                step_name="close_research_stream_empty_literature",
+            )
             raise _ResearchPipelineStop(
                 "Semantic Scholar returned no papers after query refinement; "
                 "ask the user to broaden their search and retry."
             )
+
+        if not is_completed:
+            err = workflow_run_error_text(brief_result)
+            await post_step(
+                ctx,
+                research_session,
+                step_id=_STEP_LITERATURE,
+                title="Search the literature",
+                status="error",
+                details=err,
+                step_name="stream_step_lit_search_error",
+            )
+            if delivery:
+                await notify_thread_failure(
+                    ctx,
+                    delivery=delivery,
+                    headline="Research brief failed",
+                    orchestrator_run_id=ctx.run_id,
+                    error_text=err,
+                    step_name="post_slack_research_brief_failed",
+                )
+            raise RuntimeError(f"research_brief did not complete: {err}")
+
+        lit_complete_details = (
+            f"Found {results_count} papers with `{literature_query}`."
+            if literature_query and literature_query != topic
+            else f"Found {results_count} papers."
+        )
+        await post_step(
+            ctx,
+            research_session,
+            step_id=_STEP_LITERATURE,
+            title="Search the literature",
+            status="complete",
+            details=lit_complete_details,
+            step_name="stream_step_lit_search_complete",
+        )
+
         if delivery and brief_markdown:
             await post_thread_message(
                 ctx,
@@ -296,17 +403,16 @@ async def _run_research_pipeline(inp: Input, ctx: WorkflowContext) -> dict[str, 
                 step_name="post_slack_research_brief",
                 log_event="bfts_research_slack_brief_failed",
             )
-        elif delivery and str(brief_result.get("status") or "") != "completed":
-            err = workflow_run_error_text(brief_result)
-            await notify_thread_failure(
-                ctx,
-                delivery=delivery,
-                headline="Research brief failed",
-                orchestrator_run_id=ctx.run_id,
-                error_text=err,
-                step_name="post_slack_research_brief_failed",
-            )
-            raise RuntimeError(f"research_brief did not complete: {err}")
+
+        await post_step(
+            ctx,
+            research_session,
+            step_id=_STEP_IDEATION,
+            title="Draft a research idea",
+            status="in_progress",
+            details="Generating a structured hypothesis from the literature…",
+            step_name="stream_step_ideation_in_progress",
+        )
 
         ideation_input: dict[str, Any] = {"topic": literature_query}
         if inp.thread_key:
@@ -343,6 +449,15 @@ async def _run_research_pipeline(inp: Input, ctx: WorkflowContext) -> dict[str, 
         )
         if workflow_run_failed(ideation_result):
             err = workflow_run_error_text(ideation_result)
+            await post_step(
+                ctx,
+                research_session,
+                step_id=_STEP_IDEATION,
+                title="Draft a research idea",
+                status="error",
+                details=err,
+                step_name="stream_step_ideation_error",
+            )
             await notify_thread_failure(
                 ctx,
                 delivery=delivery,
@@ -359,6 +474,15 @@ async def _run_research_pipeline(inp: Input, ctx: WorkflowContext) -> dict[str, 
         idea = ideation_output.get("idea")
         if not isinstance(idea, dict) or not idea.get("Title"):
             err = workflow_run_error_text(ideation_result)
+            await post_step(
+                ctx,
+                research_session,
+                step_id=_STEP_IDEATION,
+                title="Draft a research idea",
+                status="error",
+                details="Child returned no valid idea.",
+                step_name="stream_step_ideation_invalid",
+            )
             await notify_thread_failure(
                 ctx,
                 delivery=delivery,
@@ -370,6 +494,17 @@ async def _run_research_pipeline(inp: Input, ctx: WorkflowContext) -> dict[str, 
                 child_workflow="ideation",
             )
             raise RuntimeError(f"ideation child did not return a valid idea: {err}")
+
+        idea_title = str(idea.get("Title") or idea.get("Name") or "")
+        await post_step(
+            ctx,
+            research_session,
+            step_id=_STEP_IDEATION,
+            title="Draft a research idea",
+            status="complete",
+            details=idea_title or "Idea ready.",
+            step_name="stream_step_ideation_complete",
+        )
 
         if delivery:
             await post_thread_message(
@@ -391,20 +526,9 @@ async def _run_research_pipeline(inp: Input, ctx: WorkflowContext) -> dict[str, 
         )
 
         slack_stream_session_id: str | None = None
-        if use_bfts_stream and delivery:
-            idea_title = str(idea.get("Title") or idea.get("Name") or "")
-            bfts_session = await open_session(
-                ctx,
-                delivery=delivery,
-                thread_key=thread_key,
-                metadata=metadata,
-                title=idea_title or "Tree search",
-                header=None,
-                step_name="open_slack_bfts_stream",
-            )
-            if bfts_session:
-                slack_stream_session_id = bfts_session.session_id
-                bfts_run_input["slack_stream_session_id"] = slack_stream_session_id
+        if research_session:
+            slack_stream_session_id = research_session.session_id
+            bfts_run_input["slack_stream_session_id"] = slack_stream_session_id
 
         bfts_child = await ctx.start_workflow(
             "start_bfts_root",
@@ -448,7 +572,7 @@ async def _run_research_pipeline(inp: Input, ctx: WorkflowContext) -> dict[str, 
         await notify_run_failure(
             ctx,
             delivery=delivery,
-            stream=bfts_session,
+            stream=research_session,
             orchestrator_run_id=ctx.run_id,
             headline="bfts_research failed",
             error_text=str(exc),

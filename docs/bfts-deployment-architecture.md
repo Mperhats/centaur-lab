@@ -546,15 +546,21 @@ kubectl exec -n centaur-system deploy/centaur-centaur-api -- \
 
 ## Slack: `bfts_research` thread layout
 
-Three surfaces in one Slack thread (do not mix them):
+Two surfaces in one Slack thread (do not mix them):
 
 | # | Surface | Who writes | API | Content |
 |---|---------|----------|-----|---------|
 | 1 | **Agent turn** | Sandbox agent (`slack_thread_turn`) | Slackbot agent-session on the **user message** | Stream-of-consciousness + tools; **one** short kickoff line with `wfr_…` |
-| 2 | **Plain posts** | `bfts_research` workflow | `slack.send_message` (`post_thread_message`) | Full **research brief** markdown, then **research idea** after `ideation` |
-| 3 | **BFTS stream** | `bfts_root` via `slack_stream_session_id` | Slackbot agent-session (second message) | Tree kickoff + live `task_update` progress until completion |
+| 2 | **Research agent-session** | `bfts_research`, then `bfts_root` on the **same** session id | Slackbot agent-session (second message); `chat.startStream` + `task_update` chunks | Live step list: `literature_search` → optional `query_refinement` → `ideation` → `bfts_trees` / `tree_{i}` until completion |
+| 3 | **Plain posts** (deliverables) | `bfts_research` workflow | `slack.send_message` (`post_thread_message`) | Full **research brief** markdown, then **research idea** after `ideation` |
 
-Implementation: `workflows/bfts_research.py` + `tools/bfts_runner/slack/stream.py`. The brief is **not** embedded in an agent-session stream anymore.
+Implementation: `workflows/bfts_research.py` opens the session and drives
+`post_step` transitions, passing `slack_stream_session_id` into
+`bfts_run_input` so `bfts_root` continues the same session for tree
+progress and final summary (closes the stream on completion or failure).
+The brief is **not** embedded in the agent-session stream — long markdown
+does not fit `task_update.output` limits and renders better as a plain
+thread post.
 
 **Operator expectation:** the agent replies **once** with only the run id
 (e.g. ``Queued `wfr_…` — see this thread for the literature brief.``) and does
