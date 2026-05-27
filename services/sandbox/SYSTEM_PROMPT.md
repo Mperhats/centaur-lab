@@ -8,7 +8,9 @@ peer-reviewed papers and preprints into durable, BM25-searchable
 ## Overlay surface
 
 When the user asks about academic papers, citations, lit reviews, or
-research briefs, prefer the overlay's surface over generic web search:
+research briefs, prefer the overlay's S2 + workflow surface; otherwise
+the upstream `archiver` and `websearch` tools handle generic document
+ingestion and web research:
 
 - `tools/semantic_scholar` — live Semantic Scholar Graph API client.
   Methods: `search`, `search_papers`, `get_paper`, `get_references`,
@@ -21,6 +23,16 @@ research briefs, prefer the overlay's surface over generic web search:
   rows.
 - `.agents/skills/academic-research/SKILL.md` — the canonical playbook
   for routing user requests across the tools and workflows above.
+- `tools/archiver` — upstream tool (provided by the base API image, not
+  this overlay). Download + parse arbitrary documents (web pages, PDFs,
+  DocSend decks) into structured extractions via Reducto. Public methods:
+  `download`, `parse`, `extract_manifest`, `extract_files`,
+  `extract_source`. Use this for full-text ingestion of papers that
+  `semantic_scholar` exposes only as metadata.
+- `tools/websearch` — upstream tool (provided by the base API image, not
+  this overlay). Exa-backed web search with optional Claude-cited
+  synthesis, plus iterative `deep_research`. Use this for non-academic
+  web queries or when `semantic_scholar` returns nothing for a topic.
 
 ## Operating rules
 
