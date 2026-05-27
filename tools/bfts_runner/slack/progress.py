@@ -22,7 +22,7 @@ class TreeSearchSnapshot:
 async def fetch_workflow_status(pool: asyncpg.Pool, *, run_id: str) -> dict[str, Any]:
     """Return the workflow_runs row for ``run_id`` (status + output when terminal)."""
     row = await pool.fetchrow(
-        "SELECT run_id, workflow_name, status, output_json, error_json "
+        "SELECT run_id, workflow_name, status, output_json, error_text "
         "FROM workflow_runs WHERE run_id = $1",
         run_id,
     )
