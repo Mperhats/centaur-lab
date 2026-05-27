@@ -20,21 +20,25 @@ if TYPE_CHECKING:
 
 from packages.bfts_sdk.config import resolve_llm_settings, resolve_search_config
 from packages.bfts_sdk.schema import assert_bfts_schema_present
-from packages.bfts_sdk.slack_delivery import (
+from tools.bfts_runner.slack.format import (
     format_progress_message,
     format_search_config_line,
-    resolve_slack_delivery,
     slack_mention_prefix,
 )
-from packages.bfts_sdk.slack_stream import (
+from tools.bfts_runner.slack.post import (
+    enrich_slack_delivery_recipient,
+    notify_thread_failure,
+    post_thread_message,
+    resolve_slack_delivery,
+    workflow_run_error_text,
+    workflow_run_failed,
+)
+from tools.bfts_runner.slack.stream import (
     SlackStreamTarget,
     close_session,
     notify_run_failure,
-    notify_thread_failure,
     post_markdown,
     post_step,
-    workflow_run_error_text,
-    workflow_run_failed,
 )
 
 WORKFLOW_NAME = "bfts_root"
@@ -114,26 +118,6 @@ def _reject_default_idea(
         return True
     thread_key = inp.thread_key or run_input.get("thread_key")
     return bool(thread_key)
-
-
-async def _enrich_slack_delivery_recipient(
-    ctx: WorkflowContext,
-    delivery: dict[str, Any] | None,
-    *,
-    thread_key: str | None,
-) -> dict[str, Any] | None:
-    """Fill ``recipient_user_id`` from the Slack thread when omitted."""
-    if not delivery or delivery.get("recipient_user_id") or not thread_key:
-        return delivery
-    from api.agent import _get_latest_thread_user_id
-
-    user_id = await ctx.step(
-        "resolve_slack_recipient",
-        lambda: _get_latest_thread_user_id(thread_key),
-    )
-    if user_id:
-        return {**delivery, "recipient_user_id": str(user_id)}
-    return delivery
 
 
 def _resolve_idea(idea: dict[str, Any]) -> tuple[dict[str, Any], bool]:
@@ -289,7 +273,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         run_input=ctx.run_input,
         explicit_thread_key=inp.thread_key,
     )
-    slack_delivery = await _enrich_slack_delivery_recipient(
+    slack_delivery = await enrich_slack_delivery_recipient(
         ctx,
         slack_delivery,
         thread_key=inp.thread_key or ctx.run_input.get("thread_key"),
@@ -573,11 +557,10 @@ async def _post_slack_progress(
         return
     if not delivery:
         return
-    await _post_slack_message(
+    await post_thread_message(
         ctx,
-        channel=str(delivery["channel"]),
+        delivery=delivery,
         text=text,
-        thread_ts=delivery.get("thread_ts"),
         step_name=step_name,
         log_event="bfts_root_slack_progress_failed",
     )
@@ -670,11 +653,10 @@ async def _post_slack_kickoff(
         f"({num_drafts} tree{'s' if num_drafts != 1 else ''}). Idea: {label}\n"
         f"{config_line}"
     )
-    await _post_slack_message(
+    await post_thread_message(
         ctx,
-        channel=str(delivery["channel"]),
+        delivery=delivery,
         text=text,
-        thread_ts=delivery.get("thread_ts"),
         step_name="post_slack_kickoff",
         log_event="bfts_root_slack_kickoff_failed",
     )
@@ -708,63 +690,16 @@ async def _post_slack_summary(
         await close_session(ctx, stream, step_name="stream_bfts_done")
     elif delivery:
         thread_text = f"{slack_mention_prefix(delivery)}{text}"
-        await _post_slack_message(
+        await post_thread_message(
             ctx,
-            channel=str(delivery["channel"]),
+            delivery=delivery,
             text=thread_text,
-            thread_ts=delivery.get("thread_ts"),
             step_name="post_slack_completion_thread",
             log_event="bfts_root_slack_thread_post_failed",
         )
     if not SLACK_CHANNEL:
         return
-    await _post_slack_message(
-        ctx,
-        channel=SLACK_CHANNEL,
-        text=text,
-        thread_ts=None,
-        step_name="post_slack_bfts_runs",
-        log_event="bfts_root_slack_post_failed",
-    )
-
-
-async def _post_slack_message(
-    ctx: WorkflowContext,
-    *,
-    channel: str,
-    text: str,
-    thread_ts: str | None,
-    step_name: str,
-    log_event: str,
-) -> None:
-    """Post via the slack tool with a caller-chosen checkpoint name.
-
-    ``ctx.post_to_slack`` keys steps only by channel, so kickoff and
-    completion to the same thread would collide; we use explicit names.
-    """
-    from api.app import get_tool_manager
-
-    async def _post() -> dict[str, Any]:
-        tm = get_tool_manager()
-        args: dict[str, Any] = {
-            "channel": channel,
-            "text": text,
-            "no_attribution": True,
-        }
-        if thread_ts:
-            args["thread_ts"] = thread_ts
-        raw = await tm.call_tool("slack", "send_message", args)
-        import json as _json
-
-        try:
-            result = _json.loads(raw) if isinstance(raw, str) else raw
-        except (ValueError, TypeError):
-            result = {"raw": raw}
-        if isinstance(result, dict) and result.get("error"):
-            raise RuntimeError(str(result["error"]))
-        return result
-
     try:
-        await ctx.step(step_name, _post, step_kind="slack_post")
+        await ctx.post_to_slack(SLACK_CHANNEL, text)
     except Exception as exc:
-        ctx.log(log_event, channel=channel, error=repr(exc))
+        ctx.log("bfts_root_slack_post_failed", error=repr(exc))

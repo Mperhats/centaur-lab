@@ -93,7 +93,7 @@ dev = [
 # unit-test suite was parked in the gitignored ``tmp/test-old/``
 # mirror during the centaur_lab → S2 dispersal and will be reinstated
 # incrementally as projections and workflow handlers stabilize.
-testpaths = ["tests"]
+testpaths = ["tests", "tools/bfts_runner/tests"]
 # - Repo root on the path so ``from tools.bfts_executor.client import …``
 #   and ``from workflows.bfts_tree import …`` resolve as namespace
 #   packages — byte-identical to how the API pod sets up TOOL_DIRS /

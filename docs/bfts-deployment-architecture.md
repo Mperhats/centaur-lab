@@ -272,6 +272,17 @@ secrets = [
 ]
 ```
 
+### Slack modules (`tools/bfts_runner/slack/`)
+
+Shared by `workflows/bfts_research.py`, `workflows/bfts_root.py`, and
+`tools/bfts_runner/client.py` (no separate tool registration).
+
+| Module | Role |
+|--------|------|
+| [`post.py`](../../tools/bfts_runner/slack/post.py) | Delivery from `thread_key`, plain `send_message`, failure @-mentions |
+| [`format.py`](../../tools/bfts_runner/slack/format.py) | Brief/idea/progress markdown for thread posts |
+| [`stream.py`](../../tools/bfts_runner/slack/stream.py) | Agent-session BFTS kickoff + live `task_update` progress |
+
 ### Tool shape: HTTP-only tool with secrets
 
 Follows upstream [Creating Tools](https://centaur.run/extend/tools) — iron-proxy
@@ -543,7 +554,7 @@ Three surfaces in one Slack thread (do not mix them):
 | 2 | **Plain posts** | `bfts_research` workflow | `slack.send_message` (`post_thread_message`) | Full **research brief** markdown, then **research idea** after `ideation` |
 | 3 | **BFTS stream** | `bfts_root` via `slack_stream_session_id` | Slackbot agent-session (second message) | Tree kickoff + live `task_update` progress until completion |
 
-Implementation: `workflows/bfts_research.py` + `packages/bfts_sdk/slack_stream.py`. The brief is **not** embedded in an agent-session stream anymore.
+Implementation: `workflows/bfts_research.py` + `tools/bfts_runner/slack/stream.py`. The brief is **not** embedded in an agent-session stream anymore.
 
 **Operator expectation:** the agent replies **once** with only the run id
 (e.g. ``Queued `wfr_…` — see this thread for the literature brief.``) and does
@@ -564,7 +575,7 @@ Legacy `bfts_root` without `bfts_research` may still use plain `send_message` fo
 | Stuck `waiting` (worker starvation) | Postgres | Not a failure — no terminal status, no notification |
 
 **Overlay behavior (≥ this change):** `notify_thread_failure` / `notify_run_failure` in
-`packages/bfts_sdk/slack_stream.py` post @-mentions + fenced `error_text` to the
+`tools/bfts_runner/slack/post.py` and `tools/bfts_runner/slack/stream.py` post @-mentions + fenced `error_text` to the
 thread. `bfts_research` notifies on brief/ideation/handler failures.
 `bfts_root` notifies on handler failure (closes BFTS stream) and posts a
 summary when individual trees fail. Partial tree failures still complete
