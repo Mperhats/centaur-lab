@@ -5,14 +5,18 @@
 # /workspace/working — the path Sakana's prompts write to (research 02
 # §Code execution contract).
 #
-# Built by `.github/workflows/overlay.yml` (job `publish-bfts-executor`)
-# on every push to `main` and pushed to GHCR alongside the overlay image
-# at `ghcr.io/${repo}/bfts-executor:latest` + `:sha-<commit>`. Excluded
-# from the overlay payload via `.dockerignore` — sandbox pods reference
-# this image by tag (see `tools/bfts_executor/client.py`
-# `_DEFAULT_EXECUTOR_IMAGE`), they never read the file. Local build:
+# Built and pushed by ``.github/workflows/bfts-executor.yml`` only when
+# this Dockerfile (or that workflow file) changes. Tagged
+# ``df-<sha256(Dockerfile.bfts-executor)>`` — content-addressed and
+# immutable per recipe, so the same Dockerfile always resolves to the
+# same digest in GHCR. No ``:latest`` is published; the mutable tag was
+# the source of silent sandbox image drift across overlay-only commits.
+# Excluded from the overlay payload via ``.dockerignore`` — sandbox
+# pods reference this image by tag (see ``tools/bfts_executor/client.py``
+# ``_DEFAULT_EXECUTOR_IMAGE``); they never read this file. Local build
+# (uses a throwaway tag — only CI emits the canonical ``df-<hash>``):
 #
-#   docker build -f Dockerfile.bfts-executor -t bfts-executor:latest .
+#   docker build -f Dockerfile.bfts-executor -t bfts-executor:dev .
 FROM python:3.11-slim
 
 RUN apt-get update \
@@ -20,10 +24,10 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir \
-        "numpy>=1.26" \
-        "matplotlib>=3.8" \
-        "scikit-learn>=1.4" \
-        "torch>=2.2 ; platform_machine=='x86_64'"
+        "numpy==1.26.4" \
+        "matplotlib==3.9.2" \
+        "scikit-learn==1.5.2" \
+        "torch==2.5.1 ; platform_machine=='x86_64'"
 
 WORKDIR /workspace
 CMD ["sleep", "infinity"]

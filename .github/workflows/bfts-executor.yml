@@ -1,0 +1,96 @@
+# Builds and pushes the BFTS sandbox runtime image referenced by
+# ``tools/bfts_executor`` (see ``client.py`` ``_DEFAULT_EXECUTOR_IMAGE``).
+#
+# Why its own workflow:
+#   The executor image's only real input is ``Dockerfile.bfts-executor``
+#   (pinned numpy/matplotlib/scikit-learn/torch, no overlay code), so its
+#   release cadence is the Dockerfile, not the overlay. Co-publishing it
+#   with the overlay job (the previous arrangement) caused every overlay
+#   commit to silently produce a new executor image even when nothing
+#   about the executor changed.
+#
+# Why ``df-<hash>`` instead of ``sha-<commit>``:
+#   The tag is the SHA-256 of ``Dockerfile.bfts-executor`` itself. Same
+#   recipe ⇒ same tag ⇒ immutable per recipe; sandbox pulls become
+#   reproducible across overlay-only changes. ``hashFiles`` here returns
+#   the same SHA-256 as ``shasum -a 256 Dockerfile.bfts-executor``, so
+#   the literal hardcoded in ``tools/bfts_executor/client.py`` matches
+#   the GHCR tag this workflow publishes.
+#
+# Why no ``:latest``:
+#   The previous setup combined ``:latest`` with a default of
+#   ``...:latest`` in ``client.py``, which meant every sandbox pull was
+#   non-deterministic and could land on whichever build finished last.
+#   Dropping the mutable tag plus pinning the default to ``df-<hash>``
+#   removes the drift entirely.
+#
+# Why amd64-only:
+#   ``Dockerfile.bfts-executor`` pins ``torch ... ; platform_machine=='x86_64'``
+#   so an arm64 image would silently ship without torch and break
+#   Sakana's experiment code at sandbox-run time. Skipping QEMU
+#   emulation also keeps the build time bounded (scikit-learn + torch
+#   under arm64 emulation takes many minutes).
+name: BFTS Executor
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile.bfts-executor
+      - .github/workflows/bfts-executor.yml
+  pull_request:
+    paths:
+      - Dockerfile.bfts-executor
+      - .github/workflows/bfts-executor.yml
+  workflow_dispatch:
+
+concurrency:
+  group: bfts-executor-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    name: Build and push bfts-executor image
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
+
+      - uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6
+        with:
+          images: ghcr.io/${{ github.repository }}/bfts-executor
+          flavor: |
+            latest=false
+          tags: |
+            type=raw,value=df-${{ hashFiles('Dockerfile.bfts-executor') }}
+          labels: |
+            org.opencontainers.image.title=bfts-executor
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+
+      - uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7
+        with:
+          context: .
+          file: Dockerfile.bfts-executor
+          # amd64 only: torch wheel availability — see top-of-file comment.
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=bfts-executor
+          cache-to: type=gha,mode=max,scope=bfts-executor
