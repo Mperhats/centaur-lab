@@ -156,17 +156,68 @@ def format_research_brief_thread_message(
     *,
     topic: str,
     markdown: str,
+    search_query: str | None = None,
     run_id: str | None = None,
 ) -> str:
     """Return compact lit-review mrkdwn for a plain thread post (no wrappers)."""
     _ = run_id
     body = markdown.strip()
-    if body:
-        return body
     display_topic = topic.strip()
+    effective_query = (search_query or topic).strip()
+    note = ""
+    if (
+        body
+        and display_topic
+        and effective_query
+        and effective_query.casefold() != display_topic.casefold()
+    ):
+        note = (
+            "_Semantic Scholar returned no papers for your exact wording; "
+            f"searched with:_ *{effective_query}*\n\n"
+        )
+    if body:
+        return f"{note}{body}" if note else body
     if display_topic:
         return f"*Literature* — {display_topic}\n\n_No papers found._"
     return ""
+
+
+def format_empty_literature_thread_message(
+    *,
+    topic: str,
+    queries_tried: list[str] | None = None,
+) -> str:
+    """Ask the user to broaden a query Semantic Scholar returned zero hits for."""
+    display_topic = topic.strip() or "(your topic)"
+    lines = [
+        f"*Literature* — {display_topic}",
+        "",
+        "Semantic Scholar returned **no papers** after trying multiple search queries.",
+        "",
+        "Try again with a shorter, keyword-style query — for example "
+        "*decentralized PageRank*, *PageRank graph theory*, or "
+        "*distributed ranking networks* — instead of a full sentence.",
+    ]
+    if queries_tried:
+        tried = dedupe_display_queries(queries_tried)
+        if len(tried) > 1:
+            rendered = ", ".join(f"*{query}*" for query in tried[:8])
+            lines.extend(["", f"Queries tried: {rendered}."])
+    return "\n".join(lines)
+
+
+def dedupe_display_queries(queries: list[str]) -> list[str]:
+    """Case-insensitive unique queries for Slack display."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for query in queries:
+        normalized = query.strip()
+        key = normalized.casefold()
+        if not normalized or key in seen:
+            continue
+        seen.add(key)
+        out.append(normalized)
+    return out
 
 
 def format_idea_markdown(idea: dict[str, Any]) -> str:

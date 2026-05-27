@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from tools.bfts_runner.slack.format import (
+    format_empty_literature_thread_message,
     format_failure_thread_message,
     format_idea_markdown,
     format_progress_message,
@@ -156,6 +157,18 @@ def test_format_research_brief_thread_message_compact() -> None:
     assert "Research pipeline" not in msg
 
 
+def test_format_research_brief_thread_message_notes_refined_query() -> None:
+    compact = "*Literature* — PageRank\n\n1. <https://example.com|Paper A> (2024)."
+    msg = format_research_brief_thread_message(
+        topic="latest graph theory research related to decentralized PageRank",
+        search_query="decentralized PageRank",
+        markdown=compact,
+    )
+    assert "searched with:" in msg
+    assert "*decentralized PageRank*" in msg
+    assert compact in msg
+
+
 def test_format_research_brief_thread_message_empty_falls_back() -> None:
     msg = format_research_brief_thread_message(
         topic="active inference",
@@ -163,6 +176,20 @@ def test_format_research_brief_thread_message_empty_falls_back() -> None:
     )
     assert "*Literature* — active inference" in msg
     assert "_No papers found._" in msg
+
+
+def test_format_empty_literature_thread_message() -> None:
+    msg = format_empty_literature_thread_message(
+        topic="latest graph theory research related to decentralized PageRank",
+        queries_tried=[
+            "latest graph theory research related to decentralized PageRank",
+            "decentralized PageRank",
+            "PageRank graph theory",
+        ],
+    )
+    assert "Semantic Scholar returned **no papers** after trying multiple" in msg
+    assert "decentralized PageRank" in msg
+    assert "Queries tried:" in msg
 
 
 def test_format_idea_markdown() -> None:
