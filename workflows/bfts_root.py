@@ -26,6 +26,12 @@ from packages.bfts_sdk.slack_delivery import (
     resolve_slack_delivery,
     slack_mention_prefix,
 )
+from packages.bfts_sdk.slack_stream import (
+    SlackStreamTarget,
+    close_session,
+    post_markdown,
+    post_step,
+)
 
 WORKFLOW_NAME = "bfts_root"
 # Auto-copied into schedule metadata by the workflow loader (see
@@ -183,6 +189,9 @@ class Input:
     # False so Slack/API runs without an idea fail fast instead of burning
     # hours on smoke. Operators pass True for ``just bfts-toy-run`` only.
     allow_smoke_idea: bool = False
+    # When set, BFTS progress uses Slack native streaming (separate agent-session
+    # message) instead of ``send_message`` posts in the user thread.
+    slack_stream_session_id: str | None = None
 
 
 def _sandbox_id(*, run_id: str, tree_idx: int) -> str:
@@ -281,6 +290,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         slack_delivery,
         thread_key=inp.thread_key or ctx.run_input.get("thread_key"),
     )
+    stream = _stream_target(inp.slack_stream_session_id)
     await _post_slack_kickoff(
         ctx,
         run_id=ctx.run_id,
@@ -290,6 +300,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         num_workers=search.num_workers,
         sources=asdict(sources),
         delivery=slack_delivery,
+        stream=stream,
     )
 
     # Every Sandbox we successfully create lands in ``sandboxes_to_clean``
@@ -350,6 +361,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         ctx,
         run_id=ctx.run_id,
         delivery=slack_delivery,
+        stream=stream,
         phase="launched",
         children=children,
         child_results=[],
@@ -364,6 +376,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             ctx,
             run_id=ctx.run_id,
             delivery=slack_delivery,
+            stream=stream,
             phase="progress",
             children=children,
             child_results=results,
@@ -417,6 +430,7 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         ctx,
         summary_text,
         delivery=slack_delivery,
+        stream=stream,
     )
 
     return {
@@ -454,18 +468,23 @@ def _format_run_summary(
     return prefix + label
 
 
+def _stream_target(session_id: str | None) -> SlackStreamTarget | None:
+    if not session_id:
+        return None
+    return SlackStreamTarget(session_id=session_id)
+
+
 async def _post_slack_progress(
     ctx: WorkflowContext,
     *,
     run_id: str,
     delivery: dict[str, Any] | None,
+    stream: SlackStreamTarget | None,
     phase: str,
     children: list[dict[str, Any]],
     child_results: list[dict[str, Any]],
 ) -> None:
-    """Periodic progress posts to the requester's Slack thread only."""
-    if not delivery:
-        return
+    """Periodic progress to Slack stream or plain thread message."""
     text = format_progress_message(
         run_id=run_id,
         phase=phase,
@@ -477,6 +496,19 @@ async def _post_slack_progress(
         if phase == "launched"
         else f"post_slack_progress_{len(child_results)}"
     )
+    if stream:
+        await post_step(
+            ctx,
+            stream,
+            step_id="bfts_trees",
+            title=f"BFTS `{run_id}`",
+            status="in_progress",
+            output=text,
+            step_name=step_name,
+        )
+        return
+    if not delivery:
+        return
     await _post_slack_message(
         ctx,
         channel=str(delivery["channel"]),
@@ -540,18 +572,38 @@ async def _post_slack_kickoff(
     num_workers: int,
     sources: dict[str, str],
     delivery: dict[str, Any] | None,
+    stream: SlackStreamTarget | None,
 ) -> None:
-    """Best-effort kickoff post to the requester's Slack thread."""
-    if not delivery:
-        return
+    """Kickoff via Slack stream (preferred) or plain ``send_message``."""
     label = idea.get("Title") or idea.get("Name") or "(unnamed)"
-    prefix = slack_mention_prefix(delivery)
     config_line = format_search_config_line(
         num_drafts=num_drafts,
         num_seeds=num_seeds,
         num_workers=num_workers,
         sources=sources,
     )
+    if stream:
+        prefix = slack_mention_prefix(delivery or {})
+        text = (
+            f"{prefix}**BFTS tree search** `{run_id}`\n"
+            f"Idea: {label}\n{config_line}"
+        )
+        await post_markdown(
+            ctx, stream, text, step_name="stream_bfts_kickoff_md",
+        )
+        await post_step(
+            ctx,
+            stream,
+            step_id="bfts_trees",
+            title=f"BFTS `{run_id}`",
+            status="in_progress",
+            details="Provisioning sandboxes and launching trees…",
+            step_name="stream_bfts_kickoff_step",
+        )
+        return
+    if not delivery:
+        return
+    prefix = slack_mention_prefix(delivery)
     text = (
         f"{prefix}BFTS run `{run_id}` started "
         f"({num_drafts} tree{'s' if num_drafts != 1 else ''}). Idea: {label}\n"
@@ -572,12 +624,28 @@ async def _post_slack_summary(
     text: str,
     *,
     delivery: dict[str, Any] | None,
+    stream: SlackStreamTarget | None,
 ) -> None:
-    """Best-effort completion summary to the requester thread and ``#bfts-runs``.
-
-    Slack is auxiliary — a failure to post must not fail the workflow.
-    """
-    if delivery:
+    """Completion via stream and/or plain thread + ``#bfts-runs``."""
+    if stream:
+        await post_step(
+            ctx,
+            stream,
+            step_id="bfts_trees",
+            title="BFTS run finished",
+            status="complete",
+            output=text,
+            step_name="stream_bfts_completion_step",
+        )
+        prefix = slack_mention_prefix(delivery or {})
+        await post_markdown(
+            ctx,
+            stream,
+            f"{prefix}{text}",
+            step_name="stream_bfts_completion_md",
+        )
+        await close_session(ctx, stream, step_name="stream_bfts_done")
+    elif delivery:
         thread_text = f"{slack_mention_prefix(delivery)}{text}"
         await _post_slack_message(
             ctx,
