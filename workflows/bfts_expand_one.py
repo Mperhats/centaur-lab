@@ -48,6 +48,7 @@ from packages.bfts_sdk.config import (
     resolve_llm_settings,
 )
 from packages.bfts_sdk.expand import ExpandContext, expand_node
+from packages.bfts_sdk.schema import assert_bfts_schema_present
 from packages.bfts_sdk.state import (
     list_recent_node_summaries,
     mark_buggy_plots,
@@ -103,6 +104,15 @@ class Input:
 
 
 async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
+    # Pre-flight schema check (see ``bfts_root.handler``). Repeated
+    # in every BFTS workflow handler so a standalone-launched
+    # ``bfts_expand_one`` (tests, manual replays) still aborts cleanly
+    # on schema drift instead of failing inside ``update_node_metric``.
+    await ctx.step(
+        "preflight_schema_check",
+        lambda: assert_bfts_schema_present(ctx._pool),
+    )
+
     llm = resolve_llm_settings(
         draft_model=inp.draft_model,
         feedback_model=inp.feedback_model,

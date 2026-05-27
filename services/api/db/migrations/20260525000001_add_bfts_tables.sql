@@ -5,8 +5,17 @@
 -- pointing into these tables. This keeps each workflow_checkpoints row
 -- tiny (one JSON object per ctx.step, per research 03 §State & durability
 -- storage).
+--
+-- Object creation uses ``IF NOT EXISTS`` as defence-in-depth against
+-- out-of-band drift: if these tables exist but no row is in
+-- ``schema_migrations_overlay`` (e.g. ``DROP`` happened, then the
+-- migration was re-stamped manually), reapplying this file is a no-op
+-- instead of a hard failure. ``IF NOT EXISTS`` does NOT recover the
+-- inverse drift state (table missing while version row is present);
+-- that recovery is documented in ``docs/overlay-db-migrations.md``
+-- under "Drift recovery".
 
-CREATE TABLE bfts_runs (
+CREATE TABLE IF NOT EXISTS bfts_runs (
     run_id          TEXT PRIMARY KEY,
     parent_run_id   TEXT,
     idea_json       JSONB NOT NULL,
@@ -19,7 +28,7 @@ CREATE TABLE bfts_runs (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE bfts_nodes (
+CREATE TABLE IF NOT EXISTS bfts_nodes (
     node_id              TEXT PRIMARY KEY,
     run_id               TEXT NOT NULL REFERENCES bfts_runs(run_id) ON DELETE CASCADE,
     parent_node_id       TEXT REFERENCES bfts_nodes(node_id) ON DELETE CASCADE,
@@ -50,10 +59,10 @@ CREATE TABLE bfts_nodes (
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX bfts_nodes_run_idx ON bfts_nodes(run_id, step);
-CREATE INDEX bfts_nodes_parent_idx ON bfts_nodes(parent_node_id);
+CREATE INDEX IF NOT EXISTS bfts_nodes_run_idx ON bfts_nodes(run_id, step);
+CREATE INDEX IF NOT EXISTS bfts_nodes_parent_idx ON bfts_nodes(parent_node_id);
 
-CREATE TABLE bfts_artifacts (
+CREATE TABLE IF NOT EXISTS bfts_artifacts (
     artifact_id   TEXT PRIMARY KEY,
     node_id       TEXT NOT NULL REFERENCES bfts_nodes(node_id) ON DELETE CASCADE,
     kind          TEXT NOT NULL,

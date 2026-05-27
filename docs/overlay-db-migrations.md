@@ -82,7 +82,7 @@ Practical guide for adding org-specific schema in centaur-lab without forking up
 | Worker | Reuses API pool; does **not** run migrations independently |
 | Deploy | Bump the overlay image tag in centaur-lab-infra; the chart's overlay-bootstrap initContainer copies the new image into `/app/overlay/org`, and API restart applies pending migrations |
 
-The overlay's first real migration ships at [`services/api/db/migrations/20260526000001_add_paper_archives.sql`](../services/api/db/migrations/20260526000001_add_paper_archives.sql).
+The overlay's first surviving migration ships at [`services/api/db/migrations/20260525000001_add_bfts_tables.sql`](../services/api/db/migrations/20260525000001_add_bfts_tables.sql).
 
 ### Per-migration workflow
 
@@ -131,6 +131,38 @@ kubectl port-forward -n centaur-system svc/centaur-centaur-postgres 5432:5432
 # Password sourced from the centaur-infra-env Secret (set up by infra repo)
 ```
 
+## Drift recovery
+
+dbmate is **stamp-driven**: when a row exists in `schema_migrations_overlay` for a given version, dbmate skips the file regardless of whether the objects it creates still exist. So if an overlay table is dropped out-of-band (manual `psql -c 'DROP TABLE …'`, partial volume restore, snapshot-based dev reset, anything that bypasses `dbmate rollback`), the next API restart **will not** recreate the table — the workflow will fail mid-flight inside an `INSERT` / `SELECT` with a confusing `UndefinedTableError`.
+
+Two layers of defence are wired into this overlay; both should be honoured by anything that drops an overlay-owned object out-of-band.
+
+**1. Application-side pre-flight** — every BFTS workflow's handler runs `assert_bfts_schema_present` (in `packages/bfts_sdk/schema.py`) at iteration 0, wrapped in `ctx.step("preflight_schema_check", …)`. The check `SELECT 1 … LIMIT 0` against every BFTS-owned table; missing relations raise a `RuntimeError` naming the table and pointing back at this section. This catches drift the moment a workflow starts instead of mid-flight.
+
+**2. Migration idempotency** — every overlay migration uses `CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`, and `ALTER TABLE … ADD COLUMN IF NOT EXISTS`. This makes the inverse drift state (objects exist but no `schema_migrations_overlay` row) a no-op on the next `dbmate up` instead of a hard failure. It does **not** recover the dropped-but-still-stamped state — see below.
+
+### Recovery: stamped but missing
+
+When `assert_bfts_schema_present` raises (or psql confirms the table is gone but a row exists in `schema_migrations_overlay`), recover by clearing the affected version stamps and restarting the API pod:
+
+```sql
+-- Inspect first
+SELECT version FROM schema_migrations_overlay ORDER BY version;
+
+-- Then for each affected migration (e.g. bfts_hyperparams)
+DELETE FROM schema_migrations_overlay WHERE version = '20260526000001';
+```
+
+```bash
+kubectl rollout restart -n centaur-system deploy/centaur-centaur-api
+```
+
+The API pod's startup will rerun `dbmate up` for the overlay set, see no row for the cleared version, and reapply the file. The `IF NOT EXISTS` clauses make this safe even for objects that survived (it only creates what's missing).
+
+### Rule for any tooling that drops overlay tables
+
+Whatever ran the `DROP TABLE` must also clear the matching `schema_migrations_overlay` row, or the next API restart will skip the recreate. This applies to dev-reset scripts, test fixtures, snapshot tooling, and ad-hoc SQL — anywhere outside `dbmate rollback` (which already does both atomically). The recovery snippet above is the canonical pattern.
+
 ## Gotchas
 
 | Topic | Detail |
@@ -162,5 +194,6 @@ kubectl port-forward -n centaur-system svc/centaur-centaur-postgres 5432:5432
 | `CENTAUR_OVERLAY_DIR` chart wiring | `.centaur/contrib/chart/templates/workloads.yaml:204-207`, `.centaur/contrib/chart/values.yaml:92` |
 | Overlay bootstrap copy | `.centaur/contrib/chart/templates/workloads.yaml:134-149` |
 | centaur-lab Dockerfile (single `COPY . /overlay`) | [`Dockerfile`](../Dockerfile) |
-| First centaur-lab overlay migration | [`services/api/db/migrations/20260526000001_add_paper_archives.sql`](../services/api/db/migrations/20260526000001_add_paper_archives.sql) |
+| First centaur-lab overlay migration | [`services/api/db/migrations/20260525000001_add_bfts_tables.sql`](../services/api/db/migrations/20260525000001_add_bfts_tables.sql) |
+| Pre-flight schema check | [`packages/bfts_sdk/schema.py`](../packages/bfts_sdk/schema.py) |
 | Paper upsert pattern | [`tools/semantic_scholar/projections/paper.py`](../tools/semantic_scholar/projections/paper.py), [`workflows/save_papers.py`](../workflows/save_papers.py) |
