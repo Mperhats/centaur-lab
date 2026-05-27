@@ -6,15 +6,16 @@
 # §Code execution contract).
 #
 # Built and pushed by ``.github/workflows/bfts-executor.yml`` only when
-# this Dockerfile (or that workflow file) changes. Tagged
-# ``df-<sha256(Dockerfile.bfts-executor)>`` — content-addressed and
-# immutable per recipe, so the same Dockerfile always resolves to the
-# same digest in GHCR. No ``:latest`` is published; the mutable tag was
-# the source of silent sandbox image drift across overlay-only commits.
+# this Dockerfile (or that workflow file) changes. Each build emits
+# ``sha-<commit>`` (immutable, production pins this via Helm
+# ``api.extraEnv``'s ``BFTS_EXECUTOR_IMAGE``) and ``:latest`` (mutable,
+# default-branch only — the dev/local fallback in
+# ``tools/bfts_executor/client.py`` ``_DEFAULT_EXECUTOR_IMAGE``).
+# Reproducibility of image *content* lives in the exact dep pins below
+# (numpy / matplotlib / scikit-learn / torch); the tag is the
+# addressing layer.
 # Excluded from the overlay payload via ``.dockerignore`` — sandbox
-# pods reference this image by tag (see ``tools/bfts_executor/client.py``
-# ``_DEFAULT_EXECUTOR_IMAGE``); they never read this file. Local build
-# (uses a throwaway tag — only CI emits the canonical ``df-<hash>``):
+# pods reference this image by tag, never the file. Local build:
 #
 #   docker build -f Dockerfile.bfts-executor -t bfts-executor:dev .
 FROM python:3.11-slim

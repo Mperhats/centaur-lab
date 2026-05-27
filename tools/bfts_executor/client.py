@@ -82,30 +82,30 @@ _AGENT_SANDBOX_VERSION = "v1alpha1"
 _AGENT_SANDBOX_PLURAL = "sandboxes"
 _DEFAULT_EXECUTOR_IMAGE = os.getenv(  # noqa: TID251 - non-secret image tag set by Helm ``api.extraEnv``
     "BFTS_EXECUTOR_IMAGE",
-    "ghcr.io/mperhats/centaur-lab/bfts-executor:df-227aef6f00472e96ed43f03cf0e216306745f3af68318f3b00c32f9fc17525ec",
+    "ghcr.io/mperhats/centaur-lab/bfts-executor:latest",
 )
 """Container image for BFTS-spawned Sandbox pods.
 
 Built and pushed by ``.github/workflows/bfts-executor.yml`` only when
-``Dockerfile.bfts-executor`` (or that workflow file) changes. Tagged
-``df-<sha256(Dockerfile.bfts-executor)>`` — content-addressed and
-immutable per recipe, so a given digest always corresponds to the same
-Dockerfile bytes. No ``:latest`` is emitted; that mutable tag used to
-silently drift the sandbox image on every unrelated overlay commit.
+``Dockerfile.bfts-executor`` (or that workflow file) changes — the
+overlay image and the executor image have separate cadences. Each
+build emits two tags: ``sha-<commit>`` (immutable, what production
+should pin to) and ``:latest`` (mutable, default-branch only). The
+``:latest`` fallback below is the dev/local default; production
+overrides ``BFTS_EXECUTOR_IMAGE`` via Helm ``api.extraEnv`` (handled
+in the sibling ``centaur-lab-infra`` repo) to a specific
+``sha-<commit>`` so prod sandbox pulls don't drift when CI republishes.
+A chart redeploy is required to flip the override.
 
-The hardcoded fallback tracks the current Dockerfile content. When the
-Dockerfile changes, regenerate the hash with
-``shasum -a 256 Dockerfile.bfts-executor`` and bump this literal in the
-same PR — CI's ``hashFiles('Dockerfile.bfts-executor')`` produces the
-same SHA-256, so the literal here matches the GHCR tag the workflow
-publishes.
+Reproducibility of the image *content* (vs. the tag) lives in
+``Dockerfile.bfts-executor``'s exact dep pins
+(``numpy==1.26.4 / matplotlib==3.9.2 / scikit-learn==1.5.2 / torch==2.5.1``).
+Two builds of the same Dockerfile bytes produce equivalent image
+bytes; the tag is just the addressing layer.
 
 Callers (typically ``workflows/bfts_root.py``) rely on this default and
 do not pass ``image=`` explicitly, so the env-var resolution happens
-once at module load. Production deployments override
-``BFTS_EXECUTOR_IMAGE`` via Helm ``api.extraEnv`` (handled in the
-sibling ``centaur-lab-infra`` repo) to pin a different tag without
-shipping a new overlay image; a chart redeploy is required to flip it.
+once at module load.
 """
 _DEFAULT_STORAGE_SIZE = "10Gi"
 _WORKSPACE_MOUNT_PATH = "/workspace"
