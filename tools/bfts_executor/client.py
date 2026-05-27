@@ -376,7 +376,17 @@ class _KubernetesSandboxAPI:
         self.networking_api = networking_api
         self.ws_core_api = ws_core_api
         self.ws_api_client = ws_api_client
-        self.namespace = namespace or os.getenv("KUBERNETES_NAMESPACE", "centaur-system")  # noqa: TID251 - K8s namespace from pod env, not a secret
+        # Sandbox-namespace precedence: explicit arg → BFTS_SANDBOX_NAMESPACE
+        # (Helm api.extraEnv knob that routes BFTS sandboxes into a dedicated
+        # namespace with its own ResourceQuota/LimitRange/RBAC/NetworkPolicy)
+        # → KUBERNETES_NAMESPACE (downward-API value of the api pod's own
+        # namespace; legacy co-locating default) → "centaur-system" literal.
+        # Both env reads are non-secret operator knobs.
+        self.namespace = (
+            namespace
+            or os.getenv("BFTS_SANDBOX_NAMESPACE")  # noqa: TID251 - operator knob, not a secret
+            or os.getenv("KUBERNETES_NAMESPACE", "centaur-system")  # noqa: TID251 - K8s downward-API, not a secret
+        )
 
     async def _ensure_clients(self) -> None:
         # Per-attribute lazy init: only load kubeconfig + construct a real
