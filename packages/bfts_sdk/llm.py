@@ -3,7 +3,7 @@
 Why this exists: every LLM call in the expansion pipeline is its own
 ctx.step checkpoint. Routing all of them through one function keeps the
 HTTP shape uniform and makes ctx.step's idempotency guarantees obvious
-(research 02 §Agent turn shape lists all 5–7 calls; research 03
+(research 02 §Agent turn shape lists all 5-7 calls; research 03
 §Durability guarantees).
 
 The provider is implied by the model string:

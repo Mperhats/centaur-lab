@@ -11,9 +11,9 @@ Underscore-prefixed: workflow loader skips it.
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Any, Union
+from typing import Any
 
-PromptType = Union[str, dict, list]
+PromptType = str | dict | list
 
 
 def compile_prompt_to_md(prompt: PromptType, depth: int = 1) -> str:

@@ -112,7 +112,7 @@ def select_next(
     while len(selected) < cfg.num_workers:
         if len(drafts) < cfg.num_drafts:
             selected.append(None)
-            drafts = drafts + [_phantom_draft(len(drafts))]
+            drafts = [*drafts, _phantom_draft(len(drafts))]
             continue
 
         buggy_leaves = _buggy_leaf_nodes(nodes, cfg.max_debug_depth)

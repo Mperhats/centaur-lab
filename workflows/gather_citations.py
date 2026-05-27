@@ -57,7 +57,7 @@ _DEFAULT_SEARCHES_PER_CLAIM = 3
 # requests. Caps fan-out so a misconfigured ``max_claims=1000`` can't
 # burn 1000 serial S2 + LLM calls on a single run. 20 is well past the
 # point of diminishing returns for a Sakana-style writeup pipeline,
-# which typically cites ~10–20 papers per Stage 1 result.
+# which typically cites ~10-20 papers per Stage 1 result.
 _MAX_CLAIMS = 20
 # Claim-extraction is creative (open-ended search-query phrasing) but
 # should stay close to the plan/code wording — temperature 0.5 mirrors

@@ -1,6 +1,6 @@
 """Per-node expansion pipeline.
 
-One call to expand_node() runs the 5–7 LLM-call + 3 exec-call pipeline
+One call to expand_node() runs the 5-7 LLM-call + 3 exec-call pipeline
 from research 02 §Agent turn shape:
 
   draft_propose / debug_propose / improve_propose  (LLM call #1)

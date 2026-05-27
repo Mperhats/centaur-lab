@@ -15,7 +15,7 @@ comparison naturally requires per-component direction.
 
 INTENTIONAL DEVIATION from pre-4g.2 behavior (``mean`` reducer): for an
 empty per-metric ``data`` list under ``lower_is_better=False``, Phase
-0–3 used to compute ``mean()`` → ``+inf`` and then sign-flip to
+0-3 used to compute ``mean()`` → ``+inf`` and then sign-flip to
 ``-inf``, causing the selector to pick the empty-data node as best (a
 latent bug). Phase 4g.2's ``score()`` short-circuits when the
 collapsed value is ``+inf`` BEFORE the sign flip, so empty-values
@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Any, Union
+from typing import Any
 
 WORST_METRIC: Mapping[str, Any] = MappingProxyType({"_worst": True})
 """Sentinel that compares worse than any real metric.
@@ -49,7 +49,7 @@ DEFAULT_REDUCER: str = "mean"
 # reducer which emits a tuple. Both are total-orderable by Python's
 # built-in comparison so existing argmin call sites (sorted(), min())
 # keep working without an explicit encode/decode step.
-ScoreResult = Union[float, tuple[float, ...]]
+ScoreResult = float | tuple[float, ...]
 
 
 def is_worst(metric: Mapping[str, Any] | None) -> bool:
@@ -88,7 +88,7 @@ def score(
       flag governs sign for the whole node (preserves Sakana's
       first-metric direction footgun; see module docstring). Note:
       empty per-metric ``data`` under ``higher-is-better`` used to
-      return ``-inf`` in Phase 0–3 (picking the node as best — a
+      return ``-inf`` in Phase 0-3 (picking the node as best - a
       latent bug). Phase 4g.2 short-circuits ``+inf`` before the sign
       flip, so empty-values nodes now correctly sort as worst (see
       module docstring).
@@ -214,7 +214,7 @@ def _weighted_mean(metric: Mapping[str, Any]) -> float:
     total = sum(weights)
     if total == 0:
         return sum(means) / len(means)
-    return sum(v * w for v, w in zip(means, weights)) / total
+    return sum(v * w for v, w in zip(means, weights, strict=True)) / total
 
 
 def _score_lexicographic(metric: Mapping[str, Any]) -> tuple[float, ...]:
