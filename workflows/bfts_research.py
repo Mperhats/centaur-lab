@@ -44,6 +44,7 @@ from tools.bfts_runner.slack.format import (
 )
 from tools.bfts_runner.slack.post import (
     enrich_run_input_from_headers,
+    enrich_slack_delivery_recipient,
     notify_thread_failure,
     post_thread_message,
     resolve_slack_delivery,
@@ -283,6 +284,17 @@ async def _run_research_pipeline(inp: Input, ctx: WorkflowContext) -> dict[str, 
         explicit_delivery=inp.delivery or merged_input.get("delivery"),
         run_input=merged_input,
         explicit_thread_key=thread_key or inp.thread_key,
+    )
+    # The slackbot's ``session_step`` endpoint requires a valid Slack user id
+    # in ``recipient_user_id`` (``^[UW][A-Z0-9]{2,}$``); without it Slack 502s
+    # every ``task_update`` chunk. Mirrors the ``bfts_root`` enrichment
+    # (workflows/bfts_root.py:285) so a session opened here renders
+    # correctly when ``bfts_root`` later posts ``bfts_trees`` / ``tree_{i}``
+    # rows on the same session id.
+    delivery = await enrich_slack_delivery_recipient(
+        ctx,
+        delivery,
+        thread_key=thread_key or inp.thread_key,
     )
     use_research_stream = streaming_available() and bool(delivery and thread_key)
     metadata = _slack_metadata(ctx)
