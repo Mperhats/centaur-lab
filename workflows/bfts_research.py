@@ -18,7 +18,10 @@ if TYPE_CHECKING:
     from api.workflow_engine import WorkflowContext
 
 from packages.bfts_sdk.research import build_bfts_run_input
-from packages.bfts_sdk.slack_delivery import resolve_slack_delivery
+from packages.bfts_sdk.slack_delivery import (
+    enrich_run_input_from_headers,
+    resolve_slack_delivery,
+)
 from packages.bfts_sdk.slack_stream import (
     close_session,
     format_bfts_stream_intro,
@@ -81,11 +84,19 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         raise ValueError("topic cannot be empty")
 
     topic = inp.topic.strip()
-    thread_key = (inp.thread_key or str(ctx.run_input.get("thread_key") or "")).strip()
+    merged_input = enrich_run_input_from_headers(
+        header_thread_key=(
+            inp.thread_key
+            or str(ctx.run_input.get("thread_key") or "")
+            or None
+        ),
+        run_input=dict(ctx.run_input),
+    )
+    thread_key = str(merged_input.get("thread_key") or "").strip()
     delivery = resolve_slack_delivery(
-        explicit_delivery=inp.delivery,
-        run_input=ctx.run_input,
-        explicit_thread_key=inp.thread_key,
+        explicit_delivery=inp.delivery or merged_input.get("delivery"),
+        run_input=merged_input,
+        explicit_thread_key=thread_key or inp.thread_key,
     )
     use_stream = streaming_available() and bool(delivery and thread_key)
     metadata = _slack_metadata(ctx)

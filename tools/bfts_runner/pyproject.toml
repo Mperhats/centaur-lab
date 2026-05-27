@@ -1,0 +1,17 @@
+[project]
+name = "bfts-runner"
+description = "Start bfts_research with Slack thread_key/delivery from sandbox JWT claims."
+version = "0.1.0"
+requires-python = ">=3.11"
+license = "Apache-2.0 OR MIT"
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = false
+
+[tool.centaur]
+module = "client.py"

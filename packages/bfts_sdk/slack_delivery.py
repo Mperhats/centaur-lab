@@ -6,15 +6,55 @@ from typing import Any
 
 
 def delivery_from_thread_key(thread_key: str) -> dict[str, Any] | None:
-    """Map ``slack:<channel>:<thread_ts>`` to a minimal delivery dict."""
+    """Map a Slack ``thread_key`` to a minimal delivery dict.
+
+    Supports both legacy ``slack:<channel>:<thread_ts>`` and the
+    production ``slack:<team_id>:<channel_id>:<thread_ts>`` shape.
+    """
     parts = thread_key.strip().split(":")
-    if len(parts) == 3 and parts[0] == "slack" and parts[1] and parts[2]:
-        return {
-            "platform": "slack",
-            "channel": parts[1],
-            "thread_ts": parts[2],
-        }
-    return None
+    if not parts or parts[0] != "slack":
+        return None
+    if len(parts) == 3 and parts[1] and parts[2]:
+        channel, thread_ts, team_id = parts[1], parts[2], None
+    elif len(parts) >= 4 and parts[1] and parts[2] and parts[3]:
+        team_id, channel, thread_ts = parts[1], parts[2], parts[3]
+    else:
+        return None
+    out: dict[str, Any] = {
+        "platform": "slack",
+        "channel": channel,
+        "thread_ts": thread_ts,
+    }
+    if team_id:
+        out["recipient_team_id"] = team_id
+    return out
+
+
+def build_bfts_research_run_input(
+    *,
+    topic: str,
+    thread_key: str | None = None,
+    delivery: dict[str, Any] | None = None,
+    num_seeds: int | None = None,
+    num_drafts: int | None = None,
+    num_workers: int | None = None,
+) -> dict[str, Any]:
+    """Build enriched ``bfts_research`` workflow input (Slack thread aware)."""
+    run_input: dict[str, Any] = {"topic": topic.strip()}
+    if delivery is not None:
+        run_input["delivery"] = delivery
+    run_input = enrich_run_input_from_headers(
+        header_thread_key=thread_key,
+        run_input=run_input,
+    )
+    for key, val in (
+        ("num_seeds", num_seeds),
+        ("num_drafts", num_drafts),
+        ("num_workers", num_workers),
+    ):
+        if val is not None:
+            run_input[key] = val
+    return run_input
 
 
 def enrich_run_input_from_headers(

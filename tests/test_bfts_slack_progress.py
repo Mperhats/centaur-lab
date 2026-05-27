@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from packages.bfts_sdk.slack_delivery import (
+    build_bfts_research_run_input,
+    delivery_from_thread_key,
     enrich_run_input_from_headers,
     format_progress_message,
     format_search_config_line,
@@ -23,6 +25,28 @@ def test_format_search_config_line_shows_sources() -> None:
     )
     assert "4 trees" in line
     assert "num_seeds, env" in line
+
+
+def test_delivery_from_four_part_slack_thread_key() -> None:
+    delivery = delivery_from_thread_key(
+        "slack:TKW6CBDSB:C0B5Y8J1K1T:1779861892.728879",
+    )
+    assert delivery == {
+        "platform": "slack",
+        "recipient_team_id": "TKW6CBDSB",
+        "channel": "C0B5Y8J1K1T",
+        "thread_ts": "1779861892.728879",
+    }
+
+
+def test_build_bfts_research_run_input_enriches_slack() -> None:
+    body = build_bfts_research_run_input(
+        topic="NCA active inference",
+        thread_key="slack:T1:C1:1.0",
+    )
+    assert body["topic"] == "NCA active inference"
+    assert body["thread_key"] == "slack:T1:C1:1.0"
+    assert body["delivery"]["channel"] == "C1"
 
 
 def test_enrich_run_input_from_header_thread_key() -> None:

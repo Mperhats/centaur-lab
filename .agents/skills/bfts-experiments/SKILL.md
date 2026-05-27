@@ -13,35 +13,47 @@ tree search — not hyperparameter knobs alone.
 Use **`bfts_research`** for Slack-driven science. When `SLACKBOT_URL` is
 configured it opens **two streamed Slack messages** in the thread:
 
-1. **Ideation stream** — research brief (markdown) + synthesized idea
+1. **Ideation stream** — compact research brief + synthesized idea
 2. **BFTS stream** — tree-search kickoff and live progress until completion
 
 It then starts **`bfts_root`** with research defaults (`num_seeds=3`,
 `num_drafts=2`, `num_workers=1`). **Do not** run `ideation` and `bfts_root`
 separately in Slack.
 
+### Start from Slack (required for thread streaming)
+
+Prefer the **`bfts_runner`** tool — it injects `thread_key` + `delivery` from
+the sandbox JWT (the plain `call workflow run` path often omits them on the
+deployed API pin):
+
 ```bash
-call workflow run '{
+call bfts_runner start_research '{"topic": "<user research question>"}'
+```
+
+Fallback (injects thread into JSON body):
+
+```bash
+"$CENTAUR_OVERLAY_DIR/services/sandbox/call-workflow-run.sh" '{
   "workflow_name": "bfts_research",
   "eager_start": true,
-  "input": {
-    "topic": "<user research question>"
-  }
+  "input": {"topic": "<user research question>"}
 }'
 ```
 
-Sandbox `call workflow run` sends `X-Centaur-Thread-Key`; pass `thread_key` /
-`delivery` in input when the API pin lacks header enrichment.
+### Agent reply contract (no redundancy)
 
-After starting `bfts_research`, run **one** `call workflow get <run_id>` when
-the user asks for status or you need `bfts_run_id` / the idea (~2–5 minutes).
-Report `output_json.bfts_run_id` and the idea title on success, or `error_text`
-on failure. **Do not** poll for hours. **Do not** promise a follow-up you will
-not deliver.
+After start, reply **once** with a single short line, for example:
 
-**Do not** post your own kickoff/progress Slack messages — the workflows stream
-them when `thread_key` / delivery are present (sandbox sends
-`X-Centaur-Thread-Key`).
+`Started bfts_research \`wfr_…\`. Brief, idea, and BFTS progress stream in this thread.`
+
+**Do not** repeat the same announcement twice in one message. **Do not** narrate
+kickoff/progress — workflows stream that. **Do not** post parallel Slack
+kickoff text.
+
+After start, run **one** `call workflow get <run_id>` when the user asks for
+status or you need `bfts_run_id` / the idea (~2–5 minutes). Report
+`output_json.bfts_run_id` and the idea title on success, or `error_text` on
+failure. **Do not** poll for hours.
 
 ## Manual two-step path (ideation → bfts_root)
 

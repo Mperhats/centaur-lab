@@ -61,17 +61,27 @@ Read `.agents/skills/bfts-experiments/SKILL.md` when the user mentions BFTS,
 **Idea required:** run `ideation` (or get a full `idea` from the user) before
 `bfts_root`. `ideation` **automatically** runs child `save_papers` on its seed
 literature (`papers_persisted` in output) — do not treat that save as optional.
-Prefer **`bfts_research`** (`topic` only) for Slack science runs; it sets
-`num_seeds` / `num_drafts` / `num_workers` on the child `bfts_root` run. After
-`ideation`, use `output_json.bfts_run_input` for `bfts_root` — do not omit
+Prefer **`bfts_research`** for Slack science runs. Start it with thread context:
+
+```bash
+call bfts_runner start_research '{"topic": "<research question>"}'
+```
+
+Do **not** use bare `call workflow run` for `bfts_research` in Slack — the run
+will miss `thread_key` and streaming will not appear in this thread. Reply
+**once** with the returned `run_id`; do not duplicate the same kickoff paragraph.
+
+After `ideation`, use `output_json.bfts_run_input` for manual `bfts_root` — do not omit
 hyperparams. Do not start BFTS with only `num_seeds` / `num_drafts` — empty `idea` uses the
 toy smoke fixture and cannot produce seed aggregates or `best_node_id`. Slack
 runs without an `idea` are rejected by `bfts_root` when `thread_key` /
 `delivery` is set.
 
 Long-running experiments use the `bfts_root` workflow (hours, not
-minutes). From Slack, start it fire-and-forget and let the workflow
-notify the thread — do not block the agent turn polling `workflow get`.
+minutes). From Slack, start fire-and-forget and let workflows stream progress
+— do not block the agent turn polling `workflow get`.
+
+Manual `bfts_root` with a known idea (include `thread_key` + `delivery`):
 
 ```bash
 call workflow run '{
@@ -90,8 +100,4 @@ call workflow run '{
 }'
 ```
 
-`bfts_root` posts kickoff, per-tree progress, and completion in that thread
-(with @-mention on kickoff/finish). `X-Centaur-Thread-Key` on
-`call workflow run` is enough — the API merges it into run input. A one-line
-mirror still goes to `#bfts-runs` at the end. Omit `delivery` for
-operator-only runs (e.g. `just bfts-toy-run`).
+Omit `delivery` for operator-only runs (e.g. `just bfts-toy-run`).
