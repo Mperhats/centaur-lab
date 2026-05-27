@@ -4,7 +4,8 @@ Slack-driven science entrypoint:
 
 1. **Agent turn** (``slack_thread_turn``): no chat text — the workflow owns
    thread delivery (avoids duplicate kickoff lines in the agent stream).
-2. **Plain thread posts**: compact ``research_brief`` lit review, then the
+2. **Plain thread posts**: compact ``research_brief`` lit review (with LLM
+   query refinement when Semantic Scholar returns zero hits), then the
    research idea after ``ideation`` completes.
 3. **BFTS stream** (one agent-session message): live tree-search snapshots
    every ~90s while ``bfts_root`` waits on child trees, then completion
@@ -24,8 +25,16 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from api.workflow_engine import WorkflowContext
 
+from packages.bfts_sdk.config import resolve_llm_api_key, resolve_llm_settings
+from packages.bfts_sdk.literature_query import (
+    DEFAULT_MAX_PLANNER_ROUNDS,
+    DEFAULT_QUERIES_PER_PLAN,
+    plan_literature_queries,
+    queries_not_yet_tried,
+)
 from packages.bfts_sdk.research import build_bfts_run_input
 from tools.bfts_runner.slack.format import (
+    format_empty_literature_thread_message,
     format_idea_markdown,
     format_research_brief_thread_message,
 )
@@ -48,6 +57,135 @@ WORKFLOW_NAME = "bfts_research"
 SCHEDULE: dict[str, Any] = {}
 
 _DEFAULT_BRIEF_LIMIT = 4
+
+
+class _ResearchPipelineStop(RuntimeError):
+    """Raised after Slack was already notified; skip generic failure wrapper."""
+
+
+def _brief_results_count(brief_result: dict[str, Any]) -> int:
+    raw = brief_result.get("results_count")
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str) and raw.isdigit():
+        return int(raw)
+    return 0
+
+
+def _brief_has_results(brief_result: dict[str, Any]) -> bool:
+    return (
+        str(brief_result.get("status") or "") == "completed"
+        and _brief_results_count(brief_result) > 0
+    )
+
+
+async def _run_research_brief_step(
+    ctx: WorkflowContext,
+    *,
+    step_name: str,
+    query: str,
+    limit: int,
+) -> dict[str, Any]:
+    return await ctx.step(
+        step_name,
+        lambda q=query, lim=limit: ctx.tools.semantic_scholar.research_brief(
+            query=q,
+            limit=lim,
+        ),
+    )
+
+
+async def _resolve_literature_brief(
+    ctx: WorkflowContext,
+    *,
+    topic: str,
+    brief_limit: int,
+    draft_model: str | None,
+    llm_api_key_secret: str | None,
+) -> tuple[str, dict[str, Any], list[str]]:
+    """Search S2 for a literature brief, refining the query when needed."""
+    llm = resolve_llm_settings(
+        draft_model=draft_model,
+        llm_api_key_secret=llm_api_key_secret,
+    )
+    api_key = resolve_llm_api_key(llm.llm_api_key_secret)
+
+    prior_queries: list[str] = [topic]
+    prior_gaps: list[str] = []
+
+    brief_result = await _run_research_brief_step(
+        ctx,
+        step_name="research_brief",
+        query=topic,
+        limit=brief_limit,
+    )
+    if not isinstance(brief_result, dict):
+        msg = f"research_brief returned unexpected type: {type(brief_result).__name__}"
+        raise RuntimeError(msg)
+    if _brief_has_results(brief_result):
+        return topic, brief_result, prior_queries
+
+    if str(brief_result.get("status") or "") != "completed":
+        return topic, brief_result, prior_queries
+
+    prior_gaps.append("Semantic Scholar returned zero papers for the original query.")
+
+    for plan_round in range(1, DEFAULT_MAX_PLANNER_ROUNDS + 1):
+        planner = await ctx.step(
+            f"plan_literature_queries_{plan_round}",
+            lambda pq=list(prior_queries), pg=list(prior_gaps), t=topic: plan_literature_queries(
+                topic=t,
+                prior_queries=pq,
+                prior_gaps=pg,
+                api_key=api_key,
+                draft_model=llm.draft_model,
+                query_limit=DEFAULT_QUERIES_PER_PLAN,
+            ),
+        )
+        candidate_queries = queries_not_yet_tried(
+            planner.get("queries") if isinstance(planner, dict) else [],
+            prior_queries,
+        )
+        if not candidate_queries:
+            prior_gaps.append(
+                f"Planner round {plan_round} produced no new queries "
+                f"({planner.get('reason', '') if isinstance(planner, dict) else ''})."
+            )
+            continue
+
+        tried_this_round = 0
+        for query_index, query in enumerate(candidate_queries[:DEFAULT_QUERIES_PER_PLAN]):
+            brief_result = await _run_research_brief_step(
+                ctx,
+                step_name=f"research_brief_plan_{plan_round}_{query_index}",
+                query=query,
+                limit=brief_limit,
+            )
+            prior_queries.append(query)
+            tried_this_round += 1
+            if not isinstance(brief_result, dict):
+                continue
+            if str(brief_result.get("status") or "") != "completed":
+                prior_gaps.append(
+                    f"Query {query!r} failed: {brief_result.get('error', 'unknown error')}"
+                )
+                continue
+            if _brief_has_results(brief_result):
+                ctx.log(
+                    "bfts_research_literature_query_refined",
+                    original_topic=topic,
+                    effective_query=query,
+                    plan_round=plan_round,
+                    queries_tried=prior_queries,
+                )
+                return query, brief_result, prior_queries
+
+        prior_gaps.append(
+            f"Planner round {plan_round} tried {tried_this_round} queries; "
+            "all returned zero papers."
+        )
+
+    return topic, brief_result, prior_queries
 
 
 @dataclass
@@ -83,17 +221,16 @@ async def _run_research_brief(
     *,
     topic: str,
     limit: int,
-) -> dict[str, Any]:
+    draft_model: str | None,
+    llm_api_key_secret: str | None,
+) -> tuple[str, dict[str, Any], list[str]]:
     """Persisted research brief via checkpointed ``ctx.tools`` (async proxy)."""
-
-    # ``ctx.tools.*`` returns a coroutine; do not wrap in ``asyncio.to_thread``
-    # (that checkpoints an unawaited coroutine → JSON serialize failure).
-    return await ctx.step(
-        "research_brief",
-        lambda: ctx.tools.semantic_scholar.research_brief(
-            query=topic,
-            limit=limit,
-        ),
+    return await _resolve_literature_brief(
+        ctx,
+        topic=topic,
+        brief_limit=limit,
+        draft_model=draft_model,
+        llm_api_key_secret=llm_api_key_secret,
     )
 
 
@@ -119,18 +256,41 @@ async def _run_research_pipeline(inp: Input, ctx: WorkflowContext) -> dict[str, 
     brief_limit = inp.brief_paper_limit or inp.seed_paper_limit or _DEFAULT_BRIEF_LIMIT
 
     try:
-        brief_result = await _run_research_brief(ctx, topic=topic, limit=brief_limit)
-        if not isinstance(brief_result, dict):
-            msg = f"research_brief returned unexpected type: {type(brief_result).__name__}"
-            raise RuntimeError(msg)
+        literature_query, brief_result, queries_tried = await _run_research_brief(
+            ctx,
+            topic=topic,
+            limit=brief_limit,
+            draft_model=inp.draft_model,
+            llm_api_key_secret=inp.llm_api_key_secret,
+        )
 
         brief_markdown = _brief_markdown_for_slack(brief_result)
+        if (
+            str(brief_result.get("status") or "") == "completed"
+            and _brief_results_count(brief_result) == 0
+        ):
+            if delivery:
+                await post_thread_message(
+                    ctx,
+                    delivery=delivery,
+                    text=format_empty_literature_thread_message(
+                        topic=topic,
+                        queries_tried=queries_tried,
+                    ),
+                    step_name="post_slack_empty_literature",
+                    log_event="bfts_research_slack_empty_literature_failed",
+                )
+            raise _ResearchPipelineStop(
+                "Semantic Scholar returned no papers after query refinement; "
+                "ask the user to broaden their search and retry."
+            )
         if delivery and brief_markdown:
             await post_thread_message(
                 ctx,
                 delivery=delivery,
                 text=format_research_brief_thread_message(
                     topic=topic,
+                    search_query=literature_query,
                     markdown=brief_markdown,
                 ),
                 step_name="post_slack_research_brief",
@@ -148,7 +308,7 @@ async def _run_research_pipeline(inp: Input, ctx: WorkflowContext) -> dict[str, 
             )
             raise RuntimeError(f"research_brief did not complete: {err}")
 
-        ideation_input: dict[str, Any] = {"topic": topic}
+        ideation_input: dict[str, Any] = {"topic": literature_query}
         if inp.thread_key:
             ideation_input["thread_key"] = inp.thread_key
         if inp.delivery is not None:
@@ -267,6 +427,8 @@ async def _run_research_pipeline(inp: Input, ctx: WorkflowContext) -> dict[str, 
 
         return {
             "topic": topic,
+            "literature_query": literature_query,
+            "literature_queries_tried": queries_tried,
             "ideation_run_id": ideation_run_id,
             "bfts_run_id": bfts_run_id,
             "idea": idea,
@@ -281,7 +443,7 @@ async def _run_research_pipeline(inp: Input, ctx: WorkflowContext) -> dict[str, 
     except Exception as exc:
         from api.workflow_engine import SuspendWorkflow
 
-        if isinstance(exc, SuspendWorkflow):
+        if isinstance(exc, (SuspendWorkflow, _ResearchPipelineStop)):
             raise
         await notify_run_failure(
             ctx,

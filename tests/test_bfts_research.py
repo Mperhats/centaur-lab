@@ -9,7 +9,8 @@ def test_research_brief_step_uses_tool_proxy_not_to_thread() -> None:
     """``wfr_0fe5e7e5f48d4d2b`` failed: coroutine checkpointed via to_thread."""
     source = Path("workflows/bfts_research.py").read_text(encoding="utf-8")
     assert "asyncio.to_thread(_call)" not in source
-    assert "lambda: ctx.tools.semantic_scholar.research_brief" in source
+    assert "ctx.tools.semantic_scholar.research_brief" in source
+    assert "lambda q=query" in source
 
 
 def test_bfts_root_polls_tree_search_for_slack_stream() -> None:
@@ -33,3 +34,15 @@ def test_bfts_research_slack_ux_plain_brief_and_bfts_only_stream() -> None:
     assert "format_bfts_stream_intro" not in source
     assert "compact_markdown" in source
     assert "SuspendWorkflow" in source
+    assert "_ResearchPipelineStop" in source
+    assert "results_count" in source
+    assert "format_empty_literature_thread_message" in source
+    assert "post_slack_empty_literature" in source
+    assert "packages.bfts_sdk.literature_query" in source
+    assert "plan_literature_queries_" in source
+    assert "_resolve_literature_brief" in source
+    assert "literature_query" in source
+    assert "start_ideation" in source
+    empty_idx = source.index("post_slack_empty_literature")
+    ideation_idx = source.index("start_ideation")
+    assert empty_idx < ideation_idx
