@@ -13,7 +13,7 @@ Tackle a scientific question end-to-end:
 ## Research Workflow
 - **Academic literature first**: route through `tools/semantic_scholar` (`search`, `search_papers`, `get_paper`, `get_references`, `research_brief`) before any other source.
 - **Full-text ingestion**: when S2 only returns metadata, use `tools/archiver` (`download`, `parse`, `extract_*`) to pull and parse the underlying PDF or page.
-- **Non-academic web context**: use `tools/websearch` for industry posts, blogs, or breaking results that have no peer-reviewed home yet.
+- **Non-academic web context**: use `tools/websearch` (`search` for single-shot lookups, `deep_research` for multi-iteration synthesis) for industry posts, blogs, or breaking results that have no peer-reviewed home yet.
 - **Run experiments via tree search**: trigger the `workflows/bfts_root` workflow to spawn a BFTS run — the durable result lands in `bfts_runs` / `bfts_nodes` and a summary is posted to `#bfts-runs`.
 - **Persist findings**: route literature into `workflows/research_brief` and `workflows/save_papers` so the brief and each paper land as parent/child rows in `company_context_documents` (BM25-searchable).
 - **Do not fabricate citations**: if `semantic_scholar` returns nothing, say so plainly — do not silently substitute `websearch` results unless the user explicitly authorizes it.

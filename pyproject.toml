@@ -62,7 +62,12 @@ license = "Apache-2.0 OR MIT"
 # the registerable persona entries. We exclude the category dir itself
 # from the workspace and add ``tools/personas/*`` so each persona child
 # becomes a workspace member, mirroring the auto-discovery semantics of
-# the flat ``tools/*`` glob.
+# the flat ``tools/*`` glob. Corollary: any child dir under
+# ``tools/personas/`` MUST carry at least a stub ``pyproject.toml`` —
+# uv treats every glob match as a workspace member, so a half-built
+# persona dir without one breaks ``uv sync`` everywhere (local dev,
+# CI, and API-pod startup) with ``Workspace member ... is missing a
+# pyproject.toml (matches: tools/personas/*)``.
 [tool.uv.workspace]
 members = [
     "tools/*",

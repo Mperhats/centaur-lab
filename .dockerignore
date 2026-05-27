@@ -94,6 +94,15 @@ scripts
 #     .centaur/docs/public/md/extend/overlay.md:32-34). Scoped to the
 #     exact filename so other developer-doc ``*.md`` files under
 #     ``services/`` (READMEs, runbooks) stay out of the runtime image.
+#   - ``tools/personas/**/PROMPT.md`` — each persona's prompt is read
+#     by ``tool_manager._load_persona`` at registration time (see
+#     ``.centaur/services/api/api/tool_manager.py``); without this
+#     allow-list entry the persona's ``pyproject.toml`` ships but the
+#     prompt file is silently dropped, so the persona registers with
+#     empty prompt content. Scoped to the exact filename so future
+#     ``README.md`` / ``NOTES.md`` files inside persona dirs stay out
+#     of the runtime image.
 *.md
 !.agents/skills/**
 !services/**/SYSTEM_PROMPT.md
+!tools/personas/**/PROMPT.md
