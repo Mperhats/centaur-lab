@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from tools.bfts_runner.slack.progress import (
     TreeSearchSnapshot,
     format_tree_search_snapshot,
 )
+
+
+def test_fetch_workflow_status_uses_error_text_column() -> None:
+    source = Path("tools/bfts_runner/slack/progress.py").read_text(encoding="utf-8")
+    assert "error_text" in source
+    assert "error_json" not in source
 
 
 def test_format_tree_search_snapshot_running() -> None:
