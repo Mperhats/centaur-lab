@@ -29,8 +29,12 @@ from packages.bfts_sdk.slack_delivery import (
 from packages.bfts_sdk.slack_stream import (
     SlackStreamTarget,
     close_session,
+    notify_run_failure,
+    notify_thread_failure,
     post_markdown,
     post_step,
+    workflow_run_error_text,
+    workflow_run_failed,
 )
 
 WORKFLOW_NAME = "bfts_root"
@@ -291,6 +295,43 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         thread_key=inp.thread_key or ctx.run_input.get("thread_key"),
     )
     stream = _stream_target(inp.slack_stream_session_id)
+    try:
+        return await _run_bfts_trees(
+            ctx,
+            inp=inp,
+            idea=idea,
+            idea_was_defaulted=idea_was_defaulted,
+            search=search,
+            sources=sources,
+            llm=llm,
+            slack_delivery=slack_delivery,
+            stream=stream,
+        )
+    except Exception as exc:
+        await notify_run_failure(
+            ctx,
+            delivery=slack_delivery,
+            stream=stream,
+            orchestrator_run_id=ctx.run_id,
+            headline="BFTS run failed",
+            error_text=str(exc),
+            thread_step_name="post_slack_bfts_root_failed",
+        )
+        raise
+
+
+async def _run_bfts_trees(
+    ctx: WorkflowContext,
+    *,
+    inp: Input,
+    idea: dict[str, Any],
+    idea_was_defaulted: bool,
+    search: Any,
+    sources: Any,
+    llm: Any,
+    slack_delivery: dict[str, Any] | None,
+    stream: SlackStreamTarget | None,
+) -> dict[str, Any]:
     await _post_slack_kickoff(
         ctx,
         run_id=ctx.run_id,
@@ -418,6 +459,25 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         if isinstance(output, dict):
             summary.update(output)
         tree_summaries.append(summary)
+
+    failed_lines: list[str] = []
+    for child_meta, child_result in zip(children, results, strict=True):
+        if not workflow_run_failed(child_result):
+            continue
+        idx = child_meta["tree_index"]
+        err = workflow_run_error_text(
+            child_result if isinstance(child_result, dict) else None
+        )
+        failed_lines.append(f"• tree {idx} (`{child_meta['run_id']}`): {err}")
+    if failed_lines and slack_delivery:
+        await notify_thread_failure(
+            ctx,
+            delivery=slack_delivery,
+            headline="BFTS trees reported failures",
+            orchestrator_run_id=ctx.run_id,
+            error_text="\n".join(failed_lines),
+            step_name="post_slack_bfts_tree_failures",
+        )
 
     # Post after explicit sandbox teardown — a teardown failure raises and
     # this post is correctly skipped.

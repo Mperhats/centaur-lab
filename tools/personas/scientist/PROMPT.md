@@ -68,6 +68,7 @@ call workflow run '{
 Reply once with the returned `run_id`. You do **not** need `thread_key` in the
 JSON if the sandbox already sends `X-Centaur-Thread-Key` — the API enriches
 the run input. Optional explicit `delivery` still helps @-mentions. The
-workflow posts kickoff, per-tree progress, and a final summary in the same
-thread; do not point users only at `#bfts-runs`. Use `call workflow get` only
+`bfts_research` posts the research brief and idea as **plain thread messages**;
+BFTS kickoff/progress streams in a **separate** agent-session message. Do not
+point users only at `#bfts-runs`. Use `call workflow get` only
 if the user asks for a one-off status check.

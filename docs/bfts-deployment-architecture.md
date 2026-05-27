@@ -449,7 +449,9 @@ api:
   extraEnv:
     BFTS_DRAFT_MODEL: claude-sonnet-4-20250514
     BFTS_LLM_API_KEY_SECRET: ANTHROPIC_API_KEY
-    WORKFLOW_WORKER_CONCURRENCY: "16"
+    # Prefer 4–6 on small clusters; 16 starves short workflows (ideation) behind
+    # long bfts_expand_one LLM steps. See "Cluster tuning" below.
+    WORKFLOW_WORKER_CONCURRENCY: "4"
     BFTS_EXECUTOR_IMAGE: ghcr.io/mperhats/centaur-lab/bfts-executor:sha-…
 
 agentSandbox:
@@ -531,20 +533,63 @@ kubectl exec -n centaur-system deploy/centaur-centaur-api -- \
 
 ---
 
-## Slack: agent streaming vs workflow posts
+## Slack: `bfts_research` thread layout
 
-Centaur uses **two different Slack surfaces** for BFTS-related work:
+Three surfaces in one Slack thread (do not mix them):
 
-| Surface | Who writes | API | UX |
-|---------|------------|-----|-----|
-| **Agent turn** (`slack_thread_turn`) | Sandbox agent during your chat | Slackbot **agent-sessions** + native stream chunks (`markdown_text`, `task_update`, `plan_update`) | Collapsible plan/tasks, streamed markdown (what you see as "base · claude-opus-4-7" live text) |
-| **BFTS workflows** (`bfts_root`, `ideation`, …) | Workflow checkpoints | `slack.send_message` via `tools/productivity/slack` (`chat.postMessage`) | **Separate plain-text messages** in the thread (`BFTS run \`wfr_…\` started`, `*BFTS progress*`, completion @-mention) |
+| # | Surface | Who writes | API | Content |
+|---|---------|----------|-----|---------|
+| 1 | **Agent turn** | Sandbox agent (`slack_thread_turn`) | Slackbot agent-session on the **user message** | Stream-of-consciousness + tools; **one** short kickoff line with `wfr_…` |
+| 2 | **Plain posts** | `bfts_research` workflow | `slack.send_message` (`post_thread_message`) | Full **research brief** markdown, then **research idea** after `ideation` |
+| 3 | **BFTS stream** | `bfts_root` via `slack_stream_session_id` | Slackbot agent-session (second message) | Tree kickoff + live `task_update` progress until completion |
 
-Workflow posts use `no_attribution: true` and explicit checkpoint names (`post_slack_kickoff`, `post_slack_progress_N`) so replay does not collide. They do **not** call the streaming UI — there is no overlay hook from `workflow_engine` into `slackbot` agent-sessions today.
+Implementation: `workflows/bfts_research.py` + `packages/bfts_sdk/slack_stream.py`. The brief is **not** embedded in an agent-session stream anymore.
 
-**Operator expectation:** the agent should post **one short line** with `bfts_run_id`, then let the workflow own kickoff/progress/completion. Duplicate paragraphs ("BFTS run started…" from the agent plus `@Mike BFTS run wfr_…` from `bfts_root`) are normal when the agent narrates instead of using `bfts_research` and staying quiet.
+**Operator expectation:** the agent posts **once** (`Started bfts_research \`wfr_…\`. Brief and idea post in this thread; BFTS progress streams separately.`), then stays quiet. Duplicate kickoff lines in the agent stream are a known Codex streaming dedupe issue upstream in slackbot.
 
-**Streaming UI for long BFTS runs (future):** options include (a) slackbot subscribing to workflow run status and emitting `task_update` chunks on the open agent session, (b) `POST /workflows/events` + `wait_for_event` from a small bridge workflow, or (c) agent-side `task_update` while polling — none of these are wired for BFTS yet. Until then, use workflow thread posts + `call workflow get <run_id>` on demand.
+Legacy `bfts_root` without `bfts_research` may still use plain `send_message` for kickoff when no stream session is passed.
+
+### Why errors did not “bubble up” to Slack (before overlay fix)
+
+| Failure | Where it lived | Why Slack was silent |
+|---------|----------------|----------------------|
+| `ideation` / brief / `bfts_research` handler exception | `workflow_runs.error_text` | Handler raised → DB only; no `send_message` |
+| `ideation` child `status=failed` (e.g. 502) | Child run row | Parent only checked for missing `idea`, not `error_text` |
+| `bfts_root` / `bfts_expand_one` 502 | Child/grandchild runs | `bfts_research` **returns after starting** `bfts_root` — orchestrator is already `completed` |
+| Stuck `waiting` (worker starvation) | Postgres | Not a failure — no terminal status, no notification |
+
+**Overlay behavior (≥ this change):** `notify_thread_failure` / `notify_run_failure` in
+`packages/bfts_sdk/slack_stream.py` post @-mentions + fenced `error_text` to the
+thread. `bfts_research` notifies on brief/ideation/handler failures.
+`bfts_root` notifies on handler failure (closes BFTS stream) and posts a
+summary when individual trees fail. Partial tree failures still complete
+`bfts_root` — check the thread for “BFTS trees reported failures”.
+
+---
+
+## Cluster tuning (502s, stuck ideation, worker starvation)
+
+Symptoms on a busy dev cluster:
+
+- `bfts_expand_one` **`LLM call failed: 502 bad gateway`** — `centaur-api-proxy` **`timeout awaiting response headers` at ~30s**, not Anthropic HTTP 502 and not executor OOM.
+- `ideation` / `bfts_research` **`waiting` for minutes** with `available_at` in the past — all `WORKFLOW_WORKER_CONCURRENCY` slots busy on long `bfts_expand_one` runs.
+
+**Recommended `api.extraEnv` (centaur-lab-infra `centaur.yaml`):**
+
+```yaml
+api:
+  extraEnv:
+    WORKFLOW_WORKER_CONCURRENCY: "4"   # not 16 on laptop/single-node clusters
+    # BFTS parallelism (also defaults in packages/bfts_sdk/research.py):
+    # num_drafts=2, num_workers=1, num_seeds=3 via bfts_research / build_bfts_run_input
+```
+
+**Mitigations (in order):**
+
+1. Lower `WORKFLOW_WORKER_CONCURRENCY` so short workflows (`ideation`, `save_papers`) get slots.
+2. Avoid many overlapping `bfts_root` runs on one API pod.
+3. Raise iron-proxy upstream timeout above 30s in the Centaur chart (infra-owned; overlay cannot fix from centaur-lab alone).
+4. `packages/bfts_sdk/llm.py` retries 502 but cannot outrun a hard proxy cap.
 
 ---
 
