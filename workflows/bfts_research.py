@@ -40,6 +40,17 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         raise ValueError("topic cannot be empty")
 
     ideation_input: dict[str, Any] = {"topic": inp.topic.strip()}
+    if inp.thread_key:
+        ideation_input["thread_key"] = inp.thread_key
+    if inp.delivery is not None:
+        ideation_input["delivery"] = inp.delivery
+    for key, val in (
+        ("num_seeds", inp.num_seeds),
+        ("num_drafts", inp.num_drafts),
+        ("num_workers", inp.num_workers),
+    ):
+        if val is not None:
+            ideation_input[key] = val
     if inp.seed_paper_limit is not None:
         ideation_input["seed_paper_limit"] = inp.seed_paper_limit
     if inp.critic_retries:

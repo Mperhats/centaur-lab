@@ -531,6 +531,23 @@ kubectl exec -n centaur-system deploy/centaur-centaur-api -- \
 
 ---
 
+## Slack: agent streaming vs workflow posts
+
+Centaur uses **two different Slack surfaces** for BFTS-related work:
+
+| Surface | Who writes | API | UX |
+|---------|------------|-----|-----|
+| **Agent turn** (`slack_thread_turn`) | Sandbox agent during your chat | Slackbot **agent-sessions** + native stream chunks (`markdown_text`, `task_update`, `plan_update`) | Collapsible plan/tasks, streamed markdown (what you see as "base · claude-opus-4-7" live text) |
+| **BFTS workflows** (`bfts_root`, `ideation`, …) | Workflow checkpoints | `slack.send_message` via `tools/productivity/slack` (`chat.postMessage`) | **Separate plain-text messages** in the thread (`BFTS run \`wfr_…\` started`, `*BFTS progress*`, completion @-mention) |
+
+Workflow posts use `no_attribution: true` and explicit checkpoint names (`post_slack_kickoff`, `post_slack_progress_N`) so replay does not collide. They do **not** call the streaming UI — there is no overlay hook from `workflow_engine` into `slackbot` agent-sessions today.
+
+**Operator expectation:** the agent should post **one short line** with `bfts_run_id`, then let the workflow own kickoff/progress/completion. Duplicate paragraphs ("BFTS run started…" from the agent plus `@Mike BFTS run wfr_…` from `bfts_root`) are normal when the agent narrates instead of using `bfts_research` and staying quiet.
+
+**Streaming UI for long BFTS runs (future):** options include (a) slackbot subscribing to workflow run status and emitting `task_update` chunks on the open agent session, (b) `POST /workflows/events` + `wait_for_event` from a small bridge workflow, or (c) agent-side `task_update` while polling — none of these are wired for BFTS yet. Until then, use workflow thread posts + `call workflow get <run_id>` on demand.
+
+---
+
 ## BFTS run flow (which repo owns what)
 
 ```mermaid
