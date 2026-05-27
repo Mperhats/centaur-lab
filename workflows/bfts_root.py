@@ -557,7 +557,6 @@ async def _wait_for_tree_with_slack_progress(
     tree_index = int(child["tree_index"])
     child_run_id = str(child["run_id"])
     poll = 0
-    last_snapshot_text = ""
 
     while True:
         child_row = await ctx.step(
@@ -579,17 +578,28 @@ async def _wait_for_tree_with_slack_progress(
             tree_run_id=child_run_id,
             snapshot=TreeSearchSnapshot(**snapshot),
         )
-        if stream and snapshot_text != last_snapshot_text:
+        if stream:
+            # Post every poll cycle, even when the snapshot hasn't changed
+            # since the previous one. A single node expansion takes ~2 min
+            # of LLM + sandbox work and the snapshot (node_count, step,
+            # good/buggy counts) often doesn't change for 5+ minutes —
+            # long enough for Slack to auto-close the agent-session
+            # message and start returning ``message_not_found`` 502s on
+            # the next ``session_step`` call (root-caused on 2026-05-27
+            # against session ``01KSNBG7WDX2GMDXPBA87GSAE8``). The
+            # ``details`` line includes the poll counter so the payload
+            # is always distinct, defeating any slackbot/Slack-side
+            # no-op-on-identical-content optimization.
             await post_step(
                 ctx,
                 stream,
                 step_id=f"tree_{tree_index}",
                 title=f"Tree {tree_index} search",
                 status="in_progress",
+                details=f"poll {poll} · {child_run_id}",
                 output=snapshot_text,
                 step_name=f"stream_tree_progress_{tree_index}_{poll}",
             )
-            last_snapshot_text = snapshot_text
         elif delivery and not stream and poll == 0:
             await post_thread_message(
                 ctx,
