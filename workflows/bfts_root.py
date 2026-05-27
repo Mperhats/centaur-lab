@@ -20,6 +20,11 @@ if TYPE_CHECKING:
 
 from packages.bfts_sdk.config import resolve_llm_settings, resolve_search_config
 from packages.bfts_sdk.schema import assert_bfts_schema_present
+from packages.bfts_sdk.slack_delivery import (
+    format_progress_message,
+    resolve_slack_delivery,
+    slack_mention_prefix,
+)
 
 WORKFLOW_NAME = "bfts_root"
 # Auto-copied into schedule metadata by the workflow loader (see
@@ -81,6 +86,45 @@ _DEFAULT_SMOKE_IDEA: dict[str, Any] = {
 }
 
 
+def _reject_default_idea(
+    inp: Input,
+    run_input: dict[str, Any],
+    *,
+    idea_was_defaulted: bool,
+) -> bool:
+    """Whether to abort before provisioning sandboxes."""
+    if not idea_was_defaulted or inp.allow_smoke_idea:
+        return False
+    if resolve_slack_delivery(
+        explicit_delivery=inp.delivery,
+        run_input=run_input,
+        explicit_thread_key=inp.thread_key,
+    ):
+        return True
+    thread_key = inp.thread_key or run_input.get("thread_key")
+    return bool(thread_key)
+
+
+async def _enrich_slack_delivery_recipient(
+    ctx: WorkflowContext,
+    delivery: dict[str, Any] | None,
+    *,
+    thread_key: str | None,
+) -> dict[str, Any] | None:
+    """Fill ``recipient_user_id`` from the Slack thread when omitted."""
+    if not delivery or delivery.get("recipient_user_id") or not thread_key:
+        return delivery
+    from api.agent import _get_latest_thread_user_id
+
+    user_id = await ctx.step(
+        "resolve_slack_recipient",
+        lambda: _get_latest_thread_user_id(thread_key),
+    )
+    if user_id:
+        return {**delivery, "recipient_user_id": str(user_id)}
+    return delivery
+
+
 def _resolve_idea(idea: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     """Return ``(resolved_idea, was_defaulted)``.
 
@@ -102,6 +146,12 @@ def _resolve_idea(idea: dict[str, Any]) -> tuple[dict[str, Any], bool]:
 @dataclass
 class Input:
     idea: dict[str, Any] = field(default_factory=dict)
+    # Optional Slack delivery for the thread that triggered the run. When
+    # set (or derivable from ``thread_key``), ``bfts_root`` posts kickoff
+    # and completion summaries in that thread and @-mentions
+    # ``recipient_user_id``. Operators still get the ``#bfts-runs`` post.
+    delivery: dict[str, Any] | None = None
+    thread_key: str | None = None
     # Search-policy fields default to None so the Phase 4c.4 resolver
     # chain (Input → bfts_hyperparams DB row → BFTS_* env → module
     # default) actually reaches the lower tiers; non-None dataclass
@@ -128,6 +178,10 @@ class Input:
     # resolved value is persisted into bfts_runs.config_json by
     # bfts_tree so replay is deterministic.
     metric_reducer: str | None = None
+    # When True, allow the baked-in toy idea if ``idea`` is empty. Default
+    # False so Slack/API runs without an idea fail fast instead of burning
+    # hours on smoke. Operators pass True for ``just bfts-toy-run`` only.
+    allow_smoke_idea: bool = False
 
 
 def _sandbox_id(*, run_id: str, tree_idx: int) -> str:
@@ -170,6 +224,13 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     # answerable. Slack-triggered ``bfts_root`` runs that ship ``idea={}``
     # are the canonical case this catches.
     idea, idea_was_defaulted = _resolve_idea(inp.idea)
+    if _reject_default_idea(inp, ctx.run_input, idea_was_defaulted=idea_was_defaulted):
+        missing = [f for f in _REQUIRED_IDEA_FIELDS if not inp.idea.get(f)]
+        raise ValueError(
+            "bfts_root requires a populated idea (Name, Title, Short Hypothesis, "
+            "Experiments). Run the ideation workflow on a research topic first, or "
+            f"pass a full idea dict. Missing fields: {missing}"
+        )
     if idea_was_defaulted:
         missing = [f for f in _REQUIRED_IDEA_FIELDS if not inp.idea.get(f)]
         ctx.log(
@@ -209,14 +270,32 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         sources=asdict(sources),
     )
 
-    # Every Sandbox we successfully create lands here BEFORE start_workflow
-    # is attempted, so a start_workflow failure (which leaves the CR behind)
-    # is still cleaned up by the finally block. `children` separately holds
-    # only fully-started trees that the wait loop iterates.
+    slack_delivery = resolve_slack_delivery(
+        explicit_delivery=inp.delivery,
+        run_input=ctx.run_input,
+        explicit_thread_key=inp.thread_key,
+    )
+    slack_delivery = await _enrich_slack_delivery_recipient(
+        ctx,
+        slack_delivery,
+        thread_key=inp.thread_key or ctx.run_input.get("thread_key"),
+    )
+    await _post_slack_kickoff(
+        ctx,
+        run_id=ctx.run_id,
+        idea=idea,
+        num_drafts=search.num_drafts,
+        delivery=slack_delivery,
+    )
+
+    # Every Sandbox we successfully create lands in ``sandboxes_to_clean``
+    # before ``start_workflow``. Do **not** wrap the wait loop in
+    # ``try/finally`` — Centaur replays ``finally`` when the handler
+    # suspends at the first ``wait_for_workflow``, which deletes pods
+    # while child trees are still running (see run ``wfr_33d0f01a091f4681``).
     sandboxes_to_clean: list[tuple[int, str]] = []
     children: list[dict[str, Any]] = []
     results: list[dict[str, Any]] = []
-    body_succeeded = False
 
     try:
         for i in range(search.num_drafts):
@@ -259,53 +338,35 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             children.append(
                 {"run_id": child["run_id"], "tree_index": i, "sandbox_id": sandbox_id}
             )
+    except Exception:
+        await _teardown_sandboxes(ctx, sandboxes_to_clean, re_raise_failures=False)
+        raise
 
-        for child in children:
-            res = await ctx.wait_for_workflow(
-                f"wait_tree_{child['tree_index']}", run_id=child["run_id"]
-            )
-            results.append(res)
+    await _post_slack_progress(
+        ctx,
+        run_id=ctx.run_id,
+        delivery=slack_delivery,
+        phase="launched",
+        children=children,
+        child_results=[],
+    )
 
-        body_succeeded = True
-    finally:
-        # Best-effort teardown of every Sandbox we provisioned. Each
-        # stop_sandbox is its own ctx.step so the engine checkpoints it,
-        # but a stuck CR (e.g. finalizer still running) must not block the
-        # other stops. We collect per-tree errors and surface them after
-        # the loop: aggregated re-raise on the happy path (so the failure
-        # is visible), structured log only when the body already raised
-        # (so the root-cause exception keeps its propagation slot).
-        # PVC follows owner refs (Spec correction #12 + agent-sandbox
-        # `shutdownPolicy: "Retain"` is overridden by an explicit delete).
-        teardown_errors: list[tuple[int, BaseException]] = []
-        for tree_index, sandbox_id in sandboxes_to_clean:
-            try:
-                await ctx.step(
-                    f"stop_sandbox_{tree_index}",
-                    lambda sid=sandbox_id: ctx.tools.bfts_executor.stop_sandbox(
-                        sandbox_id=sid
-                    ),
-                )
-            except Exception as exc:
-                teardown_errors.append((tree_index, exc))
+    for child in children:
+        res = await ctx.wait_for_workflow(
+            f"wait_tree_{child['tree_index']}", run_id=child["run_id"]
+        )
+        results.append(res)
+        await _post_slack_progress(
+            ctx,
+            run_id=ctx.run_id,
+            delivery=slack_delivery,
+            phase="progress",
+            children=children,
+            child_results=results,
+        )
 
-        if teardown_errors:
-            ctx.log(
-                "bfts_root_teardown_errors",
-                run_id=ctx.run_id,
-                errors=[
-                    {"tree_index": idx, "error": repr(exc)}
-                    for idx, exc in teardown_errors
-                ],
-            )
-            if body_succeeded:
-                raise RuntimeError(
-                    "bfts_root teardown failed for "
-                    + ", ".join(
-                        f"tree_index={idx}: {exc!r}"
-                        for idx, exc in teardown_errors
-                    )
-                )
+    # Explicit teardown only after every ``wait_tree_*`` completes.
+    await _teardown_sandboxes(ctx, sandboxes_to_clean, re_raise_failures=True)
 
     # Richer verification surface for Slack-driven runs (the sandbox token
     # cannot run direct DB queries via ``/agent/query``, so the workflow
@@ -346,13 +407,15 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
     # original error. Posting *inside* the finally would compete with the
     # re-raise path and either swallow the teardown error (if Slack
     # succeeds) or mask it behind a Slack error (if Slack fails).
+    summary_text = _format_run_summary(
+        run_id=ctx.run_id,
+        idea=idea,
+        tree_summaries=tree_summaries,
+    )
     await _post_slack_summary(
         ctx,
-        _format_run_summary(
-            run_id=ctx.run_id,
-            idea=idea,
-            tree_summaries=tree_summaries,
-        ),
+        summary_text,
+        delivery=slack_delivery,
     )
 
     return {
@@ -390,17 +453,178 @@ def _format_run_summary(
     return prefix + label
 
 
-async def _post_slack_summary(ctx: WorkflowContext, text: str) -> None:
-    """Best-effort one-line summary to ``#bfts-runs``.
+async def _post_slack_progress(
+    ctx: WorkflowContext,
+    *,
+    run_id: str,
+    delivery: dict[str, Any] | None,
+    phase: str,
+    children: list[dict[str, Any]],
+    child_results: list[dict[str, Any]],
+) -> None:
+    """Periodic progress posts to the requester's Slack thread only."""
+    if not delivery:
+        return
+    text = format_progress_message(
+        run_id=run_id,
+        phase=phase,
+        children=children,
+        child_results=child_results,
+    )
+    step_name = (
+        "post_slack_progress_launched"
+        if phase == "launched"
+        else f"post_slack_progress_{len(child_results)}"
+    )
+    await _post_slack_message(
+        ctx,
+        channel=str(delivery["channel"]),
+        text=text,
+        thread_ts=delivery.get("thread_ts"),
+        step_name=step_name,
+        log_event="bfts_root_slack_progress_failed",
+    )
+
+
+async def _teardown_sandboxes(
+    ctx: WorkflowContext,
+    sandboxes_to_clean: list[tuple[int, str]],
+    *,
+    re_raise_failures: bool,
+) -> None:
+    """Stop every BFTS executor Sandbox we provisioned.
+
+    Must run only after all child ``bfts_tree`` workflows finish — never
+    from a ``try/finally`` around ``wait_for_workflow`` (the workflow engine
+    executes ``finally`` on suspend/replay, not on normal completion).
+    """
+    teardown_errors: list[tuple[int, BaseException]] = []
+    for tree_index, sandbox_id in sandboxes_to_clean:
+        try:
+            await ctx.step(
+                f"stop_sandbox_{tree_index}",
+                lambda sid=sandbox_id: ctx.tools.bfts_executor.stop_sandbox(
+                    sandbox_id=sid
+                ),
+            )
+        except Exception as exc:
+            teardown_errors.append((tree_index, exc))
+
+    if teardown_errors:
+        ctx.log(
+            "bfts_root_teardown_errors",
+            run_id=ctx.run_id,
+            errors=[
+                {"tree_index": idx, "error": repr(exc)}
+                for idx, exc in teardown_errors
+            ],
+        )
+        if re_raise_failures:
+            raise RuntimeError(
+                "bfts_root teardown failed for "
+                + ", ".join(
+                    f"tree_index={idx}: {exc!r}"
+                    for idx, exc in teardown_errors
+                )
+            )
+
+
+async def _post_slack_kickoff(
+    ctx: WorkflowContext,
+    *,
+    run_id: str,
+    idea: dict[str, Any],
+    num_drafts: int,
+    delivery: dict[str, Any] | None,
+) -> None:
+    """Best-effort kickoff post to the requester's Slack thread."""
+    if not delivery:
+        return
+    label = idea.get("Title") or idea.get("Name") or "(unnamed)"
+    prefix = slack_mention_prefix(delivery)
+    text = (
+        f"{prefix}BFTS run `{run_id}` started "
+        f"({num_drafts} tree{'s' if num_drafts != 1 else ''}). Idea: {label}"
+    )
+    await _post_slack_message(
+        ctx,
+        channel=str(delivery["channel"]),
+        text=text,
+        thread_ts=delivery.get("thread_ts"),
+        step_name="post_slack_kickoff",
+        log_event="bfts_root_slack_kickoff_failed",
+    )
+
+
+async def _post_slack_summary(
+    ctx: WorkflowContext,
+    text: str,
+    *,
+    delivery: dict[str, Any] | None,
+) -> None:
+    """Best-effort completion summary to the requester thread and ``#bfts-runs``.
 
     Slack is auxiliary — a failure to post must not fail the workflow.
-    Skips entirely when ``SLACK_CHANNEL`` is empty so an operator can
-    silence the post by clearing the constant (rather than commenting
-    out the call site).
     """
+    if delivery:
+        thread_text = f"{slack_mention_prefix(delivery)}{text}"
+        await _post_slack_message(
+            ctx,
+            channel=str(delivery["channel"]),
+            text=thread_text,
+            thread_ts=delivery.get("thread_ts"),
+            step_name="post_slack_completion_thread",
+            log_event="bfts_root_slack_thread_post_failed",
+        )
     if not SLACK_CHANNEL:
         return
+    await _post_slack_message(
+        ctx,
+        channel=SLACK_CHANNEL,
+        text=text,
+        thread_ts=None,
+        step_name="post_slack_bfts_runs",
+        log_event="bfts_root_slack_post_failed",
+    )
+
+
+async def _post_slack_message(
+    ctx: WorkflowContext,
+    *,
+    channel: str,
+    text: str,
+    thread_ts: str | None,
+    step_name: str,
+    log_event: str,
+) -> None:
+    """Post via the slack tool with a caller-chosen checkpoint name.
+
+    ``ctx.post_to_slack`` keys steps only by channel, so kickoff and
+    completion to the same thread would collide; we use explicit names.
+    """
+    from api.app import get_tool_manager
+
+    async def _post() -> dict[str, Any]:
+        tm = get_tool_manager()
+        args: dict[str, Any] = {
+            "channel": channel,
+            "text": text,
+            "no_attribution": True,
+        }
+        if thread_ts:
+            args["thread_ts"] = thread_ts
+        raw = await tm.call_tool("slack", "send_message", args)
+        import json as _json
+
+        try:
+            result = _json.loads(raw) if isinstance(raw, str) else raw
+        except (ValueError, TypeError):
+            result = {"raw": raw}
+        if isinstance(result, dict) and result.get("error"):
+            raise RuntimeError(str(result["error"]))
+        return result
+
     try:
-        await ctx.post_to_slack(SLACK_CHANNEL, text)
+        await ctx.step(step_name, _post, step_kind="slack_post")
     except Exception as exc:
-        ctx.log("bfts_root_slack_post_failed", error=repr(exc))
+        ctx.log(log_event, channel=channel, error=repr(exc))

@@ -15,10 +15,12 @@ that ``bfts_root.Input.idea`` consumes directly. Port of Sakana's
 3. Optionally re-invoke the LLM ``critic_retries`` times for refinement;
    each retry sees the prior draft and a "sharpen the hypothesis" prompt.
 
-Returned envelope is ``{"idea": <dict>, "seed_papers": [<paperId>, ...]}``
-so a downstream ``bfts_root`` POST can pass ``run_input["idea"]`` straight
-through and the citation step (Phase 4d.3) can key its lookups on the
-``paperId`` strings.
+Returned envelope is ``{"idea": <dict>, "seed_papers": [<paperId>, ...],
+"papers_persisted": {...}}`` so a downstream ``bfts_root`` POST can pass
+``run_input["idea"]`` straight through. Seed papers from the S2 search are
+**always** persisted via a child ``save_papers`` run (brief + paper rows in
+``company_context_documents``) when the search returns any ``paperId``s —
+not optional for the caller.
 
 ``SCHEDULE`` is the empty dict: ideation is user-triggered via a manual
 POST to ``/workflows/runs``; a populated SCHEDULE would burn LLM budget
@@ -274,6 +276,45 @@ async def _critique(
     )
 
 
+def _child_workflow_output(result: dict[str, Any] | None) -> dict[str, Any]:
+    """Extract ``output_json`` from ``ctx.wait_for_workflow`` response."""
+    if not isinstance(result, dict):
+        return {}
+    output = result.get("output_json")
+    return output if isinstance(output, dict) else {}
+
+
+async def _persist_seed_papers(
+    ctx: WorkflowContext,
+    *,
+    topic: str,
+    paper_ids: list[str],
+) -> dict[str, Any]:
+    """Run ``save_papers`` as a child so seed literature is always in the DB."""
+    child = await ctx.start_workflow(
+        "persist_seed_papers",
+        workflow_name="save_papers",
+        run_input={"paper_ids": paper_ids, "query": topic},
+        trigger_key=f"{ctx.run_id}:seed_papers",
+        eager_start=True,
+    )
+    result = await ctx.wait_for_workflow(
+        "wait_persist_seed_papers",
+        run_id=child["run_id"],
+    )
+    output = _child_workflow_output(result)
+    ctx.log(
+        "ideation_seed_papers_persisted",
+        topic=topic,
+        paper_count=len(paper_ids),
+        brief_document_id=output.get("brief_document_id"),
+        papers_inserted=output.get("papers_inserted"),
+        papers_updated=output.get("papers_updated"),
+        papers_failed=output.get("papers_failed"),
+    )
+    return output
+
+
 def _seed_paper_ids(papers: list[dict[str, Any]]) -> list[str]:
     """Extract the S2 paperIds in result order.
 
@@ -310,11 +351,23 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         ),
     )
 
+    seed_paper_ids = _seed_paper_ids(papers)
+
     # Silent-degradation case: S2 outage or no-match query. The workflow
     # still proceeds (the LLM can produce something less well-grounded),
     # but a log surfaces it for operators inspecting low-quality runs.
-    if not papers:
+    if not seed_paper_ids:
         ctx.log("ideation_no_seed_papers", topic=topic)
+        papers_persisted: dict[str, Any] = {
+            "status": "skipped",
+            "reason": "no_seed_papers",
+        }
+    else:
+        papers_persisted = await _persist_seed_papers(
+            ctx,
+            topic=topic,
+            paper_ids=seed_paper_ids,
+        )
 
     idea = await ctx.step(
         "synthesize_idea",
@@ -352,8 +405,6 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         )
         _validate_idea(idea)
 
-    seed_paper_ids = _seed_paper_ids(papers)
-
     ctx.log(
         "ideation_completed",
         topic=topic,
@@ -361,4 +412,8 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
         draft_model=llm.draft_model,
         critic_retries=critic_retries,
     )
-    return {"idea": idea, "seed_papers": seed_paper_ids}
+    return {
+        "idea": idea,
+        "seed_papers": seed_paper_ids,
+        "papers_persisted": papers_persisted,
+    }
