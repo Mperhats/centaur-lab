@@ -49,14 +49,9 @@ from tools.bfts_runner.slack.stream import (
 )
 
 WORKFLOW_NAME = "bfts_root"
-# Auto-copied into schedule metadata by the workflow loader (see
-# ``.centaur/services/api/api/workflow_engine.py:1538-1541``); ``bfts_root``
-# has no ``SCHEDULE`` so the constant only gates the post inside
-# ``handler``. Empty string ⇒ skip the post entirely.
-SLACK_CHANNEL = "bfts-runs"
 
 # Slack-summary cap. The upstream slack tool will happily POST a 4000-char
-# message, but operator-readable means one line on a phone — truncate the
+# message, but thread-readable means one line on a phone — truncate the
 # idea label past this and append an ellipsis so the run_id + success
 # ratio remain visible.
 _SLACK_SUMMARY_MAX_LEN = 200
@@ -153,7 +148,9 @@ class Input:
     # Optional Slack delivery for the thread that triggered the run. When
     # set (or derivable from ``thread_key``), ``bfts_root`` posts kickoff
     # and completion summaries in that thread and @-mentions
-    # ``recipient_user_id``. Operators still get the ``#bfts-runs`` post.
+    # ``recipient_user_id``. Without ``delivery`` the run produces no Slack
+    # output (the BFTS stream session and thread posts are the only Slack
+    # surface — there is no separate ops-channel cross-post).
     delivery: dict[str, Any] | None = None
     thread_key: str | None = None
     # Search-policy fields default to None so the Phase 4c.4 resolver
@@ -757,7 +754,13 @@ async def _post_slack_summary(
     delivery: dict[str, Any] | None,
     stream: SlackStreamTarget | None,
 ) -> None:
-    """Completion via stream and/or plain thread + ``#bfts-runs``."""
+    """Post a completion summary to the BFTS stream or the originating thread.
+
+    The summary is thread-scoped: it goes into the active agent-session
+    stream when one is open, otherwise into the originating Slack thread
+    via ``send_message``. Runs without ``delivery`` (e.g. ``just
+    bfts-toy-run``) produce no Slack output.
+    """
     if stream:
         await post_step(
             ctx,
@@ -776,7 +779,8 @@ async def _post_slack_summary(
             step_name="stream_bfts_completion_md",
         )
         await close_session(ctx, stream, step_name="stream_bfts_done")
-    elif delivery:
+        return
+    if delivery:
         thread_text = f"{slack_mention_prefix(delivery)}{text}"
         await post_thread_message(
             ctx,
@@ -785,9 +789,3 @@ async def _post_slack_summary(
             step_name="post_slack_completion_thread",
             log_event="bfts_root_slack_thread_post_failed",
         )
-    if not SLACK_CHANNEL:
-        return
-    try:
-        await ctx.post_to_slack(SLACK_CHANNEL, text)
-    except Exception as exc:
-        ctx.log("bfts_root_slack_post_failed", error=repr(exc))
