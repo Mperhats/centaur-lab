@@ -5,8 +5,24 @@ from __future__ import annotations
 from packages.bfts_sdk.slack_delivery import (
     enrich_run_input_from_headers,
     format_progress_message,
+    format_search_config_line,
     format_tree_progress_line,
 )
+
+
+def test_format_search_config_line_shows_sources() -> None:
+    line = format_search_config_line(
+        num_drafts=4,
+        num_seeds=2,
+        num_workers=2,
+        sources={
+            "num_drafts": "default",
+            "num_seeds": "env",
+            "num_workers": "default",
+        },
+    )
+    assert "4 trees" in line
+    assert "num_seeds, env" in line
 
 
 def test_enrich_run_input_from_header_thread_key() -> None:
