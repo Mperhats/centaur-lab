@@ -2,11 +2,11 @@
 
 Slack-driven science entrypoint:
 
-1. **Agent turn** (``slack_thread_turn``): live stream-of-consciousness only —
-   the sandbox agent posts one short kickoff line; workflows do not open a
-   competing agent-session stream for research.
-2. **Plain thread posts**: full ``research_brief`` markdown, then the
-   structured research idea after the ``ideation`` child completes.
+1. **Agent turn** (``slack_thread_turn``): reply once with the ``run_id`` only
+   — do not paste kickoff or brief text (avoids duplicate stream chunks).
+2. **Plain thread posts**: compact ``research_brief`` as the first thread
+   message (run id + ``compact_markdown``), then the research idea after
+   ``ideation`` completes.
 3. **BFTS stream** (one agent-session message): tree-search kickoff and live
    progress until completion (via ``slack_stream_session_id`` on ``bfts_root``).
 
@@ -73,7 +73,7 @@ def _slack_metadata(ctx: WorkflowContext) -> dict[str, Any]:
 def _brief_markdown_for_slack(brief_result: dict[str, Any]) -> str:
     if brief_result.get("status") == "completed":
         return str(
-            brief_result.get("markdown") or brief_result.get("compact_markdown") or ""
+            brief_result.get("compact_markdown") or brief_result.get("markdown") or ""
         ).strip()
     return ""
 
@@ -132,6 +132,7 @@ async def _run_research_pipeline(inp: Input, ctx: WorkflowContext) -> dict[str, 
                 text=format_research_brief_thread_message(
                     topic=topic,
                     markdown=brief_markdown,
+                    run_id=ctx.run_id,
                 ),
                 step_name="post_slack_research_brief",
                 log_event="bfts_research_slack_brief_failed",
@@ -297,6 +298,10 @@ async def _run_research_pipeline(inp: Input, ctx: WorkflowContext) -> dict[str, 
             "slack_streaming": bool(slack_stream_session_id),
         }
     except Exception as exc:
+        from api.workflow_engine import SuspendWorkflow
+
+        if isinstance(exc, SuspendWorkflow):
+            raise
         await notify_run_failure(
             ctx,
             delivery=delivery,

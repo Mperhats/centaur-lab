@@ -46,13 +46,15 @@ Fallback (injects thread into JSON body):
 
 ### Agent reply contract (no redundancy)
 
-After start, reply **once** with a single short line, for example:
+After start, reply **once** with only the run id, for example:
 
-`Started bfts_research \`wfr_…\`. Brief and idea post in this thread; BFTS progress streams separately.`
+`Queued \`wfr_…\` — see this thread for the literature brief.`
 
-**Do not** repeat the same announcement twice in one message. **Do not** narrate
-kickoff/progress — workflows stream that. **Do not** post parallel Slack
-kickoff text.
+**Do not** post kickoff or brief copy in the agent stream (duplicate + ugly
+formatting). The workflow posts the **compact research brief** as the first
+thread message, then the idea, then BFTS in a separate stream. **Do not**
+repeat the line twice (streaming dedupe still happens upstream if you paste
+long kickoff text).
 
 After start, run **one** `call workflow get <run_id>` when the user asks for
 status or you need `bfts_run_id` / the idea (~2–5 minutes). Report

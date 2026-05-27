@@ -12,7 +12,24 @@ from packages.bfts_sdk.slack_stream import (
 )
 
 
-def test_format_research_brief_thread_message() -> None:
+def test_format_research_brief_thread_message_compact() -> None:
+    compact = (
+        "**Research brief** — active inference\n"
+        "_3 of 3 top hits_\n\n"
+        "1. **Paper A** (2024) — One-liner."
+    )
+    msg = format_research_brief_thread_message(
+        topic="active inference",
+        markdown=compact,
+        run_id="wfr_718932ca5ff74a67",
+    )
+    assert msg.count("**Research brief**") == 1
+    assert "wfr_718932ca5ff74a67" in msg
+    assert "Paper A" in msg
+    assert "# Brief" not in msg
+
+
+def test_format_research_brief_thread_message_legacy_markdown() -> None:
     msg = format_research_brief_thread_message(
         topic="active inference",
         markdown="# Brief\n\nBody.",

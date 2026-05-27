@@ -308,6 +308,10 @@ async def handler(inp: Input, ctx: WorkflowContext) -> dict[str, Any]:
             stream=stream,
         )
     except Exception as exc:
+        from api.workflow_engine import SuspendWorkflow
+
+        if isinstance(exc, SuspendWorkflow):
+            raise
         await notify_run_failure(
             ctx,
             delivery=slack_delivery,
