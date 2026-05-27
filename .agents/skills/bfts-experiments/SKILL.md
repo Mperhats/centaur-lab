@@ -8,11 +8,17 @@ description: "Use when the user asks to kick off, run, or verify a BFTS / bfts_r
 BFTS runs are **long** (often hours). They need a **real research idea** before
 tree search — not hyperparameter knobs alone.
 
-## Default path: `bfts_research` (one workflow)
+## Default path: `bfts_research` (one workflow, Slack streaming)
 
-Use **`bfts_research`** for Slack-driven science. It runs **`ideation`** (persist
-seed papers) then starts **`bfts_root`** with explicit research defaults
-(`num_seeds=3`, `num_drafts=2`, `num_workers=1`) — **not** Helm env alone.
+Use **`bfts_research`** for Slack-driven science. When `SLACKBOT_URL` is
+configured it opens **two streamed Slack messages** in the thread:
+
+1. **Ideation stream** — research brief (markdown) + synthesized idea
+2. **BFTS stream** — tree-search kickoff and live progress until completion
+
+It then starts **`bfts_root`** with research defaults (`num_seeds=3`,
+`num_drafts=2`, `num_workers=1`). **Do not** run `ideation` and `bfts_root`
+separately in Slack.
 
 ```bash
 call workflow run '{
@@ -25,12 +31,11 @@ call workflow run '{
 ```
 
 Sandbox `call workflow run` sends `X-Centaur-Thread-Key`; pass `thread_key` /
-`delivery` in input when the API pin lacks header enrichment. The child
-`bfts_root` run posts kickoff/progress/completion in that thread.
+`delivery` in input when the API pin lacks header enrichment.
 
-Tell the user **`bfts_run_id`** once (from `output_json` when the parent
-completes, or from workflow logs). **Do not** post your own kickoff/progress
-Slack messages or echo the full idea — `bfts_root` owns notifications.
+Tell the user **`bfts_run_id`** once when `bfts_research` completes (~minutes).
+**Do not** poll workflows for hours. **Do not** post your own kickoff/progress
+Slack messages — the workflows stream them.
 
 **Do not** poll `workflow get` for hours.
 
